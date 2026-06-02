@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/koan.ts","./src/main.tsx","./src/storage.ts","./src/vite-env.d.ts","./vite.config.ts"],"version":"6.0.3"}
+{"root":["./src/app.tsx","./src/cle.ts","./src/koan.ts","./src/main.tsx","./src/storage.ts","./src/vite-env.d.ts","./vite.config.ts"],"version":"6.0.3"}

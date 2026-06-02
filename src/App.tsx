@@ -5,7 +5,6 @@ import {
   CHANGES_URL,
   GENRES,
   GRADE_HISTORY_URL,
-  LIGHT_REFRESH_TTL_MS,
   PORTAL_URL,
   SNAPSHOT_TTL_MS,
   type ChangeItem,
@@ -21,7 +20,24 @@ import {
   refreshSnapshot,
   resolveNoticeUrl,
 } from "./koan";
-import { loadCache, loadGradesCache, saveCache, saveGradesCache } from "./storage";
+import {
+  CLE_CALENDAR_URL,
+  CLE_MESSAGES_URL,
+  EMPTY_CLE_DATA,
+  type CleData,
+  type CleTask,
+  cleMessageUrl,
+  cleTaskUrl,
+  refreshCle,
+} from "./cle";
+import {
+  loadCache,
+  loadCleCache,
+  loadGradesCache,
+  saveCache,
+  saveCleCache,
+  saveGradesCache,
+} from "./storage";
 
 const EMPTY = {
   schedule: [],
@@ -50,15 +66,21 @@ function App() {
     ...loadCache<KoanData>(),
   }));
   const [loading, setLoading] = useState(false);
+  const [cleData, setCleData] = useState<CleData>(() => ({
+    ...EMPTY_CLE_DATA,
+    ...loadCleCache<CleData>(),
+  }));
+  const [cleLoading, setCleLoading] = useState(false);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [status, setStatus] = useState("");
+  const [cleStatus, setCleStatus] = useState("");
   const [progress, setProgress] = useState("");
   const [query, setQuery] = useState("");
   const [genre, setGenre] = useState("");
   const [scope, setScope] = useState("attention");
   const [view, setView] = useState<"dashboard" | "grades">("dashboard");
 
-  const update = async () => {
+  const updateKoan = async () => {
     setLoading(true);
     setStatus("更新中");
     try {
@@ -74,6 +96,25 @@ function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const updateCle = async () => {
+    setCleLoading(true);
+    setCleStatus("CLE更新中");
+    try {
+      const next = await refreshCle();
+      setCleData(next);
+      saveCleCache(next);
+      setCleStatus("CLE更新済み");
+    } catch (error) {
+      setCleStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCleLoading(false);
+    }
+  };
+
+  const update = async () => {
+    await Promise.allSettled([updateKoan(), updateCle()]);
   };
 
   const syncSnapshot = async () => {
@@ -100,7 +141,7 @@ function App() {
   };
 
   useEffect(() => {
-    if (isExpired(data.lightUpdatedAt, LIGHT_REFRESH_TTL_MS)) update();
+    void update();
   }, []);
 
   const notices = useMemo(() => {
@@ -148,9 +189,9 @@ function App() {
           </button>
         </nav>
         <div className="header-actions">
-          <small>{status || `更新 ${fmtTime(data.lightUpdatedAt)}`}</small>
+          <small>{status || cleStatus || `更新 ${fmtTime(data.lightUpdatedAt)}`}</small>
           <a href={PORTAL_URL} target="_blank">KOAN</a>
-          <button type="button" disabled={loading} onClick={update}>
+          <button type="button" disabled={loading || cleLoading} onClick={update}>
             更新
           </button>
         </div>
@@ -159,6 +200,8 @@ function App() {
       <main>
         {view === "dashboard" ? (
           <>
+        <CleAttention data={cleData} loading={cleLoading} status={cleStatus} />
+
         <section className="summary-grid">
           <Today schedule={data.schedule} />
           <Changes changes={data.changes} />
@@ -205,6 +248,76 @@ function App() {
         ) : <Grades />}
       </main>
     </>
+  );
+}
+
+function fmtDue(value: string) {
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function CleAttention({
+  data,
+  loading,
+  status,
+}: {
+  data: CleData;
+  loading: boolean;
+  status: string;
+}) {
+  const tasks = data.tasks
+    .filter((task) => !["提出済み", "採点済み"].includes(task.status))
+    .slice(0, 8);
+  return (
+    <section className="section cle-attention">
+      <div className="section-heading">
+        <div>
+          <h2>要対応</h2>
+          <p>CLE取得 {fmtTime(data.updatedAt)}{status ? ` / ${status}` : ""}</p>
+        </div>
+        <a className="detail-link" href={CLE_CALENDAR_URL} target="_blank">CLEカレンダー</a>
+      </div>
+      <div className="cle-grid">
+        <div className="cle-tasks">
+          <h3>CLE課題</h3>
+          {tasks.length ? tasks.map((task) => <CleTaskRow task={task} key={task.id} />) : (
+            <p className="empty">{loading ? "取得中です。" : "要対応の課題はありません。"}</p>
+          )}
+        </div>
+        <div className="cle-messages">
+          <div className="cle-message-heading">
+            <div>
+              <h3>CLEメッセージ</h3>
+              <p>{data.unreadMessages}件未読</p>
+            </div>
+            <a className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</a>
+          </div>
+          {data.messages.length ? data.messages.slice(0, 8).map((message) => (
+            <a className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
+              <span>{message.courseName}</span>
+              <b>{message.unreadCount}</b>
+            </a>
+          )) : <p className="empty">{loading ? "取得中です。" : "未読メッセージはありません。"}</p>}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CleTaskRow({ task }: { task: CleTask }) {
+  const overdue = new Date(task.dueAt).getTime() < Date.now();
+  return (
+    <a className="cle-task-row" href={cleTaskUrl(task)} target="_blank">
+      <b className={overdue ? "overdue" : ""}>{task.status}</b>
+      <span>
+        {task.title}
+        <small>{task.courseName} / {fmtDue(task.dueAt)} 締切</small>
+      </span>
+    </a>
   );
 }
 

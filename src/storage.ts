@@ -1,5 +1,6 @@
 const CACHE_KEY = "koan-plus-cache-v2";
 const GRADES_CACHE_KEY = "koan-plus-grades-v1";
+const CLE_CACHE_KEY = "koan-plus-cle-v1";
 
 export function loadCache<T>(): T | null {
   try {
@@ -25,4 +26,17 @@ export function loadGradesCache<T>(): T | null {
 
 export function saveGradesCache<T>(cache: T) {
   localStorage.setItem(GRADES_CACHE_KEY, JSON.stringify(cache));
+}
+
+export function loadCleCache<T>(): T | null {
+  try {
+    const value = localStorage.getItem(CLE_CACHE_KEY);
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveCleCache<T>(cache: T) {
+  localStorage.setItem(CLE_CACHE_KEY, JSON.stringify(cache));
 }

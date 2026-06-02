@@ -118,6 +118,115 @@ main {
   grid-template-columns: 1fr 1fr;
 }
 
+.cle-attention {
+  border-top: 3px solid #ad4029;
+  margin-bottom: 12px;
+}
+
+.cle-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+}
+
+.cle-tasks,
+.cle-messages {
+  padding: 12px 13px;
+}
+
+.cle-messages {
+  border-left: 1px solid #dedbd4;
+}
+
+.cle-tasks h3,
+.cle-messages h3 {
+  color: #173e32;
+  font-family: Georgia, "Yu Mincho", serif;
+  font-size: 15px;
+}
+
+.cle-task-row {
+  align-items: start;
+  color: #17211d;
+  display: grid;
+  gap: 9px;
+  grid-template-columns: max-content 1fr;
+  padding: 9px 0;
+  text-decoration: none;
+}
+
+.cle-task-row + .cle-task-row,
+.cle-message-row + .cle-message-row {
+  border-top: 1px solid #ebe8e0;
+}
+
+.cle-task-row:hover span,
+.cle-message-heading a:hover {
+  color: #ad4029;
+}
+
+.cle-task-row b {
+  border: 1px solid #d59561;
+  color: #a55c28;
+  font-size: 10px;
+  padding: 3px 5px;
+}
+
+.cle-task-row b.overdue {
+  border-color: #c95234;
+  color: #ad4029;
+}
+
+.cle-task-row span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cle-task-row small {
+  color: #718078;
+  display: block;
+  font-size: 10px;
+  font-weight: 400;
+  margin-top: 2px;
+}
+
+.cle-message-heading {
+  align-items: start;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 5px;
+}
+
+.cle-message-heading p {
+  color: #ad4029;
+  font-family: Georgia, "Yu Mincho", serif;
+  font-size: 20px;
+  margin-top: 2px;
+}
+
+.cle-message-row {
+  align-items: center;
+  color: #17211d;
+  display: flex;
+  font-size: 11px;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 7px 0;
+  text-decoration: none;
+}
+
+.cle-message-row:hover span {
+  color: #ad4029;
+}
+
+.cle-message-row b {
+  background: #ad4029;
+  color: #fffdf8;
+  font-size: 10px;
+  min-width: 20px;
+  padding: 2px 5px;
+  text-align: center;
+}
+
 .section {
   background: #fffdf8;
   border: 1px solid #d7d5cf;
@@ -516,6 +625,15 @@ h2 {
 }
 
 @media (max-width: 900px) {
+  .cle-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cle-messages {
+    border-left: 0;
+    border-top: 1px solid #dedbd4;
+  }
+
   .summary-grid {
     grid-template-columns: 1fr;
   }

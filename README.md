@@ -5,11 +5,18 @@ readable dashboard. Ordinary KOAN pages are left unchanged.
 
 ## Data strategy
 
-The dashboard separates low-cost refreshes from bulletin snapshots.
+The dashboard fetches low-cost KOAN and CLE summaries when it opens and when
+the user presses **更新**. Bulletin snapshots remain separately controlled.
 
 - A lightweight refresh requests the KOAN portal, this week's class changes,
-  and the unread bulletin list. It is reused for 10 minutes. The cooldown is
-  enforced in the request layer across dashboard tabs.
+  and the unread bulletin list. A 10-minute cooldown is enforced in the request
+  layer across dashboard tabs to avoid duplicate requests from repeated opens.
+- A CLE refresh runs through an open, logged-in CLE tab. It requests the CLE
+  calendar and message-summary endpoints, then checks submission state only for
+  nearby assignment deadlines. CLE requests are GET-only.
+- CLE message bodies and assignment bodies are never fetched or stored. The
+  local cache contains assignment metadata, submission-state labels, and
+  per-course unread message counts.
 - A bulletin snapshot is run only when the user presses **掲示を同期**. It starts
   independent bulletin-board flows for each genre, follows pagination, waits
   at least 750 ms between page requests, and stores list metadata locally.
@@ -27,8 +34,9 @@ The dashboard separates low-cost refreshes from bulletin snapshots.
   stored by KOAN Plus.
 - Cache data stays in the extension origin's `localStorage`.
 - Fetch helpers reject destinations outside `https://koan.osaka-u.ac.jp`.
+  CLE requests are separately restricted to `https://www.cle.osaka-u.ac.jp/learn/api/`.
 - Every KOAN HTTP request is aborted after 15 seconds. The extension contains
-  no timers or background jobs that periodically scrape KOAN.
+  no timers or background jobs that periodically scrape KOAN or CLE.
 - Failed operations also have retry delays: 1 minute for lightweight and grade
   refreshes, 10 minutes for bulletin snapshots, and 10 seconds for opening a
   bulletin detail.
