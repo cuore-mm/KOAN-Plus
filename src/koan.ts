@@ -1,5 +1,6 @@
 const BASE_URL = "https://koan.osaka-u.ac.jp/campusweb/";
 export const PORTAL_URL = `${BASE_URL}campusportal.do?page=main`;
+export const SCHEDULE_URL = `${BASE_URL}campussquare.do?_flowId=PTW0001200-flow`;
 export const CHANGES_URL = `${BASE_URL}campussquare.do?_flowId=KHW0001100-flow`;
 export const BOARD_URL = `${BASE_URL}campussquare.do?_flowId=KJW0001100-flow`;
 export const GRADE_HISTORY_URL = `${BASE_URL}campussquare.do?_flowId=SIW0001200-flow`;
@@ -55,7 +56,7 @@ export const ACTIONS = [
   url: `${BASE_URL}campussquare.do?_flowId=${flowId}`,
 }));
 
-export type ScheduleItem = { period: string; title: string; room: string };
+export type ScheduleItem = { date?: string; period: string; title: string; room: string };
 export type ChangeItem = { type: string; date: string; period: string; course: string };
 export type Notice = {
   title: string;
@@ -285,6 +286,31 @@ function parseSchedule(doc: Document): ScheduleItem[] {
     });
 }
 
+function calendarDate(cell: Element) {
+  const onclick = cell.querySelector(".cal-head-img a")?.getAttribute("onclick") || "";
+  const match = onclick.match(/addSchedule\((\d{4})(\d{2})(\d{2})\)/);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : "";
+}
+
+function parseWeeklySchedule(doc: Document): ScheduleItem[] {
+  const calendar = doc.getElementById("schedule-calender");
+  if (!calendar) return [];
+  return [...calendar.querySelectorAll(":scope > tbody > tr > td")]
+    .flatMap((cell) => {
+      const date = calendarDate(cell);
+      if (!date) return [];
+      return [...cell.querySelectorAll(".cal-content .kaiko")]
+        .map((item) => normalize(item.textContent))
+        .filter(Boolean)
+        .map((text) => {
+          const match = text.match(/^(\d+)限:\s*(.+?)(?:\s*@\s*(.+))?$/);
+          return match
+            ? { date, period: `${match[1]}限`, title: match[2], room: match[3] || "" }
+            : { date, period: "", title: text, room: "" };
+        });
+    });
+}
+
 function parseCellCourse(cell: Element) {
   const text = normalize(cell.textContent);
   const details = [...cell.querySelectorAll("td")]
@@ -420,8 +446,9 @@ export async function refreshLight(previousNotices: Notice[] = []) {
   const release = acquireLease(LIGHT_LEASE_KEY, REQUEST_TIMEOUT_MS + 5000, "別の画面で通常更新中です。");
   localStorage.setItem(LIGHT_ATTEMPT_KEY, String(Date.now()));
   try {
-    const [portal, changes, board] = await Promise.all([
+    const [portal, schedule, changes, board] = await Promise.all([
       fetchHtml(PORTAL_URL),
+      fetchHtml(SCHEDULE_URL),
       fetchHtml(CHANGES_URL),
       fetchHtml(BOARD_URL),
     ]);
@@ -432,8 +459,9 @@ export async function refreshLight(previousNotices: Notice[] = []) {
       isNew: !oldKeys.has(noticeKey(notice)),
     }));
     localStorage.setItem(LIGHT_COMPLETED_KEY, String(Date.now()));
+    const weeklySchedule = parseWeeklySchedule(schedule.doc);
     return {
-      schedule: parseSchedule(portal.doc),
+      schedule: weeklySchedule.length ? weeklySchedule : parseSchedule(portal.doc),
       changes: parseChanges(changes.doc),
       notices: mergeNotices([
         ...previousNotices.map((notice) => ({

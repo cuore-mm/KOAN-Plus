@@ -3,11 +3,11 @@ import jsQR from "jsqr";
 import {
   ACTIONS,
   BOARD_URL,
-  CHANGES_URL,
   GENRES,
   GRADE_HISTORY_URL,
   LIGHT_REFRESH_TTL_MS,
   PORTAL_URL,
+  SCHEDULE_URL,
   SNAPSHOT_TTL_MS,
   type ChangeItem,
   type GradeData,
@@ -249,7 +249,7 @@ function App() {
 
         <section className="dashboard-columns">
           <div className="dashboard-lane">
-            <TodayAgenda schedule={data.schedule} changes={data.changes} />
+            <WeeklyAgenda schedule={data.schedule} changes={data.changes} />
             <NewActivity
               loading={cleLoading}
               messages={cleData.messages}
@@ -670,18 +670,21 @@ function Grades() {
           </section>
 
           {!!data.termGpas.length && (
-            <section className="section grade-section compact-section">
-              <div className="section-heading"><h2>学期 GPA</h2></div>
-              <table className="record-table">
-                <thead><tr><th>年度</th><th>学期</th><th>GPA</th></tr></thead>
-                <tbody>
-                  {data.termGpas.map((item, index) => (
-                    <tr key={`${item.year}-${item.term}-${index}`}>
-                      <td>{item.year}</td><td>{item.term}</td><td>{item.gpa}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <section className="grade-gpa-grid">
+              <div className="section grade-section compact-section">
+                <div className="section-heading"><h2>学期 GPA</h2></div>
+                <table className="record-table">
+                  <thead><tr><th>年度</th><th>学期</th><th>GPA</th></tr></thead>
+                  <tbody>
+                    {data.termGpas.map((item, index) => (
+                      <tr key={`${item.year}-${item.term}-${index}`}>
+                        <td>{item.year}</td><td>{item.term}</td><td>{item.gpa}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <GpaTrend courses={data.courses} termGpas={data.termGpas} />
             </section>
           )}
 
@@ -710,6 +713,89 @@ function Grades() {
   );
 }
 
+function halfTerm(value: string) {
+  return /春|夏/.test(value) ? "前期" : /秋|冬/.test(value) ? "後期" : "";
+}
+
+function GpaTrend({
+  courses,
+  termGpas,
+}: {
+  courses: GradeData["courses"];
+  termGpas: GradeData["termGpas"];
+}) {
+  const termCredits = new Map<string, number>();
+  for (const course of courses) {
+    const key = `${course.year}-${course.term}`;
+    termCredits.set(key, (termCredits.get(key) || 0) + course.credits);
+  }
+  const grouped = new Map<string, { credits: number; qualityPoints: number }>();
+  for (const item of termGpas) {
+    const half = halfTerm(item.term);
+    const gpa = Number.parseFloat(item.gpa);
+    const credits = termCredits.get(`${item.year}-${item.term}`) || 0;
+    if (!half || !Number.isFinite(gpa) || credits <= 0) continue;
+    const key = `${item.year}-${half}`;
+    const current = grouped.get(key) || { credits: 0, qualityPoints: 0 };
+    grouped.set(key, {
+      credits: current.credits + credits,
+      qualityPoints: current.qualityPoints + gpa * credits,
+    });
+  }
+  let cumulativeCredits = 0;
+  let cumulativeQualityPoints = 0;
+  const points = [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, values]) => {
+      const [year, half] = key.split("-");
+      cumulativeCredits += values.credits;
+      cumulativeQualityPoints += values.qualityPoints;
+      return {
+        cumulative: cumulativeQualityPoints / cumulativeCredits,
+        key,
+        label: `${year} ${half}`,
+      };
+    });
+  const width = 590;
+  const height = 285;
+  const margin = { top: 35, right: 20, bottom: 50, left: 42 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const x = (index: number) =>
+    margin.left + (points.length <= 1 ? plotWidth / 2 : (plotWidth * index) / (points.length - 1));
+  const y = (value: number) => margin.top + plotHeight - (plotHeight * value) / 4;
+  const cumulativePolyline = points.map((point, index) => `${x(index)},${y(point.cumulative)}`).join(" ");
+
+  return (
+    <section className="section grade-section gpa-trend">
+      <div className="section-heading">
+        <div>
+          <h2>GPA 推移</h2>
+          <p>前期・後期ごとの時点累積 GPA</p>
+        </div>
+      </div>
+      <div className="gpa-chart">
+        <svg aria-label="前期・後期ごとの時点累積 GPA の推移" role="img" viewBox={`0 0 ${width} ${height}`}>
+          {[0, 1, 2, 3, 4].map((tick) => (
+            <g className="gpa-grid-line" key={tick}>
+              <line x1={margin.left} x2={width - margin.right} y1={y(tick)} y2={y(tick)} />
+              <text x={margin.left - 11} y={y(tick) + 4}>{tick.toFixed(1)}</text>
+            </g>
+          ))}
+          {!!points.length && <polyline className="gpa-line cumulative" points={cumulativePolyline} />}
+          {points.map((point, index) => (
+            <g className="gpa-point cumulative" key={`${point.key}-cumulative`}>
+              <circle cx={x(index)} cy={y(point.cumulative)} r="4" />
+              <text className="gpa-value" x={x(index)} y={y(point.cumulative) - 12}>{point.cumulative.toFixed(2)}</text>
+              <text className="gpa-label" x={x(index)} y={height - 20}>{point.label}</text>
+            </g>
+          ))}
+        </svg>
+      </div>
+    </section>
+  );
+}
+
 function GradeTable({ courses }: { courses: GradeData["courses"] }) {
   return (
     <div className="table-scroll">
@@ -727,63 +813,122 @@ function GradeTable({ courses }: { courses: GradeData["courses"] }) {
   );
 }
 
+const dateKey = (date: Date) =>
+  [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+
+function weekDays() {
+  const today = new Date();
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(monday);
+    date.setDate(monday.getDate() + index);
+    return {
+      key: dateKey(date),
+      label: new Intl.DateTimeFormat("ja-JP", { weekday: "short" }).format(date),
+      shortDate: `${date.getMonth() + 1}/${date.getDate()}`,
+    };
+  });
+}
+
+function changeMatchesDate(change: ChangeItem, date: string) {
+  const match = change.date.match(/(\d{1,2})[\/月](\d{1,2})/);
+  if (!match) return false;
+  const [, month, day] = date.split("-");
+  return Number(month) === Number(match[1]) && Number(day) === Number(match[2]);
+}
+
+function changesForDate(changes: ChangeItem[], date: string, today: string) {
+  return changes.filter(
+    (item) => changeMatchesDate(item, date) || (date === today && item.date === "今週"),
+  );
+}
+
 function changeFor(schedule: ScheduleItem, changes: ChangeItem[]) {
   return changes.find((change) => {
+    const sameDate = !schedule.date || changeMatchesDate(change, schedule.date);
     const samePeriod = change.period && change.period === schedule.period;
     const sameCourse =
       change.course &&
       (change.course.includes(schedule.title) || schedule.title.includes(change.course));
-    return samePeriod && sameCourse;
+    return sameDate && samePeriod && sameCourse;
   });
 }
 
-function TodayAgenda({
+function WeeklyAgenda({
   schedule,
   changes,
 }: {
   schedule: ScheduleItem[];
   changes: ChangeItem[];
 }) {
+  const days = useMemo(weekDays, []);
+  const today = dateKey(new Date());
+  const [selectedDate, setSelectedDate] = useState(today);
+  const selectedSchedule = schedule.filter((item) => (item.date || today) === selectedDate);
+  const selectedChanges = changesForDate(changes, selectedDate, today);
+  const unmatchedChanges = selectedChanges.filter(
+    (change) => !selectedSchedule.some((item) => changeFor(item, [change])),
+  );
+  const selectedDay = days.find((day) => day.key === selectedDate) || days[0];
   return (
     <section className="section today-agenda">
       <div className="section-heading">
         <div>
-          <h2>今日</h2>
+          <h2>今週の時間割</h2>
         </div>
-        <span className="today-date">{fmtToday()}</span>
+        <a className="detail-link" href={SCHEDULE_URL} target="_blank">KOANで確認</a>
       </div>
-      <div className="today-body">
-        <div className="agenda-column">
-          <h3>時間割 <b>{schedule.length}</b></h3>
-          <div className="agenda-rows">
-            {schedule.length ? schedule.map((item, index) => {
-              const change = changeFor(item, changes);
-              return (
-                <div className="schedule-row" key={`${item.period}-${index}`}>
-                  <b>{item.period}</b>
-                  <span>
-                    {item.title}
-                    <small>{item.room}</small>
-                    {change && <em>{change.type} / {change.date}</em>}
-                  </span>
-                </div>
-              );
-            }) : <p className="empty">今日の授業はありません。</p>}
-          </div>
+      <div className="week-tabs" role="tablist" aria-label="表示する曜日">
+        {days.map((day) => {
+          const daySchedule = schedule.filter((item) => (item.date || today) === day.key);
+          const dayChanges = changesForDate(changes, day.key, today);
+          return (
+            <button
+              aria-selected={day.key === selectedDate}
+              className={day.key === selectedDate ? "active" : ""}
+              key={day.key}
+              onClick={() => setSelectedDate(day.key)}
+              role="tab"
+              type="button"
+            >
+              <span>{day.label}</span>
+              <small>{day.shortDate}</small>
+              <b>{daySchedule.length}</b>
+              {dayChanges.length > 0 && <em>{dayChanges.length}</em>}
+            </button>
+          );
+        })}
+      </div>
+      <div className="agenda-column weekly-agenda-column">
+        <div className="column-heading">
+          <h3>{selectedDay.shortDate}（{selectedDay.label}） <b>{selectedSchedule.length}</b></h3>
+          {selectedChanges.length > 0 && <span className="change-summary">変更 {selectedChanges.length}</span>}
         </div>
-        <div className="changes-column">
-          <div className="column-heading">
-            <h3>今週の変更 <b>{changes.length}</b></h3>
-            <a className="detail-link" href={CHANGES_URL} target="_blank">KOANで確認</a>
-          </div>
-          <div className="agenda-rows">
-            {changes.length ? changes.map((item, index) => (
-              <div className="change-row" key={`${item.date}-${item.period}-${index}`}>
-                <b>{item.type}</b>
-                <span>{item.date} {item.period}<small>{item.course}</small></span>
+        <div className="agenda-rows">
+          {selectedSchedule.length ? selectedSchedule.map((item, index) => {
+            const change = changeFor(item, selectedChanges);
+            return (
+              <div className="schedule-row" key={`${item.period}-${index}`}>
+                <b>{item.period}</b>
+                <span>
+                  {item.title}
+                  <small>{item.room}</small>
+                  {change && <em>{change.type}</em>}
+                </span>
               </div>
-            )) : <p className="empty">今週の変更はありません。</p>}
-          </div>
+            );
+          }) : <p className="empty">この日の授業はありません。</p>}
+          {unmatchedChanges.map((item, index) => (
+            <div className="change-row" key={`${item.date}-${item.period}-${index}`}>
+              <b>{item.type}</b>
+              <span>{item.period}<small>{item.course}</small></span>
+            </div>
+          ))}
         </div>
       </div>
     </section>

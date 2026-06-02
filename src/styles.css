@@ -228,6 +228,79 @@ main {
   overflow: auto;
 }
 
+.week-tabs {
+  border-bottom: 1px solid #dedbd4;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.week-tabs button {
+  background: #f8f5ee;
+  border: 0;
+  border-right: 1px solid #dedbd4;
+  color: #52645c;
+  cursor: pointer;
+  display: grid;
+  gap: 1px;
+  justify-items: center;
+  min-width: 0;
+  padding: 7px 3px 6px;
+  position: relative;
+}
+
+.week-tabs button:last-child {
+  border-right: 0;
+}
+
+.week-tabs button:hover,
+.week-tabs button.active {
+  background: #eef3ef;
+  color: #173e32;
+}
+
+.week-tabs button.active {
+  box-shadow: inset 0 -3px #245445;
+}
+
+.week-tabs span {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.week-tabs small {
+  font-size: 9px;
+}
+
+.week-tabs b {
+  color: #245445;
+  font-family: Georgia, serif;
+  font-size: 14px;
+}
+
+.week-tabs em {
+  background: #ad4029;
+  border-radius: 9px;
+  color: #fff;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 16px;
+  min-width: 16px;
+  position: absolute;
+  right: 5px;
+  top: 5px;
+}
+
+.weekly-agenda-column {
+  padding-top: 10px;
+}
+
+.change-summary {
+  color: #ad4029;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .task-list {
   padding: 5px 13px 8px;
 }
@@ -977,10 +1050,87 @@ h2 {
   max-width: 520px;
 }
 
+.grade-gpa-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(360px, 0.85fr) minmax(0, 1.15fr);
+}
+
+.grade-gpa-grid .compact-section {
+  max-width: none;
+}
+
+.gpa-trend {
+  min-width: 0;
+}
+
+.gpa-chart {
+  padding: 8px 12px 4px;
+}
+
+.gpa-chart svg {
+  display: block;
+  height: auto;
+  overflow: visible;
+  width: 100%;
+}
+
+.gpa-grid-line line {
+  stroke: #e6e2da;
+  stroke-width: 1;
+}
+
+.gpa-grid-line text {
+  fill: #8d9b95;
+  font-family: Georgia, serif;
+  font-size: 10px;
+  text-anchor: end;
+}
+
+.gpa-line {
+  fill: none;
+  stroke: #245445;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.gpa-line.cumulative {
+  stroke: #245445;
+  stroke-width: 3;
+}
+
+.gpa-point.cumulative circle {
+  fill: #fffdf8;
+  stroke: #ad4029;
+  stroke-width: 3;
+}
+
+.gpa-point text {
+  text-anchor: middle;
+}
+
+.gpa-value {
+  fill: #ad4029;
+  font-family: Georgia, serif;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.gpa-point.cumulative .gpa-value {
+  fill: #ad4029;
+}
+
+.gpa-label {
+  fill: #52645c;
+  font-size: 10px;
+}
+
 @media (max-width: 900px) {
   .dashboard-columns,
   .today-body,
-  .activity-grid {
+  .activity-grid,
+  .grade-gpa-grid {
     grid-template-columns: 1fr;
   }
 
