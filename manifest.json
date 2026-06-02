@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "KOAN Plus",
+  "version": "0.2.0",
+  "description": "Development loader for KOAN Plus. Run npm run build and load dist/ for normal use.",
+  "action": {
+    "default_title": "Open KOAN Plus development guide"
+  },
+  "background": {
+    "service_worker": "dev-loader.js"
+  }
+}
