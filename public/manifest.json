@@ -11,10 +11,25 @@
   },
   "permissions": [
     "scripting",
+    "storage",
     "tabs"
   ],
   "host_permissions": [
     "https://koan.osaka-u.ac.jp/*",
-    "https://www.cle.osaka-u.ac.jp/*"
+    "https://www.cle.osaka-u.ac.jp/*",
+    "https://ou-idp.auth.osaka-u.ac.jp/*",
+    "https://auth-mfa.auth.osaka-u.ac.jp/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://ou-idp.auth.osaka-u.ac.jp/idp/*",
+        "https://auth-mfa.auth.osaka-u.ac.jp/*"
+      ],
+      "js": [
+        "auth-content.js"
+      ],
+      "run_at": "document_idle"
+    }
   ]
 }

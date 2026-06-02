@@ -324,6 +324,197 @@ main {
   text-decoration: none;
 }
 
+.settings-page {
+  max-width: 900px;
+}
+
+.settings-intro {
+  align-items: center;
+}
+
+.settings-intro p {
+  color: #718078;
+  margin: 0;
+}
+
+.auth-state {
+  border: 1px solid #c9c7c1;
+  color: #718078;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.auth-state.ready {
+  border-color: #6e9b87;
+  color: #245445;
+}
+
+.settings-section {
+  border-top: 3px solid #245445;
+  padding-bottom: 15px;
+}
+
+.setting-toggle {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  padding: 15px 13px 3px;
+}
+
+.setting-toggle input {
+  accent-color: #245445;
+}
+
+.secondary-toggle {
+  color: #52645c;
+  font-size: 12px;
+  padding-top: 10px;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 12px;
+  max-width: 560px;
+  padding: 14px 13px 4px;
+}
+
+.settings-grid label span,
+.settings-grid small {
+  display: block;
+}
+
+.mfa-settings {
+  border-top: 1px solid #dedbd4;
+  margin: 15px 13px 0;
+  max-width: 700px;
+  padding-top: 14px;
+}
+
+.mfa-settings h3 {
+  color: #173e32;
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+
+.mfa-toggle {
+  padding: 0 0 5px;
+}
+
+.mfa-settings p,
+.mfa-consent {
+  color: #52645c;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.qr-import {
+  display: block;
+  margin-top: 10px;
+}
+
+.qr-import input {
+  display: block;
+  font-size: 12px;
+  margin-top: 5px;
+}
+
+.qr-import small {
+  color: #718078;
+  display: block;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.mfa-settings p {
+  margin: 0 0 11px;
+}
+
+.mfa-settings label span {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.mfa-settings input[type="text"],
+.mfa-settings input:not([type]) {
+  background: #fffefa;
+  border: 1px solid #c9c7c1;
+  padding: 8px 9px;
+  width: 100%;
+}
+
+.mfa-consent {
+  align-items: start;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: max-content 1fr;
+  margin-top: 10px;
+}
+
+.mfa-consent input {
+  accent-color: #245445;
+  margin-top: 4px;
+}
+
+.mfa-consent span {
+  color: #ad4029;
+  font-weight: 400 !important;
+}
+
+.settings-grid label span {
+  color: #52645c;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.settings-grid input {
+  background: #fffefa;
+  border: 1px solid #c9c7c1;
+  padding: 8px 9px;
+  width: 100%;
+}
+
+.settings-grid small {
+  color: #718078;
+  font-size: 11px;
+  line-height: 1.6;
+  margin-top: 4px;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  padding: 16px 13px 0;
+}
+
+.settings-actions button {
+  border-color: #8d9b95;
+  color: #245445;
+}
+
+.settings-status {
+  color: #52645c;
+  margin: 12px 13px 0;
+}
+
+.settings-note {
+  color: #52645c;
+  line-height: 1.7;
+  padding: 15px 13px;
+}
+
+.settings-note h2 {
+  color: #173e32;
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+
+.settings-note p {
+  margin: 0;
+}
+
 .quick-links-grid a:nth-child(odd) {
   border-right: 1px solid #ebe8e0;
 }

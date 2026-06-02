@@ -1,6 +1,6 @@
 const CLE_ORIGIN = "https://www.cle.osaka-u.ac.jp";
 const API_ORIGIN = `${CLE_ORIGIN}/learn/api`;
-const REQUEST_TIMEOUT_MS = 20 * 1000;
+const REQUEST_TIMEOUT_MS = 30 * 1000;
 const MAX_MESSAGE_PAGES = 8;
 const TASK_STATUS_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_STATUS_REQUESTS = 12;
@@ -105,7 +105,7 @@ async function withTimeout<T>(task: Promise<T>, milliseconds: number) {
       task,
       new Promise<never>((_, reject) => {
         timeoutId = window.setTimeout(
-          () => reject(new Error("CLEの取得が20秒以内に完了しませんでした。")),
+          () => reject(new Error("CLE APIの応答が30秒以内に返りませんでした。CLEタブを再読み込みして再試行してください。")),
           milliseconds,
         );
       }),
@@ -115,7 +115,7 @@ async function withTimeout<T>(task: Promise<T>, milliseconds: number) {
   }
 }
 
-async function fetchJson(url: string) {
+async function fetchJson(url: string, tabId?: number) {
   requireCleApiUrl(url);
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
     throw new Error("CLE取得はChrome拡張機能から実行してください。");
@@ -124,6 +124,7 @@ async function fetchJson(url: string) {
     chrome.runtime.sendMessage({
       type: "cle-fetch",
       request: { url, options: { method: "GET" } },
+      tabId,
     }) as Promise<CleTabMessage>,
     REQUEST_TIMEOUT_MS,
   );
@@ -152,12 +153,12 @@ function taskStatus(attemptsResponse: unknown, gradeResponse: unknown, dueAt: st
   return "未着手";
 }
 
-async function fetchTaskStatus(task: CleTask): Promise<CleTask> {
+async function fetchTaskStatus(task: CleTask, tabId?: number): Promise<CleTask> {
   try {
     const path = `${API_ORIGIN}/public/v2/courses/${encodeURIComponent(task.courseId)}/gradebook/columns/${encodeURIComponent(task.id)}`;
     const [grade, attempts] = await Promise.all([
-      fetchJson(`${path}/users/me`),
-      fetchJson(`${path}/attempts?limit=10`),
+      fetchJson(`${path}/users/me`, tabId),
+      fetchJson(`${path}/attempts?limit=10`, tabId),
     ]);
     return { ...task, status: taskStatus(attempts, grade, task.dueAt) };
   } catch {
@@ -165,7 +166,7 @@ async function fetchTaskStatus(task: CleTask): Promise<CleTask> {
   }
 }
 
-async function fetchTasks() {
+async function fetchTasks(tabId?: number) {
   const since = new Date(Date.now() - TASK_STATUS_WINDOW_MS).toISOString();
   const until = new Date(Date.now() + 8 * 7 * 24 * 60 * 60 * 1000).toISOString();
   const params = new URLSearchParams({
@@ -173,7 +174,7 @@ async function fetchTasks() {
     until,
     fields: "id,type,calendarId,calendarName,title,start,end,dynamicCalendarItemProps",
   });
-  const response = await fetchJson(`${API_ORIGIN}/public/v1/calendars/items?${params}`);
+  const response = await fetchJson(`${API_ORIGIN}/public/v1/calendars/items?${params}`, tabId);
   const tasks = results(response)
     .filter((item) => asString(item.type) === "GradebookColumn")
     .map((item): CleTask => ({
@@ -193,17 +194,18 @@ async function fetchTasks() {
     .slice(0, MAX_STATUS_REQUESTS);
   const statuses = new Map<string, CleTask>();
   for (const task of statusTargets) {
-    const status = await fetchTaskStatus(task);
+    const status = await fetchTaskStatus(task, tabId);
     statuses.set(status.id, status);
   }
   return tasks.map((task) => statuses.get(task.id) || task);
 }
 
-async function fetchMessages() {
+async function fetchMessages(tabId?: number) {
   const messages = new Map<string, CleMessageCourse>();
   for (let page = 0; page < MAX_MESSAGE_PAGES; page += 1) {
     const response = await fetchJson(
       `${API_ORIGIN}/v1/messages/summary?offset=${page * 25}&limit=25`,
+      tabId,
     );
     const items = results(response);
     for (const item of items) {
@@ -224,10 +226,10 @@ async function fetchMessages() {
   );
 }
 
-export async function refreshCle(): Promise<CleData> {
+export async function refreshCle(tabId?: number): Promise<CleData> {
   const release = acquireLease();
   try {
-    const [tasks, messages] = await Promise.all([fetchTasks(), fetchMessages()]);
+    const [tasks, messages] = await Promise.all([fetchTasks(tabId), fetchMessages(tabId)]);
     return {
       tasks,
       messages,

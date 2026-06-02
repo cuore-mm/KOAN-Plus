@@ -32,6 +32,31 @@ the user presses **更新**. Bulletin snapshots remain separately controlled.
   is limited to one request chain at a time, 12 pages, and 1 minute.
 - Authentication cookies remain managed by the browser. They are not read or
   stored by KOAN Plus.
+- Optional IT authentication auto-login can be enabled from the settings tab.
+  The extension encrypts the university ID and password locally with AES-GCM
+  using a non-extractable Web Crypto key stored with the ciphertext in the
+  extension's IndexedDB. The content script is limited to Osaka University's
+  IdP and MFA origins.
+- MFA automation is separately optional and requires an explicit risk consent.
+  If enabled, KOAN Plus stores the TOTP secret inside the same encrypted vault
+  and generates the six-digit RFC 6238 code locally. Keeping the password and
+  TOTP secret on one device is more convenient but weakens the separation
+  between authentication factors.
+- The settings tab can read an `otpauth://totp/` QR image locally with Chrome's
+  barcode detector. QR images are never uploaded.
+- Before a KOAN refresh, the dashboard checks whether the KOAN session is
+  active. If authentication is needed and auto-login is configured, it opens
+  the Osaka University login flow in an inactive tab, waits for completion,
+  and then refreshes.
+- KOAN refresh runs before CLE refresh so the two SSO flows do not compete.
+  CLE login also uses an inactive tab. That CLE tab remains open in the
+  background because CLE API requests must run inside a CLE page context.
+- If a CLE tab exists but its API session has expired, KOAN Plus sends that tab
+  back through CLE login and retries the CLE refresh once. After two stable API
+  probes, subsequent requests stay pinned to that authenticated CLE tab.
+- When auto-login is disabled, authentication tabs opened by KOAN Plus remain
+  interactive and return focus to the originating KOAN Plus tab after login.
+  University pages opened directly by the user are never redirected back.
 - Cache data stays in the extension origin's `localStorage`.
 - Fetch helpers reject destinations outside `https://koan.osaka-u.ac.jp`.
   CLE requests are separately restricted to `https://www.cle.osaka-u.ac.jp/learn/api/`.
