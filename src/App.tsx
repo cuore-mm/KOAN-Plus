@@ -60,6 +60,13 @@ const fmtTime = (value: string | null) =>
 const isExpired = (value: string | null, ttl: number) =>
   !value || Date.now() - new Date(value).getTime() >= ttl;
 
+const fmtToday = () =>
+  new Intl.DateTimeFormat("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    weekday: "short",
+  }).format(new Date());
+
 function App() {
   const [data, setData] = useState<KoanData>(() => ({
     ...EMPTY,
@@ -78,7 +85,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [genre, setGenre] = useState("");
   const [scope, setScope] = useState("attention");
-  const [view, setView] = useState<"dashboard" | "grades">("dashboard");
+  const [view, setView] = useState<"dashboard" | "reference" | "grades">("dashboard");
 
   const updateKoan = async () => {
     setLoading(true);
@@ -184,6 +191,9 @@ function App() {
           <button className={view === "dashboard" ? "active" : ""} type="button" onClick={() => setView("dashboard")}>
             ダッシュボード
           </button>
+          <button className={view === "reference" ? "active" : ""} type="button" onClick={() => setView("reference")}>
+            掲示
+          </button>
           <button className={view === "grades" ? "active" : ""} type="button" onClick={() => setView("grades")}>
             成績
           </button>
@@ -200,51 +210,45 @@ function App() {
       <main>
         {view === "dashboard" ? (
           <>
-        <CleAttention data={cleData} loading={cleLoading} status={cleStatus} />
+        <DashboardIntro
+          tasks={cleData.tasks}
+          notices={data.notices}
+          unreadMessages={cleData.unreadMessages}
+        />
 
-        <section className="summary-grid">
-          <Today schedule={data.schedule} />
-          <Changes changes={data.changes} />
+        <section className="dashboard-columns">
+          <div className="dashboard-lane">
+            <TodayAgenda schedule={data.schedule} changes={data.changes} />
+            <NewActivity
+              loading={cleLoading}
+              messages={cleData.messages}
+              notices={data.notices}
+              onOpen={markNoticeRead}
+            />
+          </div>
+          <div className="dashboard-lane">
+            <NextActions data={cleData} loading={cleLoading} status={cleStatus} />
+            <QuickLinks />
+          </div>
         </section>
 
-        <section className="section notices-section">
-          <div className="section-heading">
-            <div>
-              <h2>掲示</h2>
-              <p>同期 {fmtTime(data.snapshotUpdatedAt)}{snapshotExpired ? " / 更新推奨" : ""}</p>
-            </div>
-            <strong>{notices.length}</strong>
-          </div>
-          <div className="filters">
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="掲示を検索" />
-            <select value={genre} onChange={(event) => setGenre(event.target.value)}>
-              <option value="">全ジャンル</option>
-              {GENRES.map((item) => <option key={item}>{item}</option>)}
-            </select>
-            <select value={scope} onChange={(event) => setScope(event.target.value)}>
-              <option value="attention">要確認</option>
-              <option value="unread">未読</option>
-              <option value="all">取得済みすべて</option>
-            </select>
-            <button type="button" disabled={snapshotLoading || !snapshotExpired} onClick={syncSnapshot}>
-              {snapshotExpired ? "掲示を同期" : "同期済み"}
-            </button>
-            <span>{progress}</span>
-          </div>
-          <NoticeList notices={notices} onOpen={markNoticeRead} />
-        </section>
-
-        <section className="section actions-section">
-          <div className="section-heading">
-            <h2>操作一覧</h2>
-          </div>
-          <div className="actions-grid">
-            {ACTIONS.map((action) => (
-              <a key={action.label} href={action.url} target="_blank">{action.label}</a>
-            ))}
-          </div>
-        </section>
           </>
+        ) : view === "reference" ? (
+          <ReferenceDesk
+            genre={genre}
+            notices={notices}
+            onGenreChange={setGenre}
+            onOpen={markNoticeRead}
+            onQueryChange={setQuery}
+            onScopeChange={setScope}
+            onSync={syncSnapshot}
+            progress={progress}
+            query={query}
+            scope={scope}
+            snapshotExpired={snapshotExpired}
+            snapshotLoading={snapshotLoading}
+            snapshotUpdatedAt={data.snapshotUpdatedAt}
+          />
         ) : <Grades />}
       </main>
     </>
@@ -255,12 +259,57 @@ function fmtDue(value: string) {
   return new Intl.DateTimeFormat("ja-JP", {
     month: "numeric",
     day: "numeric",
+    weekday: "short",
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
 }
 
-function CleAttention({
+function dueLabel(value: string) {
+  const milliseconds = new Date(value).getTime() - Date.now();
+  const hours = Math.ceil(milliseconds / (60 * 60 * 1000));
+  if (hours < 0) return "期限超過";
+  if (hours <= 24) return hours <= 1 ? "まもなく" : `あと${hours}時間`;
+  return `あと${Math.ceil(hours / 24)}日`;
+}
+
+function courseDisplayName(value: string) {
+  const withoutCode = value.replace(/^[^:]+:\s*\d+\s*/, "");
+  const japanese = withoutCode.split(/\s*\/\s*/)[0];
+  return japanese
+    .replace(/\s*【[^】]*】/g, "")
+    .replace(/\s+[月火水木金土日]\d+\s*$/, "")
+    .trim() || value;
+}
+
+function DashboardIntro({
+  tasks,
+  notices,
+  unreadMessages,
+}: {
+  tasks: CleTask[];
+  notices: Notice[];
+  unreadMessages: number;
+}) {
+  const openTasks = tasks.filter(
+    (task) =>
+      !["提出済み", "採点済み"].includes(task.status) &&
+      new Date(task.dueAt).getTime() >= Date.now(),
+  );
+  const unreadNotices = notices.filter((notice) => notice.unread).length;
+  return (
+    <section className="dashboard-intro">
+      <h1>{fmtToday()}</h1>
+      <div className="dashboard-metrics" aria-label="要確認件数">
+        <div><span>課題</span><strong>{openTasks.length}</strong></div>
+        <div><span>CLE未読</span><strong>{unreadMessages}</strong></div>
+        <div><span>KOAN未読</span><strong>{unreadNotices}</strong></div>
+      </div>
+    </section>
+  );
+}
+
+function NextActions({
   data,
   loading,
   status,
@@ -269,40 +318,35 @@ function CleAttention({
   loading: boolean;
   status: string;
 }) {
-  const tasks = data.tasks
-    .filter((task) => !["提出済み", "採点済み"].includes(task.status))
+  const tasks = data.tasks.filter(
+    (task) => !["提出済み", "採点済み"].includes(task.status),
+  );
+  const upcomingTasks = tasks
+    .filter((task) => new Date(task.dueAt).getTime() >= Date.now())
+    .sort((left, right) => left.dueAt.localeCompare(right.dueAt))
     .slice(0, 8);
+  const expiredTasks = tasks
+    .filter((task) => new Date(task.dueAt).getTime() < Date.now())
+    .sort((left, right) => right.dueAt.localeCompare(left.dueAt));
   return (
-    <section className="section cle-attention">
+    <section className="section next-actions">
       <div className="section-heading">
         <div>
-          <h2>要対応</h2>
+          <h2>次にやること</h2>
           <p>CLE取得 {fmtTime(data.updatedAt)}{status ? ` / ${status}` : ""}</p>
         </div>
         <a className="detail-link" href={CLE_CALENDAR_URL} target="_blank">CLEカレンダー</a>
       </div>
-      <div className="cle-grid">
-        <div className="cle-tasks">
-          <h3>CLE課題</h3>
-          {tasks.length ? tasks.map((task) => <CleTaskRow task={task} key={task.id} />) : (
-            <p className="empty">{loading ? "取得中です。" : "要対応の課題はありません。"}</p>
-          )}
-        </div>
-        <div className="cle-messages">
-          <div className="cle-message-heading">
-            <div>
-              <h3>CLEメッセージ</h3>
-              <p>{data.unreadMessages}件未読</p>
-            </div>
-            <a className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</a>
-          </div>
-          {data.messages.length ? data.messages.slice(0, 8).map((message) => (
-            <a className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
-              <span>{message.courseName}</span>
-              <b>{message.unreadCount}</b>
-            </a>
-          )) : <p className="empty">{loading ? "取得中です。" : "未読メッセージはありません。"}</p>}
-        </div>
+      <div className="task-list">
+        {upcomingTasks.length ? upcomingTasks.map((task) => <CleTaskRow task={task} key={task.id} />) : (
+          <p className="empty">{loading ? "取得中です。" : "期限の近い課題はありません。"}</p>
+        )}
+        {!!expiredTasks.length && (
+          <details className="expired-tasks">
+            <summary>期限切れ <b>{expiredTasks.length}</b></summary>
+            {expiredTasks.map((task) => <CleTaskRow task={task} key={task.id} />)}
+          </details>
+        )}
       </div>
     </section>
   );
@@ -312,12 +356,27 @@ function CleTaskRow({ task }: { task: CleTask }) {
   const overdue = new Date(task.dueAt).getTime() < Date.now();
   return (
     <a className="cle-task-row" href={cleTaskUrl(task)} target="_blank">
-      <b className={overdue ? "overdue" : ""}>{task.status}</b>
+      <time className={overdue ? "overdue" : ""}>{dueLabel(task.dueAt)}</time>
       <span>
         {task.title}
-        <small>{task.courseName} / {fmtDue(task.dueAt)} 締切</small>
+        <small>{courseDisplayName(task.courseName)} / {fmtDue(task.dueAt)}まで / {task.status}</small>
       </span>
     </a>
+  );
+}
+
+function QuickLinks() {
+  return (
+    <section className="section quick-links">
+      <div className="section-heading">
+        <h2>よく使うリンク</h2>
+      </div>
+      <div className="quick-links-grid">
+        {ACTIONS.map((action) => (
+          <a key={action.label} href={action.url} target="_blank">{action.label}</a>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -347,9 +406,7 @@ function Grades() {
     <div className="grades-page">
       <section className="grades-intro">
         <div>
-          <p className="eyebrow">ACADEMIC RECORD</p>
           <h1>成績</h1>
-          <p>履修成績と単位修得状況を照合し、科目小区分ごとに集計します。</p>
         </div>
         <div className="grades-controls">
           <small>{status || (data ? `取得 ${fmtTime(data.updatedAt)}` : "未取得")}</small>
@@ -361,7 +418,6 @@ function Grades() {
       {!data ? (
         <section className="section grades-empty">
           <h2>必要な時だけ取得</h2>
-          <p>取得した成績データは、この端末の拡張機能内にだけ保存します。</p>
         </section>
       ) : (
         <>
@@ -376,7 +432,6 @@ function Grades() {
             <div className="section-heading">
               <div>
                 <h2>科目小区分</h2>
-                <p>卒業要件の確認に使う単位集計</p>
               </div>
               <strong>{data.groups.length}</strong>
             </div>
@@ -413,7 +468,6 @@ function Grades() {
             <div className="section-heading">
               <div>
                 <h2>履修成績</h2>
-                <p>KOANの履修成績照会から取得</p>
               </div>
             </div>
             <div className="table-scroll">
@@ -452,38 +506,211 @@ function GradeTable({ courses }: { courses: GradeData["courses"] }) {
   );
 }
 
-function Today({ schedule }: { schedule: ScheduleItem[] }) {
+function changeFor(schedule: ScheduleItem, changes: ChangeItem[]) {
+  return changes.find((change) => {
+    const samePeriod = change.period && change.period === schedule.period;
+    const sameCourse =
+      change.course &&
+      (change.course.includes(schedule.title) || schedule.title.includes(change.course));
+    return samePeriod && sameCourse;
+  });
+}
+
+function TodayAgenda({
+  schedule,
+  changes,
+}: {
+  schedule: ScheduleItem[];
+  changes: ChangeItem[];
+}) {
   return (
-    <section className="section">
-      <div className="section-heading"><h2>今日の授業</h2></div>
-      <div className="rows">
-        {schedule.length ? schedule.map((item, index) => (
-          <div className="schedule-row" key={`${item.period}-${index}`}>
-            <b>{item.period}</b>
-            <span>{item.title}<small>{item.room}</small></span>
+    <section className="section today-agenda">
+      <div className="section-heading">
+        <div>
+          <h2>今日</h2>
+        </div>
+        <span className="today-date">{fmtToday()}</span>
+      </div>
+      <div className="today-body">
+        <div className="agenda-column">
+          <h3>時間割 <b>{schedule.length}</b></h3>
+          <div className="agenda-rows">
+            {schedule.length ? schedule.map((item, index) => {
+              const change = changeFor(item, changes);
+              return (
+                <div className="schedule-row" key={`${item.period}-${index}`}>
+                  <b>{item.period}</b>
+                  <span>
+                    {item.title}
+                    <small>{item.room}</small>
+                    {change && <em>{change.type} / {change.date}</em>}
+                  </span>
+                </div>
+              );
+            }) : <p className="empty">今日の授業はありません。</p>}
           </div>
-        )) : <p className="empty">予定はありません。</p>}
+        </div>
+        <div className="changes-column">
+          <div className="column-heading">
+            <h3>今週の変更 <b>{changes.length}</b></h3>
+            <a className="detail-link" href={CHANGES_URL} target="_blank">KOANで確認</a>
+          </div>
+          <div className="agenda-rows">
+            {changes.length ? changes.map((item, index) => (
+              <div className="change-row" key={`${item.date}-${item.period}-${index}`}>
+                <b>{item.type}</b>
+                <span>{item.date} {item.period}<small>{item.course}</small></span>
+              </div>
+            )) : <p className="empty">今週の変更はありません。</p>}
+          </div>
+        </div>
       </div>
     </section>
   );
 }
 
-function Changes({ changes }: { changes: ChangeItem[] }) {
+function NewActivity({
+  loading,
+  messages,
+  notices,
+  onOpen,
+}: {
+  loading: boolean;
+  messages: CleData["messages"];
+  notices: Notice[];
+  onOpen: (notice: Notice) => void;
+}) {
+  const latestNotices = notices
+    .filter((notice) => notice.unread || notice.isNew || attentionScore(notice) >= 20)
+    .sort((left, right) => attentionScore(right) - attentionScore(left))
+    .slice(0, 5);
   return (
-    <section className="section">
+    <section className="section activity-section">
       <div className="section-heading">
-        <h2>休講・変更</h2>
-        <a className="detail-link" href={CHANGES_URL} target="_blank">KOANで確認</a>
+        <div>
+          <h2>新着</h2>
+        </div>
       </div>
-      <div className="rows">
-        {changes.length ? changes.map((item, index) => (
-          <div className="change-row" key={`${item.date}-${item.period}-${index}`}>
-            <b>{item.type}</b>
-            <span>{item.date} {item.period}<small>{item.course}</small></span>
+      <div className="activity-grid">
+        <div className="activity-column">
+          <div className="column-heading">
+            <h3>KOAN掲示 <b>{latestNotices.length}</b></h3>
           </div>
-        )) : <p className="empty">今週の変更はありません。</p>}
+          {latestNotices.length ? latestNotices.map((notice) => (
+            <ActivityNotice notice={notice} onOpen={onOpen} key={noticeKey(notice)} />
+          )) : <p className="empty">要確認の掲示はありません。</p>}
+        </div>
+        <div className="activity-column message-inbox">
+          <div className="column-heading">
+            <h3>CLEメッセージ <b>{messages.reduce((sum, message) => sum + message.unreadCount, 0)}</b></h3>
+            <a className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</a>
+          </div>
+          {messages.length ? messages.slice(0, 6).map((message) => (
+            <a className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
+              <span>{courseDisplayName(message.courseName)}</span>
+              <b>{message.unreadCount}</b>
+            </a>
+          )) : <p className="empty">{loading ? "取得中です。" : "未読メッセージはありません。"}</p>}
+        </div>
       </div>
     </section>
+  );
+}
+
+function ActivityNotice({
+  notice,
+  onOpen,
+}: {
+  notice: Notice;
+  onOpen: (notice: Notice) => void;
+}) {
+  const [opening, setOpening] = useState(false);
+  const openNotice = async () => {
+    const detailWindow = window.open("", "_blank");
+    onOpen(notice);
+    setOpening(true);
+    try {
+      const url = await resolveNoticeUrl(notice);
+      if (detailWindow) detailWindow.location.href = url || BOARD_URL;
+    } catch {
+      if (detailWindow) detailWindow.location.href = BOARD_URL;
+    } finally {
+      setOpening(false);
+    }
+  };
+  return (
+    <button className="activity-notice" type="button" disabled={opening} onClick={openNotice}>
+      <span>{notice.genre}</span>
+      <div>
+        <h3>{notice.title}</h3>
+        <p>{[notice.department, notice.period].filter(Boolean).join(" / ")}</p>
+      </div>
+      <b>{opening ? "取得中" : notice.unread ? "未読" : "新着"}</b>
+    </button>
+  );
+}
+
+function ReferenceDesk({
+  genre,
+  notices,
+  onGenreChange,
+  onOpen,
+  onQueryChange,
+  onScopeChange,
+  onSync,
+  progress,
+  query,
+  scope,
+  snapshotExpired,
+  snapshotLoading,
+  snapshotUpdatedAt,
+}: {
+  genre: string;
+  notices: Notice[];
+  onGenreChange: (value: string) => void;
+  onOpen: (notice: Notice) => void;
+  onQueryChange: (value: string) => void;
+  onScopeChange: (value: string) => void;
+  onSync: () => void;
+  progress: string;
+  query: string;
+  scope: string;
+  snapshotExpired: boolean;
+  snapshotLoading: boolean;
+  snapshotUpdatedAt: string | null;
+}) {
+  return (
+    <div className="reference-page">
+      <header className="page-intro">
+        <h1>掲示</h1>
+      </header>
+      <section className="section notices-section">
+        <div className="section-heading">
+          <div>
+            <h2>掲示</h2>
+            <p>同期 {fmtTime(snapshotUpdatedAt)}{snapshotExpired ? " / 更新推奨" : ""}</p>
+          </div>
+          <strong>{notices.length}</strong>
+        </div>
+        <div className="filters">
+          <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="掲示を検索" />
+          <select value={genre} onChange={(event) => onGenreChange(event.target.value)}>
+            <option value="">全ジャンル</option>
+            {GENRES.map((item) => <option key={item}>{item}</option>)}
+          </select>
+          <select value={scope} onChange={(event) => onScopeChange(event.target.value)}>
+            <option value="attention">要確認</option>
+            <option value="unread">未読</option>
+            <option value="all">取得済みすべて</option>
+          </select>
+          <button type="button" disabled={snapshotLoading || !snapshotExpired} onClick={onSync}>
+            {snapshotExpired ? "掲示を同期" : "同期済み"}
+          </button>
+          <span>{progress}</span>
+        </div>
+        <NoticeList notices={notices} onOpen={onOpen} />
+      </section>
+    </div>
   );
 }
 
