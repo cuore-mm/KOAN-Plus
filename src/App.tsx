@@ -4,7 +4,6 @@ import {
   ACTIONS,
   BOARD_URL,
   GENRES,
-  GRADE_HISTORY_URL,
   LIGHT_REFRESH_TTL_MS,
   PORTAL_URL,
   SCHEDULE_URL,
@@ -70,13 +69,6 @@ const fmtTime = (value: string | null) =>
 const isExpired = (value: string | null, ttl: number) =>
   !value || Date.now() - new Date(value).getTime() >= ttl;
 
-const fmtToday = () =>
-  new Intl.DateTimeFormat("ja-JP", {
-    month: "numeric",
-    day: "numeric",
-    weekday: "short",
-  }).format(new Date());
-
 function App() {
   const [data, setData] = useState<KoanData>(() => ({
     ...EMPTY,
@@ -96,6 +88,11 @@ function App() {
   const [genre, setGenre] = useState("");
   const [scope, setScope] = useState("attention");
   const [view, setView] = useState<"dashboard" | "reference" | "grades" | "settings">("dashboard");
+  const [gradesData, setGradesData] = useState<GradeData | null>(() =>
+    loadGradesCache<GradeData>(),
+  );
+  const [gradesLoading, setGradesLoading] = useState(false);
+  const [gradesStatus, setGradesStatus] = useState("");
 
   const updateKoan = async () => {
     setLoading(true);
@@ -175,6 +172,21 @@ function App() {
     }
   };
 
+  const updateGrades = async () => {
+    setGradesLoading(true);
+    setGradesStatus("成績を取得中");
+    try {
+      const next = await refreshGrades(setGradesStatus);
+      setGradesData(next);
+      saveGradesCache(next);
+      setGradesStatus("取得しました");
+    } catch (error) {
+      setGradesStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGradesLoading(false);
+    }
+  };
+
   useEffect(() => {
     void update();
   }, []);
@@ -208,62 +220,63 @@ function App() {
     });
   };
 
+  const updateTimes = [data.lightUpdatedAt, cleData.updatedAt]
+    .filter((value): value is string => Boolean(value))
+    .sort();
+  const latestUpdatedAt = updateTimes[updateTimes.length - 1] || null;
+  const viewTitle = {
+    dashboard: "ホーム",
+    reference: "掲示",
+    grades: "成績",
+    settings: "設定",
+  }[view];
+  const topbarState = view === "reference" ? {
+    action: syncSnapshot,
+    disabled: snapshotLoading || !snapshotExpired,
+    label: snapshotLoading ? "同期中..." : snapshotExpired ? "掲示を同期" : "同期済み",
+    status: snapshotLoading
+      ? (progress || "掲示同期中...")
+      : `掲示同期 ${fmtTime(data.snapshotUpdatedAt)}${snapshotExpired ? " / 更新推奨" : ""}`,
+  } : view === "grades" ? {
+    action: updateGrades,
+    disabled: gradesLoading,
+    label: gradesLoading ? "取得中..." : "成績を取得",
+    status: gradesLoading
+      ? (gradesStatus || "成績を取得中...")
+      : `成績更新履歴 ${fmtTime(gradesData?.updatedAt ?? null)}`,
+  } : {
+    action: update,
+    disabled: loading || cleLoading,
+    label: loading || cleLoading ? "更新中..." : "更新",
+    status: loading || cleLoading ? "更新中..." : `更新済み ${fmtTime(latestUpdatedAt)}`,
+  };
+
   return (
-    <>
-      <header className="app-header">
-        <div className="brand">
-          <span>KOAN</span>
-          <b>Plus</b>
-        </div>
-        <nav className="main-nav" aria-label="画面切替">
-          <button className={view === "dashboard" ? "active" : ""} type="button" onClick={() => setView("dashboard")}>
-            ダッシュボード
-          </button>
-          <button className={view === "reference" ? "active" : ""} type="button" onClick={() => setView("reference")}>
-            掲示
-          </button>
-          <button className={view === "grades" ? "active" : ""} type="button" onClick={() => setView("grades")}>
-            成績
-          </button>
-          <button className={view === "settings" ? "active" : ""} type="button" onClick={() => setView("settings")}>
-            設定
-          </button>
-        </nav>
-        <div className="header-actions">
-          <small>{status || cleStatus || `更新 ${fmtTime(data.lightUpdatedAt)}`}</small>
-          <a href={PORTAL_URL} target="_blank">KOAN</a>
-          <button type="button" disabled={loading || cleLoading} onClick={update}>
-            更新
+    <div className="app-shell">
+      <Sidebar
+        onViewChange={setView}
+        view={view}
+      />
+
+      <header className="app-topbar">
+        <h1>{viewTitle}</h1>
+        <div className="topbar-actions">
+          <small>{topbarState.status}</small>
+          <button type="button" disabled={topbarState.disabled} onClick={topbarState.action}>
+            {topbarState.label}
           </button>
         </div>
       </header>
 
-      <main>
+      <main className={view === "dashboard" ? "dashboard-layout" : "page-layout"}>
         {view === "dashboard" ? (
-          <>
-        <DashboardIntro
-          tasks={cleData.tasks}
-          notices={data.notices}
-          unreadMessages={cleData.unreadMessages}
-        />
-
-        <section className="dashboard-columns">
-          <div className="dashboard-lane">
-            <WeeklyAgenda schedule={data.schedule} changes={data.changes} />
-            <NewActivity
-              loading={cleLoading}
-              messages={cleData.messages}
-              notices={data.notices}
-              onOpen={markNoticeRead}
-            />
-          </div>
-          <div className="dashboard-lane">
-            <NextActions data={cleData} loading={cleLoading} status={cleStatus} />
-            <QuickLinks />
-          </div>
-        </section>
-
-          </>
+          <Dashboard
+            cleData={cleData}
+            cleLoading={cleLoading}
+            cleStatus={cleStatus}
+            data={data}
+            onOpenNotice={markNoticeRead}
+          />
         ) : view === "reference" ? (
           <ReferenceDesk
             genre={genre}
@@ -272,17 +285,50 @@ function App() {
             onOpen={markNoticeRead}
             onQueryChange={setQuery}
             onScopeChange={setScope}
-            onSync={syncSnapshot}
-            progress={progress}
             query={query}
             scope={scope}
-            snapshotExpired={snapshotExpired}
-            snapshotLoading={snapshotLoading}
             snapshotUpdatedAt={data.snapshotUpdatedAt}
           />
-        ) : view === "grades" ? <Grades /> : <Settings />}
+        ) : view === "grades" ? (
+          <Grades data={gradesData} />
+        ) : <Settings />}
       </main>
-    </>
+    </div>
+  );
+}
+
+function Sidebar({
+  onViewChange,
+  view,
+}: {
+  onViewChange: (view: "dashboard" | "reference" | "grades" | "settings") => void;
+  view: "dashboard" | "reference" | "grades" | "settings";
+}) {
+  const items = [
+    ["dashboard", "ホーム"],
+    ["reference", "掲示"],
+    ["grades", "成績"],
+    ["settings", "設定"],
+  ] as const;
+  return (
+    <aside className="app-sidebar">
+      <div className="sidebar-brand">
+        <span>KOAN</span>
+        <b>Plus</b>
+      </div>
+      <nav className="side-nav" aria-label="画面切替">
+        {items.map(([key, label]) => (
+          <button className={view === key ? "active" : ""} key={key} onClick={() => onViewChange(key)} type="button">
+            {label}
+          </button>
+        ))}
+      </nav>
+      <div className="sidebar-footer">
+        <small>外部リンク</small>
+        <a href={PORTAL_URL} target="_blank">KOAN</a>
+        <a href={CLE_MESSAGES_URL} target="_blank">CLE</a>
+      </div>
+    </aside>
   );
 }
 
@@ -341,22 +387,15 @@ function Settings() {
 
   return (
     <div className="settings-page">
-      <header className="page-intro settings-intro">
-        <div>
-          <h1>設定</h1>
-          <p>認証情報は端末内の拡張ストレージにだけ保存します。</p>
-        </div>
-        <span className={`auth-state ${settings.configured ? "ready" : ""}`}>
-          {settings.configured ? "設定済み" : settings.enabled ? "編集中" : "未使用"}
-        </span>
-      </header>
-
       <section className="section settings-section">
         <div className="section-heading">
           <div>
             <h2>IT認証基盤の自動ログイン</h2>
-            <p>任意設定です。登録後は IT 認証基盤で自動入力・送信します。</p>
+            <p>認証情報は端末内の拡張ストレージにだけ保存します。</p>
           </div>
+          <span className={`auth-state ${settings.configured ? "ready" : ""}`}>
+            {settings.configured ? "設定済み" : settings.enabled ? "編集中" : "未使用"}
+          </span>
         </div>
 
         <label className="setting-toggle">
@@ -411,8 +450,10 @@ function Settings() {
         {status && <p className="settings-status">{status}</p>}
       </section>
 
-      <section className="settings-note">
-        <h2>扱う範囲</h2>
+      <section className="section settings-note">
+        <div className="section-heading">
+          <h2>扱う範囲</h2>
+        </div>
         <p>認証情報は KOAN Plus 独自のサーバーへ送信しません。抽出不能な暗号鍵と AES-GCM 暗号文を端末内に保存します。MFA を有効にした場合だけ、RFC 6238 に従って端末内で認証コードを生成します。</p>
       </section>
     </div>
@@ -503,30 +544,42 @@ function courseDisplayName(value: string) {
     .trim() || value;
 }
 
-function DashboardIntro({
-  tasks,
-  notices,
-  unreadMessages,
+function Dashboard({
+  cleData,
+  cleLoading,
+  cleStatus,
+  data,
+  onOpenNotice,
 }: {
-  tasks: CleTask[];
-  notices: Notice[];
-  unreadMessages: number;
+  cleData: CleData;
+  cleLoading: boolean;
+  cleStatus: string;
+  data: KoanData;
+  onOpenNotice: (notice: Notice) => void;
 }) {
-  const openTasks = tasks.filter(
-    (task) =>
-      !["提出済み", "採点済み"].includes(task.status) &&
-      new Date(task.dueAt).getTime() >= Date.now(),
-  );
-  const unreadNotices = notices.filter((notice) => notice.unread).length;
+  const today = dateKey(new Date());
+  const [selectedDate, setSelectedDate] = useState(today);
+  const selectedSchedule = data.schedule.filter((item) => (item.date || today) === selectedDate);
+  const selectedChanges = changesForDate(data.changes, selectedDate, today);
   return (
-    <section className="dashboard-intro">
-      <h1>{fmtToday()}</h1>
-      <div className="dashboard-metrics" aria-label="要確認件数">
-        <div><span>課題</span><strong>{openTasks.length}</strong></div>
-        <div><span>CLE未読</span><strong>{unreadMessages}</strong></div>
-        <div><span>KOAN未読</span><strong>{unreadNotices}</strong></div>
-      </div>
-    </section>
+    <>
+      <section className="dashboard-main">
+        <NextActions data={cleData} loading={cleLoading} status={cleStatus} />
+        <NewActivity
+          loading={cleLoading}
+          messages={cleData.messages}
+          notices={data.notices}
+          onOpen={onOpenNotice}
+        />
+      </section>
+      <DashboardRightRail
+        changes={selectedChanges}
+        onSelectDate={setSelectedDate}
+        schedule={selectedSchedule}
+        selectedDate={selectedDate}
+        tasks={cleData.tasks}
+      />
+    </>
   );
 }
 
@@ -544,8 +597,7 @@ function NextActions({
   );
   const upcomingTasks = tasks
     .filter((task) => new Date(task.dueAt).getTime() >= Date.now())
-    .sort((left, right) => left.dueAt.localeCompare(right.dueAt))
-    .slice(0, 8);
+    .sort((left, right) => left.dueAt.localeCompare(right.dueAt));
   const expiredTasks = tasks
     .filter((task) => new Date(task.dueAt).getTime() < Date.now())
     .sort((left, right) => right.dueAt.localeCompare(left.dueAt));
@@ -553,7 +605,7 @@ function NextActions({
     <section className="section next-actions">
       <div className="section-heading">
         <div>
-          <h2>次にやること</h2>
+          <h2>直近の課題</h2>
           <p>CLE取得 {fmtTime(data.updatedAt)}{status ? ` / ${status}` : ""}</p>
         </div>
         <a className="detail-link" href={CLE_CALENDAR_URL} target="_blank">CLEカレンダー</a>
@@ -586,6 +638,20 @@ function CleTaskRow({ task }: { task: CleTask }) {
   );
 }
 
+function noticeRecencyTime(notice: Notice) {
+  const match = notice.period.match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})|(\d{1,2})[/-](\d{1,2})/);
+  if (!match) return 0;
+  const currentYear = new Date().getFullYear();
+  const year = match[1] ? Number(match[1]) : currentYear;
+  const month = Number(match[2] || match[4]);
+  const day = Number(match[3] || match[5]);
+  return new Date(year, month - 1, day).getTime();
+}
+
+function isImportantNotice(notice: Notice) {
+  return notice.priority === "○" || /重要|要確認|締切|期限|停止|休講|変更|試験/.test(notice.title);
+}
+
 function QuickLinks() {
   return (
     <section className="section quick-links">
@@ -601,44 +667,13 @@ function QuickLinks() {
   );
 }
 
-function Grades() {
-  const [data, setData] = useState<GradeData | null>(() =>
-    loadGradesCache<GradeData>(),
-  );
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("");
-
-  const update = async () => {
-    setLoading(true);
-    setStatus("成績を取得中");
-    try {
-      const next = await refreshGrades(setStatus);
-      setData(next);
-      saveGradesCache(next);
-      setStatus("取得しました");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setLoading(false);
-    }
-  };
-
+function Grades({ data }: { data: GradeData | null }) {
   return (
     <div className="grades-page">
-      <section className="grades-intro">
-        <div>
-          <h1>成績</h1>
-        </div>
-        <div className="grades-controls">
-          <small>{status || (data ? `取得 ${fmtTime(data.updatedAt)}` : "未取得")}</small>
-          <a href={GRADE_HISTORY_URL} target="_blank">KOANで開く</a>
-          <button type="button" disabled={loading} onClick={update}>成績を取得</button>
-        </div>
-      </section>
-
       {!data ? (
         <section className="section grades-empty">
-          <h2>必要な時だけ取得</h2>
+          <h2>成績データはまだ取得されていません</h2>
+          <p>右上の「成績を取得」から KOAN の履修成績を読み込めます。</p>
         </section>
       ) : (
         <>
@@ -654,7 +689,6 @@ function Grades() {
               <div>
                 <h2>科目小区分</h2>
               </div>
-              <strong>{data.groups.length}</strong>
             </div>
             <div className="credit-groups">
               {data.groups.map((group) => (
@@ -820,19 +854,228 @@ const dateKey = (date: Date) =>
     String(date.getDate()).padStart(2, "0"),
   ].join("-");
 
-function weekDays() {
-  const today = new Date();
-  const monday = new Date(today);
-  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
-  return Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(monday);
-    date.setDate(monday.getDate() + index);
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(date.getDate() + days);
+  return next;
+}
+
+function addMonths(date: Date, months: number) {
+  const next = new Date(date);
+  next.setMonth(date.getMonth() + months, 1);
+  return next;
+}
+
+function dateFromKey(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function monthGrid(monthDate: Date) {
+  const firstDay = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const start = addDays(firstDay, -firstDay.getDay());
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = addDays(start, index);
     return {
+      date,
+      inMonth: date.getMonth() === monthDate.getMonth(),
       key: dateKey(date),
-      label: new Intl.DateTimeFormat("ja-JP", { weekday: "short" }).format(date),
-      shortDate: `${date.getMonth() + 1}/${date.getDate()}`,
     };
   });
+}
+
+function monthLabel(date: Date) {
+  return new Intl.DateTimeFormat("en-US", { month: "short", year: "numeric" }).format(date);
+}
+
+function selectedDateLabel(value: string) {
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    weekday: "short",
+  }).format(dateFromKey(value));
+}
+
+function selectedClassHeading(value: string) {
+  const date = dateFromKey(value);
+  return `${date.getMonth() + 1}/${date.getDate()} (${new Intl.DateTimeFormat("ja-JP", {
+    weekday: "narrow",
+  }).format(date)}) の授業`;
+}
+
+function periodNumber(value: string) {
+  return value.match(/\d+/)?.[0] || "";
+}
+
+function agendaWeeks() {
+  const today = new Date();
+  const horizon = dateKey(addDays(today, 8 * 7));
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+  const weeks = [];
+  for (let weekIndex = 0; weekIndex < 10; weekIndex += 1) {
+    const start = addDays(monday, weekIndex * 7);
+    const days = Array.from({ length: 7 }, (_, dayIndex) => {
+      const date = addDays(start, dayIndex);
+      return {
+        key: dateKey(date),
+        label: new Intl.DateTimeFormat("ja-JP", { weekday: "short" }).format(date),
+        shortDate: `${date.getMonth() + 1}/${date.getDate()}`,
+      };
+    });
+    weeks.push({ days, end: days[6], start: days[0] });
+    if (days.some((day) => day.key === horizon)) break;
+  }
+  return weeks;
+}
+
+function DashboardRightRail({
+  changes,
+  onSelectDate,
+  schedule,
+  selectedDate,
+  tasks,
+}: {
+  changes: ChangeItem[];
+  onSelectDate: (date: string) => void;
+  schedule: ScheduleItem[];
+  selectedDate: string;
+  tasks: CleTask[];
+}) {
+  const today = dateKey(new Date());
+  const [visibleMonth, setVisibleMonth] = useState(() => new Date());
+  const moveMonth = (months: number) => setVisibleMonth((current) => addMonths(current, months));
+  const periods = ["1", "2", "3", "4", "5", "6"];
+  const activeTasks = useMemo(
+    () => tasks.filter((task) => !["提出済み", "採点済み"].includes(task.status)),
+    [tasks],
+  );
+  const deadlineDates = useMemo(
+    () => new Set(activeTasks.map((task) => dateKey(new Date(task.dueAt)))),
+    [activeTasks],
+  );
+  const selectedTasks = activeTasks
+    .filter((task) => dateKey(new Date(task.dueAt)) === selectedDate)
+    .sort((left, right) => left.dueAt.localeCompare(right.dueAt));
+  return (
+    <aside className="dashboard-right-rail">
+      <section className="rail-section calendar-panel">
+        <MonthCalendar
+          deadlineDates={deadlineDates}
+          month={visibleMonth}
+          onNextMonth={() => moveMonth(1)}
+          onPreviousMonth={() => moveMonth(-1)}
+          onSelectDate={onSelectDate}
+          selectedDate={selectedDate}
+          today={today}
+        />
+      </section>
+      <section className="rail-section selected-day-panel">
+        <div className="rail-heading">
+          <div>
+            <h2>{selectedClassHeading(selectedDate)}</h2>
+          </div>
+        </div>
+        <div className="rail-schedule-list">
+          {periods.map((period) => {
+            const item = schedule.find((scheduleItem) => periodNumber(scheduleItem.period) === period);
+            const change = item ? changeFor(item, changes) : null;
+            return (
+              <div className={`rail-schedule-row ${item ? "" : "empty-period"}`} key={period}>
+                <b>{period}</b>
+                <span>
+                  {item?.title && <span className="rail-course-title">{item.title}</span>}
+                  {item?.room && <small>{item.room}</small>}
+                  {change && <em>{change.type}</em>}
+                </span>
+              </div>
+            );
+          })}
+          {changes
+            .filter((change) => !schedule.some((item) => changeFor(item, [change])))
+            .map((item, index) => (
+              <div className="rail-change-row" key={`${item.date}-${item.period}-${index}`}>
+                <b>{item.type}</b>
+                <span>{item.period}<small>{item.course}</small></span>
+              </div>
+            ))}
+        </div>
+      </section>
+      <section className="rail-section selected-deadline-panel">
+        <div className="rail-heading">
+          <h2>締切課題</h2>
+        </div>
+        <div className="rail-deadline-list">
+          {selectedTasks.length ? (
+            <>
+              {selectedTasks.slice(0, 2).map((task) => (
+                <a className="rail-deadline-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
+                  <time>{new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(new Date(task.dueAt))}</time>
+                  <span>
+                    <b>{task.title}</b>
+                    <small>{courseDisplayName(task.courseName)}</small>
+                  </span>
+                </a>
+              ))}
+              {selectedTasks.length > 2 && <p className="rail-more">他 {selectedTasks.length - 2} 件</p>}
+            </>
+          ) : <p className="rail-empty">この日の締切課題はありません。</p>}
+        </div>
+      </section>
+    </aside>
+  );
+}
+
+function MonthCalendar({
+  deadlineDates,
+  month,
+  onNextMonth,
+  onPreviousMonth,
+  onSelectDate,
+  selectedDate,
+  today,
+}: {
+  deadlineDates: Set<string>;
+  month: Date;
+  onNextMonth: () => void;
+  onPreviousMonth: () => void;
+  onSelectDate: (date: string) => void;
+  selectedDate: string;
+  today: string;
+}) {
+  const days = monthGrid(month);
+  return (
+    <div className="month-calendar">
+      <div className="month-heading">
+        <button aria-label="前の月" onClick={onPreviousMonth} type="button">‹</button>
+        <h3>{monthLabel(month)}</h3>
+        <button aria-label="次の月" onClick={onNextMonth} type="button">›</button>
+      </div>
+      <div className="calendar-weekdays" aria-hidden="true">
+        {["日", "月", "火", "水", "木", "金", "土"].map((day) => <span key={day}>{day}</span>)}
+      </div>
+      <div className="calendar-days">
+        {days.map((day) => {
+          return (
+            <button
+              aria-label={`${selectedDateLabel(day.key)}を選択`}
+              className={[
+                day.inMonth ? "" : "outside",
+                day.key === selectedDate ? "selected" : "",
+                day.key === today ? "today" : "",
+                deadlineDates.has(day.key) ? "has-deadline" : "",
+              ].filter(Boolean).join(" ")}
+              key={day.key}
+              onClick={() => onSelectDate(day.key)}
+              type="button"
+            >
+              <span>{day.date.getDate()}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function changeMatchesDate(change: ChangeItem, date: string) {
@@ -866,8 +1109,14 @@ function WeeklyAgenda({
   schedule: ScheduleItem[];
   changes: ChangeItem[];
 }) {
-  const days = useMemo(weekDays, []);
+  const weeks = useMemo(agendaWeeks, []);
   const today = dateKey(new Date());
+  const currentWeekIndex = Math.max(
+    0,
+    weeks.findIndex((week) => week.days.some((day) => day.key === today)),
+  );
+  const [selectedWeek, setSelectedWeek] = useState(currentWeekIndex);
+  const days = weeks[selectedWeek]?.days || weeks[0].days;
   const [selectedDate, setSelectedDate] = useState(today);
   const selectedSchedule = schedule.filter((item) => (item.date || today) === selectedDate);
   const selectedChanges = changesForDate(changes, selectedDate, today);
@@ -882,6 +1131,31 @@ function WeeklyAgenda({
           <h2>今週の時間割</h2>
         </div>
         <a className="detail-link" href={SCHEDULE_URL} target="_blank">KOANで確認</a>
+      </div>
+      <div className="week-switcher">
+        <button
+          disabled={selectedWeek <= 0}
+          onClick={() => {
+            const nextWeek = Math.max(0, selectedWeek - 1);
+            setSelectedWeek(nextWeek);
+            setSelectedDate(weeks[nextWeek].days[0].key);
+          }}
+          type="button"
+        >
+          前の週
+        </button>
+        <span>{weeks[selectedWeek].start.shortDate} - {weeks[selectedWeek].end.shortDate}</span>
+        <button
+          disabled={selectedWeek >= weeks.length - 1}
+          onClick={() => {
+            const nextWeek = Math.min(weeks.length - 1, selectedWeek + 1);
+            setSelectedWeek(nextWeek);
+            setSelectedDate(weeks[nextWeek].days[0].key);
+          }}
+          type="button"
+        >
+          次の週
+        </button>
       </div>
       <div className="week-tabs" role="tablist" aria-label="表示する曜日">
         {days.map((day) => {
@@ -948,35 +1222,38 @@ function NewActivity({
 }) {
   const latestNotices = notices
     .filter((notice) => notice.unread || notice.isNew || attentionScore(notice) >= 20)
-    .sort((left, right) => attentionScore(right) - attentionScore(left))
+    .sort((left, right) => {
+      const recency = noticeRecencyTime(right) - noticeRecencyTime(left);
+      return recency || attentionScore(right) - attentionScore(left);
+    })
     .slice(0, 5);
   return (
     <section className="section activity-section">
       <div className="section-heading">
         <div>
-          <h2>新着</h2>
+          <h2>連絡と掲示</h2>
         </div>
       </div>
       <div className="activity-grid">
+        <div className="activity-column message-inbox">
+          <div className="column-heading">
+            <h3>CLEメッセージ</h3>
+            <a className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</a>
+          </div>
+          {messages.length ? messages.map((message) => (
+            <a className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
+              <span>{courseDisplayName(message.courseName)}</span>
+              <b>未読 {message.unreadCount}</b>
+            </a>
+          )) : <p className="empty">{loading ? "取得中です。" : "未読メッセージはありません。"}</p>}
+        </div>
         <div className="activity-column">
           <div className="column-heading">
-            <h3>KOAN掲示 <b>{latestNotices.length}</b></h3>
+            <h3>KOAN新着掲示</h3>
           </div>
           {latestNotices.length ? latestNotices.map((notice) => (
             <ActivityNotice notice={notice} onOpen={onOpen} key={noticeKey(notice)} />
           )) : <p className="empty">要確認の掲示はありません。</p>}
-        </div>
-        <div className="activity-column message-inbox">
-          <div className="column-heading">
-            <h3>CLEメッセージ <b>{messages.reduce((sum, message) => sum + message.unreadCount, 0)}</b></h3>
-            <a className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</a>
-          </div>
-          {messages.length ? messages.slice(0, 6).map((message) => (
-            <a className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
-              <span>{courseDisplayName(message.courseName)}</span>
-              <b>{message.unreadCount}</b>
-            </a>
-          )) : <p className="empty">{loading ? "取得中です。" : "未読メッセージはありません。"}</p>}
         </div>
       </div>
     </section>
@@ -1006,12 +1283,14 @@ function ActivityNotice({
   };
   return (
     <button className="activity-notice" type="button" disabled={opening} onClick={openNotice}>
-      <span>{notice.genre}</span>
-      <div>
-        <h3>{notice.title}</h3>
-        <p>{[notice.department, notice.period].filter(Boolean).join(" / ")}</p>
+      <div className="notice-chip-row">
+        <span className="notice-chip genre-chip">{notice.genre}</span>
+        {notice.unread && <span className="notice-chip state-chip">未読</span>}
+        {isImportantNotice(notice) && <span className="notice-chip state-chip important-chip">重要</span>}
+        {opening && <span className="notice-chip state-chip">取得中</span>}
       </div>
-      <b>{opening ? "取得中" : notice.unread ? "未読" : "新着"}</b>
+      <h3 className="notice-title">{notice.title}</h3>
+      <p className="notice-meta">{[notice.department, notice.period].filter(Boolean).join(" / ")}</p>
     </button>
   );
 }
@@ -1023,12 +1302,8 @@ function ReferenceDesk({
   onOpen,
   onQueryChange,
   onScopeChange,
-  onSync,
-  progress,
   query,
   scope,
-  snapshotExpired,
-  snapshotLoading,
   snapshotUpdatedAt,
 }: {
   genre: string;
@@ -1037,24 +1312,17 @@ function ReferenceDesk({
   onOpen: (notice: Notice) => void;
   onQueryChange: (value: string) => void;
   onScopeChange: (value: string) => void;
-  onSync: () => void;
-  progress: string;
   query: string;
   scope: string;
-  snapshotExpired: boolean;
-  snapshotLoading: boolean;
   snapshotUpdatedAt: string | null;
 }) {
   return (
     <div className="reference-page">
-      <header className="page-intro">
-        <h1>掲示</h1>
-      </header>
       <section className="section notices-section">
         <div className="section-heading">
           <div>
-            <h2>掲示</h2>
-            <p>同期 {fmtTime(snapshotUpdatedAt)}{snapshotExpired ? " / 更新推奨" : ""}</p>
+            <h2>掲示一覧</h2>
+            <p>同期 {fmtTime(snapshotUpdatedAt)}</p>
           </div>
           <strong>{notices.length}</strong>
         </div>
@@ -1069,10 +1337,6 @@ function ReferenceDesk({
             <option value="unread">未読</option>
             <option value="all">取得済みすべて</option>
           </select>
-          <button type="button" disabled={snapshotLoading || !snapshotExpired} onClick={onSync}>
-            {snapshotExpired ? "掲示を同期" : "同期済み"}
-          </button>
-          <span>{progress}</span>
         </div>
         <NoticeList notices={notices} onOpen={onOpen} />
       </section>
@@ -1111,16 +1375,16 @@ function NoticeList({
         const key = `${notice.title}-${notice.period}`;
         return (
           <button className="notice-row" type="button" disabled={Boolean(opening)} onClick={() => openNotice(notice)} key={key}>
-            <span>{notice.genre}</span>
-            <div>
+            <div className="notice-content">
+              <div className="notice-chip-row">
+                <span className="notice-chip genre-chip">{notice.genre}</span>
+                {opening === key && <span className="notice-chip state-chip">取得中</span>}
+                {notice.unread && <span className="notice-chip state-chip">未読</span>}
+                {notice.isNew && <span className="notice-chip state-chip">新着</span>}
+                {attentionScore(notice) >= 120 && <span className="notice-chip state-chip important-chip">要確認</span>}
+              </div>
               <h3>{notice.title}</h3>
               <p>{[notice.department, notice.author, notice.period].filter(Boolean).join(" / ")}</p>
-            </div>
-            <div className="flags">
-              {opening === key && <b>取得中</b>}
-              {notice.unread && <b>未読</b>}
-              {notice.isNew && <b>新着</b>}
-              {attentionScore(notice) >= 120 && <b>要確認</b>}
             </div>
           </button>
         );

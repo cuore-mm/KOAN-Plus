@@ -11,6 +11,8 @@ export const LIGHT_REFRESH_TTL_MS = 10 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 15 * 1000;
 const BOARD_REQUEST_GAP_MS = 750;
 const MAX_BOARD_PAGES_PER_GENRE = 12;
+const SCHEDULE_RANGE_WEEKS = 8;
+const MAX_SCHEDULE_MONTH_PAGES = 4;
 const SNAPSHOT_MAX_DURATION_MS = 3 * 60 * 1000;
 const NOTICE_RESOLVE_MAX_DURATION_MS = 60 * 1000;
 const LIGHT_LEASE_KEY = "koan-plus-light-refresh-lease-v1";
@@ -118,6 +120,24 @@ export type GradeData = {
 const normalize = (value: unknown) => String(value || "").replace(/\s+/g, " ").trim();
 const pause = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const dateKey = (date: Date) =>
+  [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+
+function parseDateKey(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(date.getDate() + days);
+  return next;
+}
 
 function requireKoanUrl(url: string) {
   if (new URL(url).origin !== "https://koan.osaka-u.ac.jp") {
@@ -311,6 +331,57 @@ function parseWeeklySchedule(doc: Document): ScheduleItem[] {
     });
 }
 
+function maxCalendarDate(doc: Document) {
+  const dates = [...doc.querySelectorAll("#schedule-calender > tbody > tr > td")]
+    .map(calendarDate)
+    .filter(Boolean)
+    .map((date) => parseDateKey(date).getTime());
+  return dates.length ? Math.max(...dates) : 0;
+}
+
+async function submitScheduleEvent(doc: Document, eventId: string) {
+  const form = doc.querySelector<HTMLFormElement>("#ScheduleListForm");
+  const executionKey = form
+    ?.querySelector<HTMLInputElement>('input[name="_flowExecutionKey"]')
+    ?.value;
+  if (!form || !executionKey) {
+    throw new Error("スケジュール管理画面を開始できませんでした。");
+  }
+  const params = new URLSearchParams({
+    _flowExecutionKey: executionKey,
+    _eventId: eventId,
+  });
+  return fetchHtml(new URL(form.getAttribute("action") || "campussquare.do", SCHEDULE_URL).href, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+    },
+    body: params.toString(),
+  });
+}
+
+async function fetchScheduleRange() {
+  const pages: Document[] = [];
+  let page = await fetchHtml(SCHEDULE_URL);
+  const horizon = addDays(new Date(), SCHEDULE_RANGE_WEEKS * 7).getTime();
+  for (let index = 0; index < MAX_SCHEDULE_MONTH_PAGES; index += 1) {
+    pages.push(page.doc);
+    if (maxCalendarDate(page.doc) >= horizon) break;
+    page = await submitScheduleEvent(page.doc, "setNextMonth");
+  }
+  return pages;
+}
+
+function mergeSchedule(items: ScheduleItem[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = [item.date, item.period, item.title, item.room].join("\t");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function parseCellCourse(cell: Element) {
   const text = normalize(cell.textContent);
   const details = [...cell.querySelectorAll("td")]
@@ -446,9 +517,9 @@ export async function refreshLight(previousNotices: Notice[] = []) {
   const release = acquireLease(LIGHT_LEASE_KEY, REQUEST_TIMEOUT_MS + 5000, "別の画面で通常更新中です。");
   localStorage.setItem(LIGHT_ATTEMPT_KEY, String(Date.now()));
   try {
-    const [portal, schedule, changes, board] = await Promise.all([
+    const [portal, schedulePages, changes, board] = await Promise.all([
       fetchHtml(PORTAL_URL),
-      fetchHtml(SCHEDULE_URL),
+      fetchScheduleRange().catch(() => []),
       fetchHtml(CHANGES_URL),
       fetchHtml(BOARD_URL),
     ]);
@@ -459,7 +530,7 @@ export async function refreshLight(previousNotices: Notice[] = []) {
       isNew: !oldKeys.has(noticeKey(notice)),
     }));
     localStorage.setItem(LIGHT_COMPLETED_KEY, String(Date.now()));
-    const weeklySchedule = parseWeeklySchedule(schedule.doc);
+    const weeklySchedule = mergeSchedule(schedulePages.flatMap(parseWeeklySchedule));
     return {
       schedule: weeklySchedule.length ? weeklySchedule : parseSchedule(portal.doc),
       changes: parseChanges(changes.doc),
