@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import jsQR from "jsqr";
 import {
   BOARD_URL,
   GENRES,
@@ -39,6 +38,7 @@ import {
 } from "./storage";
 import {
   type AuthSettings,
+  deleteAuthSettings,
   ensureCleLogin,
   ensureKoanLogin,
   loadAuthSettings,
@@ -407,138 +407,123 @@ function Settings() {
       mfaConsent,
       mfaEnabled,
     }),
-    settings.enabled ? "端末内に暗号化して保存しました。" : "自動ログインを無効にしました。",
+    settings.enabled ? "端末内に暗号化して保存しました。" : "保存済み情報を残したまま、自動ログインを停止しました。",
   );
+
+  const removeSavedCredentials = () => {
+    if (!window.confirm("保存済みのID・パスワード・TOTPシークレットを削除します。よろしいですか？")) return;
+    void run(async () => {
+      const next = await deleteAuthSettings();
+      setId("");
+      setPassword("");
+      setTotpSecret("");
+      setMfaConsent(false);
+      setMfaEnabled(false);
+      return next;
+    }, "保存済みの認証情報を削除しました。");
+  };
+
+  const canSave = !saving && (
+    settings.enabled
+      ? settings.configured || Boolean(id && password)
+      : settings.configured
+  ) && (!settings.enabled || !mfaEnabled || mfaConsent);
+  const saveLabel = saving
+    ? "保存中..."
+    : settings.enabled
+      ? "保存して有効化"
+      : settings.configured
+        ? "自動ログインを停止"
+        : "設定を保存";
 
   return (
     <div className="settings-page">
-      <section className="section settings-section">
-        <div className="section-heading">
-          <div>
-            <h2>IT認証基盤の自動ログイン</h2>
-            <p>認証情報は端末内の拡張ストレージにだけ保存します。</p>
-          </div>
-          <span className={`auth-state ${settings.configured ? "ready" : ""}`}>
-            {settings.configured ? "設定済み" : settings.enabled ? "編集中" : "未使用"}
-          </span>
-        </div>
-
-        <label className="setting-toggle">
-          <input
-            checked={settings.enabled}
-            onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })}
-            type="checkbox"
-          />
-          <span>自動ログインを使用する</span>
-        </label>
-
-        {settings.enabled && (
-          <>
-            <div className="settings-grid">
-              <label>
-                <span>大阪大学個人ID</span>
-                <input autoComplete="username" onChange={(event) => setId(event.target.value)} placeholder={settings.configured ? `保存済み: ${settings.idHint}` : ""} value={id} />
-              </label>
-              <label>
-                <span>パスワード</span>
-                <input autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} placeholder={settings.configured ? "保存済み（変更時のみ入力）" : ""} type="password" value={password} />
-              </label>
+      <div className="settings-primary">
+        <section className="section settings-section">
+          <div className="section-heading">
+            <div>
+              <h2>IT認証基盤の自動ログイン</h2>
+              <p>認証情報は端末内の拡張ストレージにだけ保存します。</p>
             </div>
-            <div className="mfa-settings">
-              <label className="setting-toggle mfa-toggle">
-                <input checked={mfaEnabled} onChange={(event) => setMfaEnabled(event.target.checked)} type="checkbox" />
-                <span>二段階認証も自動化する</span>
-              </label>
-              {mfaEnabled && (
-                <>
-                  <p>任意です。QR画像を端末内で解析するか、Base32 形式の手動入力コードを登録します。</p>
+            <span className={`auth-state ${settings.configured ? "ready" : ""}`}>
+              {settings.configured ? "設定済み" : settings.enabled ? "編集中" : "未使用"}
+            </span>
+          </div>
+
+          <label className="setting-toggle">
+            <input
+              checked={settings.enabled}
+              onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })}
+              type="checkbox"
+            />
+            <span>自動ログインを使用する</span>
+          </label>
+
+          {settings.enabled && (
+            <>
+              <div className="settings-grid">
+                <label>
+                  <span>大阪大学個人ID</span>
+                  <input autoComplete="username" onChange={(event) => setId(event.target.value)} placeholder={settings.configured ? `保存済み: ${settings.idHint}` : ""} value={id} />
+                </label>
+                <label>
+                  <span>パスワード</span>
+                  <input autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} placeholder={settings.configured ? "保存済み（変更時のみ入力）" : ""} type="password" value={password} />
+                </label>
+              </div>
+              <div className="mfa-settings">
+                <label className="setting-toggle mfa-toggle">
+                  <input checked={mfaEnabled} onChange={(event) => setMfaEnabled(event.target.checked)} type="checkbox" />
+                  <span>二段階認証も自動化する</span>
+                </label>
+                {mfaEnabled && (
+                  <>
+                    <p>任意です。Base32 形式の手動入力コードを登録します。</p>
                   <label>
                     <span>TOTP シークレット</span>
                     <input autoComplete="off" onChange={(event) => setTotpSecret(event.target.value)} placeholder={settings.mfaEnabled ? "保存済み（変更時のみ入力）" : "例: JBSWY3DPEHPK3PXP"} value={totpSecret} />
                   </label>
-                  <QrImport onSecret={setTotpSecret} onStatus={setStatus} />
                   <label className="mfa-consent">
                     <input checked={mfaConsent} onChange={(event) => setMfaConsent(event.target.checked)} type="checkbox" />
                     <span>パスワードと TOTP シークレットを同じ端末に保存すると、端末を奪われた場合に二要素を同時に失うリスクがあります。利便性とのトレードオフを理解し、MFA 自動化に同意します。</span>
                   </label>
-                </>
-              )}
+                  </>
+                )}
+              </div>
+            </>
+          )}
+
+          <div className="settings-actions">
+            <button className="primary-action" disabled={!canSave} onClick={save} type="button">
+              {saveLabel}
+            </button>
+          </div>
+          {status && <p className="settings-status">{status}</p>}
+        </section>
+      </div>
+
+      <aside className="settings-aside">
+        <section className="section saved-auth-card">
+          <div className="section-heading">
+            <div>
+              <h2>保存済み情報</h2>
+              <p>{settings.configured ? `ID: ${settings.idHint}` : "まだ保存されていません。"}</p>
             </div>
-          </>
-        )}
-
-        <div className="settings-actions">
-          <button disabled={saving || (settings.enabled && ((!settings.configured && (!id || !password)) || (mfaEnabled && !mfaConsent)))} onClick={save} type="button">
-            設定を保存
+          </div>
+          <p>自動ログインを停止しても、保存済みの認証情報は削除されません。完全に消す場合だけ削除ボタンを使います。</p>
+          <button className="danger-action" disabled={saving || !settings.configured} onClick={removeSavedCredentials} type="button">
+            保存済み情報を削除
           </button>
-        </div>
-        {status && <p className="settings-status">{status}</p>}
-      </section>
+        </section>
 
-      <section className="section settings-note">
-        <div className="section-heading">
-          <h2>扱う範囲</h2>
-        </div>
-        <p>認証情報は KOAN Plus 独自のサーバーへ送信しません。抽出不能な暗号鍵と AES-GCM 暗号文を端末内に保存します。MFA を有効にした場合だけ、RFC 6238 に従って端末内で認証コードを生成します。</p>
-      </section>
+        <section className="section settings-note">
+          <div className="section-heading">
+            <h2>扱う範囲</h2>
+          </div>
+          <p>認証情報は KOAN Plus 独自のサーバーへ送信しません。抽出不能な暗号鍵と AES-GCM 暗号文を端末内に保存します。MFA を有効にした場合だけ、RFC 6238 に従って端末内で認証コードを生成します。</p>
+        </section>
+      </aside>
     </div>
-  );
-}
-
-function QrImport({
-  onSecret,
-  onStatus,
-}: {
-  onSecret: (secret: string) => void;
-  onStatus: (status: string) => void;
-}) {
-  const readQr = async (file: File) => {
-    try {
-      const Detector = (window as unknown as {
-        BarcodeDetector?: new (options: { formats: string[] }) => {
-          detect(image: ImageBitmap): Promise<Array<{ rawValue: string }>>;
-        };
-      }).BarcodeDetector;
-      const bitmap = await createImageBitmap(file);
-      let value = "";
-      if (Detector) {
-        const codes = await new Detector({ formats: ["qr_code"] }).detect(bitmap);
-        value = codes[0]?.rawValue || "";
-      }
-      if (!value) {
-        const canvas = document.createElement("canvas");
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        const context = canvas.getContext("2d", { willReadFrequently: true });
-        if (!context) throw new Error("QR画像を解析できませんでした。");
-        context.drawImage(bitmap, 0, 0);
-        const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-        value = jsQR(pixels.data, pixels.width, pixels.height)?.data || "";
-      }
-      bitmap.close();
-      if (!value) throw new Error("QRコードを読み取れませんでした。画像を確認してください。");
-      const url = new URL(value);
-      if (url.protocol !== "otpauth:" || url.hostname !== "totp") {
-        throw new Error("TOTP 登録用のQRコードではありません。");
-      }
-      const secret = url.searchParams.get("secret");
-      if (!secret) throw new Error("QRコードにTOTPシークレットが含まれていません。");
-      onSecret(secret);
-      onStatus("QRコードを端末内で読み取りました。保存前にリスク同意を確認してください。");
-    } catch (error) {
-      onStatus(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  return (
-    <label className="qr-import">
-      <span>QR画像から読み取る</span>
-      <input accept="image/*" onChange={(event) => {
-        const file = event.target.files?.[0];
-        if (file) void readQr(file);
-      }} type="file" />
-      <small>QR画像は外部へ送信せず、このブラウザ内だけで解析します。</small>
-    </label>
   );
 }
 

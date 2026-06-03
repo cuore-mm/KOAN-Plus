@@ -331,11 +331,23 @@ async function authResponse(message, sender) {
   const record = await readAuthRecord();
   if (message.type === "auth-settings") return { ok: true, ...await readAuthSettings(record) };
 
+  if (message.type === "auth-delete") {
+    await clearAuthRecord();
+    return { ok: true, configured: false, enabled: false, autoSubmit: true, mfaEnabled: false, idHint: "" };
+  }
+
   if (message.type === "auth-save") {
     const values = message.values || {};
     if (!values.enabled) {
-      await clearAuthRecord();
-      return { ok: true, configured: false, enabled: false, autoSubmit: true, mfaEnabled: false };
+      if (record?.payload) {
+        await writeAuthRecord({
+          ...record,
+          enabled: false,
+          autoSubmit: true,
+        });
+        return { ok: true, ...await readAuthSettings(await readAuthRecord()) };
+      }
+      return { ok: true, configured: false, enabled: false, autoSubmit: true, mfaEnabled: false, idHint: "" };
     }
     if (!values.id || !values.password) {
       if (!record?.payload) throw new Error("ID とパスワードを入力してください。");
@@ -348,7 +360,7 @@ async function authResponse(message, sender) {
       throw new Error("MFA 自動化のリスクを確認し、同意してください。");
     }
     if (values.mfaEnabled && !totpSecret) {
-      throw new Error("TOTP シークレットを入力するか、QR画像から読み取ってください。");
+      throw new Error("TOTP シークレットを入力してください。");
     }
     if (totpSecret) decodeBase32(totpSecret);
     const key = await crypto.subtle.generateKey(

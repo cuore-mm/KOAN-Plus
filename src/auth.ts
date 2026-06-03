@@ -37,6 +37,10 @@ export function saveAuthSettings(values: {
   return sendAuthMessage({ type: "auth-save", values });
 }
 
+export function deleteAuthSettings() {
+  return sendAuthMessage({ type: "auth-delete" });
+}
+
 export function ensureKoanLogin() {
   return sendAuthMessage({ type: "auth-ensure-koan" });
 }

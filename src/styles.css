@@ -535,24 +535,6 @@ main {
   line-height: 1.7;
 }
 
-.qr-import {
-  display: block;
-  margin-top: 10px;
-}
-
-.qr-import input {
-  display: block;
-  font-size: 12px;
-  margin-top: 5px;
-}
-
-.qr-import small {
-  color: var(--text-muted-green);
-  display: block;
-  font-size: 11px;
-  margin-top: 4px;
-}
-
 .mfa-settings p {
   margin: 0 0 11px;
 }
@@ -1540,7 +1522,11 @@ main.page-layout {
 }
 
 .settings-page {
-  max-width: 920px;
+  align-items: start;
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(620px, 0.72fr) minmax(300px, 0.28fr);
+  max-width: 1280px;
 }
 
 main.page-layout .section {
@@ -1782,7 +1768,7 @@ main.page-layout .credit-groups summary::before {
 }
 
 main.page-layout .credit-groups summary b {
-  color: var(--color-accent-purple);
+  color: inherit;
   font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
   font-size: 13px;
 }
@@ -1871,6 +1857,7 @@ main.page-layout .mfa-consent input {
 
 main.page-layout .settings-grid {
   gap: 12px;
+  max-width: none;
   padding: 14px 16px 4px;
 }
 
@@ -1886,11 +1873,11 @@ main.page-layout .mfa-settings {
   margin: 15px 16px 0;
 }
 
+main.page-layout .saved-auth-card p,
 main.page-layout .mfa-settings p,
 main.page-layout .mfa-consent,
 main.page-layout .settings-note p,
-main.page-layout .settings-status,
-main.page-layout .qr-import small {
+main.page-layout .settings-status {
   color: var(--text-secondary);
 }
 
@@ -1899,11 +1886,72 @@ main.page-layout .mfa-consent span {
 }
 
 main.page-layout .settings-actions {
+  display: flex;
+  gap: 8px;
   padding: 16px 16px 0;
+}
+
+main.page-layout .settings-actions .primary-action {
+  background: var(--text-title);
+  border-color: var(--text-title);
+  color: #fff;
+  min-width: 136px;
+}
+
+main.page-layout .settings-actions .primary-action:hover {
+  background: #263447;
+  border-color: #263447;
+  color: #fff;
+}
+
+main.page-layout .settings-actions .primary-action:disabled {
+  background: var(--bg-shell);
+  border-color: var(--border-primary);
+  color: var(--text-secondary);
 }
 
 main.page-layout .settings-status {
   margin: 12px 16px 0;
+}
+
+main.page-layout .settings-aside {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+main.page-layout .saved-auth-card {
+  padding: 0 0 16px;
+}
+
+main.page-layout .saved-auth-card p {
+  font-size: 12px;
+  line-height: 1.8;
+  padding: 13px 16px 12px;
+}
+
+main.page-layout .saved-auth-card .danger-action {
+  background: var(--bg-warning);
+  border: 1px solid var(--border-warning);
+  border-radius: 7px;
+  color: var(--color-accent);
+  font-size: 12px;
+  font-weight: 700;
+  margin: 0 16px;
+  min-height: 32px;
+  padding: 0 12px;
+}
+
+main.page-layout .saved-auth-card .danger-action:hover {
+  border-color: var(--border-important);
+  color: var(--color-accent);
+}
+
+main.page-layout .saved-auth-card .danger-action:disabled {
+  background: var(--bg-shell);
+  border-color: var(--border-primary);
+  color: var(--text-secondary);
 }
 
 main.page-layout .settings-note {
