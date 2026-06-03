@@ -375,6 +375,10 @@ function Settings() {
   const [status, setStatus] = useState("設定を確認中");
   const [saving, setSaving] = useState(false);
 
+  // UI States
+  const [showDetails, setShowDetails] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+
   useEffect(() => {
     loadAuthSettings()
       .then((next) => {
@@ -405,13 +409,17 @@ function Settings() {
       password,
       totpSecret,
       mfaConsent,
-      mfaEnabled,
+      mfaEnabled: settings.enabled && mfaEnabled,
     }),
-    settings.enabled ? "端末内に暗号化して保存しました。" : "保存済み情報を残したまま、自動ログインを停止しました。",
+    settings.enabled ? "端末内に暗号化して保存しました。" : "自動ログインを停止しました。",
   );
 
+  const confirmDelete = () => {
+    setShowDeleteModal(true);
+  };
+
   const removeSavedCredentials = () => {
-    if (!window.confirm("保存済みのID・パスワード・TOTPシークレットを削除します。よろしいですか？")) return;
+    setShowDeleteModal(false);
     void run(async () => {
       const next = await deleteAuthSettings();
       setId("");
@@ -428,13 +436,12 @@ function Settings() {
       ? settings.configured || Boolean(id && password)
       : settings.configured
   ) && (!settings.enabled || !mfaEnabled || mfaConsent);
+
   const saveLabel = saving
     ? "保存中..."
-    : settings.enabled
-      ? "保存して有効化"
-      : settings.configured
-        ? "自動ログインを停止"
-        : "設定を保存";
+    : settings.configured
+      ? "変更を保存"
+      : "保存して有効化";
 
   return (
     <div className="settings-page">
@@ -450,13 +457,19 @@ function Settings() {
             </span>
           </div>
 
-          <label className="setting-toggle">
-            <input
-              checked={settings.enabled}
-              onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })}
-              type="checkbox"
-            />
-            <span>自動ログインを使用する</span>
+          <label className="toggle-row">
+            <div className="toggle-info">
+              <span className="toggle-title">自動ログインを使用する</span>
+              <span className="toggle-desc">阪大のログイン画面でIDとパスワードの入力を自動化します。</span>
+            </div>
+            <div className="switch">
+              <input
+                checked={settings.enabled}
+                onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })}
+                type="checkbox"
+              />
+              <span className="slider"></span>
+            </div>
           </label>
 
           {settings.enabled && (
@@ -464,32 +477,62 @@ function Settings() {
               <div className="settings-grid">
                 <label>
                   <span>大阪大学個人ID</span>
-                  <input autoComplete="username" onChange={(event) => setId(event.target.value)} placeholder={settings.configured ? `保存済み: ${settings.idHint}` : ""} value={id} />
+                  <input
+                    autoComplete="username"
+                    onChange={(event) => setId(event.target.value)}
+                    placeholder={settings.configured ? `保存済み: ${settings.idHint}` : ""}
+                    value={id}
+                  />
                 </label>
                 <label>
                   <span>パスワード</span>
-                  <input autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} placeholder={settings.configured ? "保存済み（変更時のみ入力）" : ""} type="password" value={password} />
+                  <input
+                    autoComplete="current-password"
+                    onChange={(event) => setPassword(event.target.value)}
+                    placeholder={settings.configured ? "保存済み（変更時のみ入力）" : ""}
+                    type="password"
+                    value={password}
+                  />
                 </label>
               </div>
-              <div className="mfa-settings">
-                <label className="setting-toggle mfa-toggle">
-                  <input checked={mfaEnabled} onChange={(event) => setMfaEnabled(event.target.checked)} type="checkbox" />
-                  <span>二段階認証も自動化する</span>
-                </label>
-                {mfaEnabled && (
-                  <>
-                    <p>任意です。Base32 形式の手動入力コードを登録します。</p>
-                  <label>
+
+              <label className="toggle-row mfa-toggle-row">
+                <div className="toggle-info">
+                  <span className="toggle-title">二段階認証も自動化する</span>
+                  <span className="toggle-desc">二段階認証を使っている場合のみ設定してください。</span>
+                </div>
+                <div className="switch">
+                  <input
+                    checked={mfaEnabled}
+                    onChange={(event) => setMfaEnabled(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span className="slider"></span>
+                </div>
+              </label>
+
+              {mfaEnabled && (
+                <div className="mfa-settings-fields">
+                  <label className="settings-grid-field">
                     <span>TOTP シークレット</span>
-                    <input autoComplete="off" onChange={(event) => setTotpSecret(event.target.value)} placeholder={settings.mfaEnabled ? "保存済み（変更時のみ入力）" : "例: JBSWY3DPEHPK3PXP"} value={totpSecret} />
+                    <input
+                      autoComplete="off"
+                      onChange={(event) => setTotpSecret(event.target.value)}
+                      placeholder={settings.mfaEnabled ? "保存済み（変更時のみ入力）" : "例: JBSWY3DPEHPK3PXP"}
+                      value={totpSecret}
+                    />
                   </label>
+
                   <label className="mfa-consent">
-                    <input checked={mfaConsent} onChange={(event) => setMfaConsent(event.target.checked)} type="checkbox" />
+                    <input
+                      checked={mfaConsent}
+                      onChange={(event) => setMfaConsent(event.target.checked)}
+                      type="checkbox"
+                    />
                     <span>パスワードと TOTP シークレットを同じ端末に保存すると、端末を奪われた場合に二要素を同時に失うリスクがあります。利便性とのトレードオフを理解し、MFA 自動化に同意します。</span>
                   </label>
-                  </>
-                )}
-              </div>
+                </div>
+              )}
             </>
           )}
 
@@ -503,26 +546,75 @@ function Settings() {
       </div>
 
       <aside className="settings-aside">
-        <section className="section saved-auth-card">
+        <section className="section how-it-works-card">
           <div className="section-heading">
             <div>
-              <h2>保存済み情報</h2>
-              <p>{settings.configured ? `ID: ${settings.idHint}` : "まだ保存されていません。"}</p>
+              <h2>自動ログインのしくみ</h2>
             </div>
           </div>
-          <p>自動ログインを停止しても、保存済みの認証情報は削除されません。完全に消す場合だけ削除ボタンを使います。</p>
-          <button className="danger-action" disabled={saving || !settings.configured} onClick={removeSavedCredentials} type="button">
-            保存済み情報を削除
-          </button>
+          <div className="card-body">
+            <p>保存したIDとパスワードを使って、IT認証基盤への入力を補助します。</p>
+            <p>認証情報はこの端末の中だけで使われ、外部サーバーへ送信されません。</p>
+            <p>二段階認証を設定した場合は、認証アプリと同じ方式でこの端末内に6桁のコードを生成します。</p>
+            
+            <button
+              type="button"
+              className="btn-details-toggle"
+              onClick={() => setShowDetails(!showDetails)}
+            >
+              {showDetails ? "閉じる" : "詳しく見る"}
+            </button>
+            
+            {showDetails && (
+              <ul className="details-list">
+                <li>認証情報は Chrome の拡張ストレージに保存されます</li>
+                <li>保存時には AES-GCM で暗号化します</li>
+                <li>暗号化に使う鍵は端末内で生成します</li>
+                <li>KOAN Plus 独自のサーバーへ認証情報を送信することはありません</li>
+                <li>二段階認証を有効にした場合、TOTPシークレットから RFC 6238 に従って認証コードを生成します</li>
+                <li>QR画像を読み取る場合も、画像は外部へ送信せずブラウザ内で処理します</li>
+              </ul>
+            )}
+          </div>
         </section>
 
-        <section className="section settings-note">
+        <section className="section manage-auth-card">
           <div className="section-heading">
-            <h2>扱う範囲</h2>
+            <div>
+              <h2>認証情報の管理</h2>
+            </div>
           </div>
-          <p>認証情報は KOAN Plus 独自のサーバーへ送信しません。抽出不能な暗号鍵と AES-GCM 暗号文を端末内に保存します。MFA を有効にした場合だけ、RFC 6238 に従って端末内で認証コードを生成します。</p>
+          <div className="card-body">
+            <p>自動ログインを停止しても、保存済みの認証情報は削除されません。</p>
+            <p>完全に消したい場合のみ削除してください。</p>
+            <button
+              className="danger-text-action"
+              disabled={saving || !settings.configured}
+              onClick={confirmDelete}
+              type="button"
+            >
+              認証情報を削除
+            </button>
+          </div>
         </section>
       </aside>
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal && (
+        <div className="settings-modal-overlay">
+          <div className="settings-modal" role="dialog" aria-modal="true">
+            <p className="modal-text">保存済みのID・パスワード・TOTPシークレットを削除します。この操作は取り消せません。</p>
+            <div className="modal-actions">
+              <button className="modal-btn cancel" onClick={() => setShowDeleteModal(false)} type="button">
+                キャンセル
+              </button>
+              <button className="modal-btn confirm" onClick={removeSavedCredentials} type="button">
+                削除する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
