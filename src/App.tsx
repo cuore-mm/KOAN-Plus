@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import jsQR from "jsqr";
 import {
-  ACTIONS,
   BOARD_URL,
   GENRES,
   LIGHT_REFRESH_TTL_MS,
   PORTAL_URL,
-  SCHEDULE_URL,
   SNAPSHOT_TTL_MS,
   type ChangeItem,
   type GradeData,
@@ -652,20 +650,6 @@ function isImportantNotice(notice: Notice) {
   return notice.priority === "○" || /重要|要確認|締切|期限|停止|休講|変更|試験/.test(notice.title);
 }
 
-function QuickLinks() {
-  return (
-    <section className="section quick-links">
-      <div className="section-heading">
-        <h2>よく使うリンク</h2>
-      </div>
-      <div className="quick-links-grid">
-        {ACTIONS.map((action) => (
-          <a key={action.label} href={action.url} target="_blank">{action.label}</a>
-        ))}
-      </div>
-    </section>
-  );
-}
 
 function Grades({ data }: { data: GradeData | null }) {
   return (
@@ -907,27 +891,6 @@ function periodNumber(value: string) {
   return value.match(/\d+/)?.[0] || "";
 }
 
-function agendaWeeks() {
-  const today = new Date();
-  const horizon = dateKey(addDays(today, 8 * 7));
-  const monday = new Date(today);
-  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
-  const weeks = [];
-  for (let weekIndex = 0; weekIndex < 10; weekIndex += 1) {
-    const start = addDays(monday, weekIndex * 7);
-    const days = Array.from({ length: 7 }, (_, dayIndex) => {
-      const date = addDays(start, dayIndex);
-      return {
-        key: dateKey(date),
-        label: new Intl.DateTimeFormat("ja-JP", { weekday: "short" }).format(date),
-        shortDate: `${date.getMonth() + 1}/${date.getDate()}`,
-      };
-    });
-    weeks.push({ days, end: days[6], start: days[0] });
-    if (days.some((day) => day.key === horizon)) break;
-  }
-  return weeks;
-}
 
 function DashboardRightRail({
   changes,
@@ -1102,112 +1065,6 @@ function changeFor(schedule: ScheduleItem, changes: ChangeItem[]) {
   });
 }
 
-function WeeklyAgenda({
-  schedule,
-  changes,
-}: {
-  schedule: ScheduleItem[];
-  changes: ChangeItem[];
-}) {
-  const weeks = useMemo(agendaWeeks, []);
-  const today = dateKey(new Date());
-  const currentWeekIndex = Math.max(
-    0,
-    weeks.findIndex((week) => week.days.some((day) => day.key === today)),
-  );
-  const [selectedWeek, setSelectedWeek] = useState(currentWeekIndex);
-  const days = weeks[selectedWeek]?.days || weeks[0].days;
-  const [selectedDate, setSelectedDate] = useState(today);
-  const selectedSchedule = schedule.filter((item) => (item.date || today) === selectedDate);
-  const selectedChanges = changesForDate(changes, selectedDate, today);
-  const unmatchedChanges = selectedChanges.filter(
-    (change) => !selectedSchedule.some((item) => changeFor(item, [change])),
-  );
-  const selectedDay = days.find((day) => day.key === selectedDate) || days[0];
-  return (
-    <section className="section today-agenda">
-      <div className="section-heading">
-        <div>
-          <h2>今週の時間割</h2>
-        </div>
-        <a className="detail-link" href={SCHEDULE_URL} target="_blank">KOANで確認</a>
-      </div>
-      <div className="week-switcher">
-        <button
-          disabled={selectedWeek <= 0}
-          onClick={() => {
-            const nextWeek = Math.max(0, selectedWeek - 1);
-            setSelectedWeek(nextWeek);
-            setSelectedDate(weeks[nextWeek].days[0].key);
-          }}
-          type="button"
-        >
-          前の週
-        </button>
-        <span>{weeks[selectedWeek].start.shortDate} - {weeks[selectedWeek].end.shortDate}</span>
-        <button
-          disabled={selectedWeek >= weeks.length - 1}
-          onClick={() => {
-            const nextWeek = Math.min(weeks.length - 1, selectedWeek + 1);
-            setSelectedWeek(nextWeek);
-            setSelectedDate(weeks[nextWeek].days[0].key);
-          }}
-          type="button"
-        >
-          次の週
-        </button>
-      </div>
-      <div className="week-tabs" role="tablist" aria-label="表示する曜日">
-        {days.map((day) => {
-          const daySchedule = schedule.filter((item) => (item.date || today) === day.key);
-          const dayChanges = changesForDate(changes, day.key, today);
-          return (
-            <button
-              aria-selected={day.key === selectedDate}
-              className={day.key === selectedDate ? "active" : ""}
-              key={day.key}
-              onClick={() => setSelectedDate(day.key)}
-              role="tab"
-              type="button"
-            >
-              <span>{day.label}</span>
-              <small>{day.shortDate}</small>
-              <b>{daySchedule.length}</b>
-              {dayChanges.length > 0 && <em>{dayChanges.length}</em>}
-            </button>
-          );
-        })}
-      </div>
-      <div className="agenda-column weekly-agenda-column">
-        <div className="column-heading">
-          <h3>{selectedDay.shortDate}（{selectedDay.label}） <b>{selectedSchedule.length}</b></h3>
-          {selectedChanges.length > 0 && <span className="change-summary">変更 {selectedChanges.length}</span>}
-        </div>
-        <div className="agenda-rows">
-          {selectedSchedule.length ? selectedSchedule.map((item, index) => {
-            const change = changeFor(item, selectedChanges);
-            return (
-              <div className="schedule-row" key={`${item.period}-${index}`}>
-                <b>{item.period}</b>
-                <span>
-                  {item.title}
-                  <small>{item.room}</small>
-                  {change && <em>{change.type}</em>}
-                </span>
-              </div>
-            );
-          }) : <p className="empty">この日の授業はありません。</p>}
-          {unmatchedChanges.map((item, index) => (
-            <div className="change-row" key={`${item.date}-${item.period}-${index}`}>
-              <b>{item.type}</b>
-              <span>{item.period}<small>{item.course}</small></span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
 
 function NewActivity({
   loading,

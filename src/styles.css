@@ -133,48 +133,35 @@ main {
   min-width: 0;
 }
 
-.today-agenda,
 .next-actions,
 .activity-section {
   min-width: 0;
-}
-
-.today-agenda {
-  border-top: 3px solid #245445;
 }
 
 .next-actions {
   border-top: 3px solid #ad4029;
 }
 
-.today-body,
 .activity-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.18fr) minmax(250px, 0.82fr);
 }
 
-.agenda-column,
-.changes-column,
 .activity-column {
   min-width: 0;
   padding: 12px 13px;
 }
 
-.changes-column,
 .message-inbox {
   border-left: 1px solid #dedbd4;
 }
 
-.agenda-column h3,
-.changes-column h3,
 .activity-column h3 {
   color: #173e32;
   font-family: Georgia, "Yu Mincho", serif;
   font-size: 15px;
 }
 
-.agenda-column h3 b,
-.changes-column h3 b,
 .activity-column h3 b {
   color: #ad4029;
   font-family: Georgia, serif;
@@ -182,118 +169,12 @@ main {
   margin-left: 4px;
 }
 
-.today-date {
-  color: #718078;
-  font-family: Georgia, "Yu Mincho", serif;
-  font-size: 16px;
-}
-
-.agenda-rows,
 .task-list {
   max-height: 230px;
   overflow: auto;
 }
 
-.week-switcher {
-  align-items: center;
-  border-bottom: 1px solid #dedbd4;
-  color: #52645c;
-  display: grid;
-  font-family: Georgia, "Yu Mincho", serif;
-  font-size: 13px;
-  font-weight: 700;
-  grid-template-columns: 86px 1fr 86px;
-  min-height: 34px;
-  text-align: center;
-}
 
-.week-switcher button {
-  background: transparent;
-  border: 0;
-  color: #245445;
-  cursor: pointer;
-  font: inherit;
-  font-size: 11px;
-  height: 100%;
-}
-
-.week-switcher button:disabled {
-  color: #a8b0ab;
-  cursor: default;
-}
-
-.week-tabs {
-  border-bottom: 1px solid #dedbd4;
-  display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
-}
-
-.week-tabs button {
-  background: #f8f5ee;
-  border: 0;
-  border-right: 1px solid #dedbd4;
-  color: #52645c;
-  cursor: pointer;
-  display: grid;
-  gap: 1px;
-  justify-items: center;
-  min-width: 0;
-  padding: 7px 3px 6px;
-  position: relative;
-}
-
-.week-tabs button:last-child {
-  border-right: 0;
-}
-
-.week-tabs button:hover,
-.week-tabs button.active {
-  background: #eef3ef;
-  color: #173e32;
-}
-
-.week-tabs button.active {
-  box-shadow: inset 0 -3px #245445;
-}
-
-.week-tabs span {
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.week-tabs small {
-  font-size: 9px;
-}
-
-.week-tabs b {
-  color: #245445;
-  font-family: Georgia, serif;
-  font-size: 14px;
-}
-
-.week-tabs em {
-  background: #ad4029;
-  border-radius: 9px;
-  color: #fff;
-  font-size: 9px;
-  font-style: normal;
-  font-weight: 700;
-  line-height: 16px;
-  min-width: 16px;
-  position: absolute;
-  right: 5px;
-  top: 5px;
-}
-
-.weekly-agenda-column {
-  padding-top: 10px;
-}
-
-.change-summary {
-  color: #ad4029;
-  font-size: 11px;
-  font-weight: 700;
-}
 
 .task-list {
   padding: 5px 13px 8px;
@@ -366,30 +247,7 @@ main {
   opacity: 0.72;
 }
 
-.quick-links {
-  border-top: 3px solid #8d9b95;
-}
 
-.quick-links .section-heading {
-  min-height: 42px;
-}
-
-.quick-links h2 {
-  font-size: 16px;
-}
-
-.quick-links-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.quick-links-grid a {
-  border-bottom: 1px solid #ebe8e0;
-  color: #274238;
-  font-size: 11px;
-  padding: 9px 11px;
-  text-decoration: none;
-}
 
 .settings-page {
   max-width: 900px;
@@ -582,13 +440,7 @@ main {
   margin: 0;
 }
 
-.quick-links-grid a:nth-child(odd) {
-  border-right: 1px solid #ebe8e0;
-}
 
-.quick-links-grid a:hover {
-  color: #ad4029;
-}
 
 .column-heading {
   align-items: start;
@@ -1129,7 +981,6 @@ h2 {
 
 @media (max-width: 900px) {
   .dashboard-columns,
-  .today-body,
   .activity-grid,
   .grade-gpa-grid {
     grid-template-columns: 1fr;
@@ -1139,23 +990,14 @@ h2 {
     display: contents;
   }
 
-  .today-agenda {
-    order: 1;
-  }
-
   .next-actions {
     order: 2;
-  }
-
-  .quick-links {
-    order: 3;
   }
 
   .activity-section {
     order: 4;
   }
 
-  .changes-column,
   .message-inbox {
     border-left: 0;
     border-top: 1px solid #dedbd4;

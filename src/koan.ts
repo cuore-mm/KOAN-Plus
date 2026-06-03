@@ -40,23 +40,7 @@ export const GENRES = [
   "その他",
 ];
 
-export const ACTIONS = [
-  ["履修登録・登録状況", "RSW0001000-flow"],
-  ["履修希望（抽選）", "RSW4205200-flow"],
-  ["授業ポートフォリオ", "JPW0001000-flow"],
-  ["成績照会", "SIW0001200-flow"],
-  ["単位修得状況", "SIW0001300-flow"],
-  ["自己判定", "HTW0001000-flow"],
-  ["シラバス", "SYW0001000-flow"],
-  ["アンケート回答", "ENW4201000-flow"],
-  ["スケジュール管理", "PTW0001200-flow"],
-  ["休講補講照会", "KHW0001100-flow"],
-  ["カレンダー連携", "PTW4202000-flow"],
-  ["掲示板", "KJW0001100-flow"],
-].map(([label, flowId]) => ({
-  label,
-  url: `${BASE_URL}campussquare.do?_flowId=${flowId}`,
-}));
+
 
 export type ScheduleItem = { date?: string; period: string; title: string; room: string };
 export type ChangeItem = { type: string; date: string; period: string; course: string };
@@ -121,12 +105,6 @@ const normalize = (value: unknown) => String(value || "").replace(/\s+/g, " ").t
 const pause = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-const dateKey = (date: Date) =>
-  [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
 
 function parseDateKey(value: string) {
   const [year, month, day] = value.split("-").map(Number);
