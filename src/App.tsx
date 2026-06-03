@@ -68,6 +68,21 @@ const isExpired = (value: string | null, ttl: number) =>
   !value || Date.now() - new Date(value).getTime() >= ttl;
 
 function App() {
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    const stored = localStorage.getItem("koan-plus-theme");
+    if (stored === "light" || stored === "dark") return stored;
+    if (typeof window !== "undefined" && window.matchMedia) {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    return "light";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.setAttribute("data-theme", theme);
+    localStorage.setItem("koan-plus-theme", theme);
+  }, [theme]);
+
   const [data, setData] = useState<KoanData>(() => ({
     ...EMPTY,
     ...loadCache<KoanData>(),
@@ -259,10 +274,22 @@ function App() {
       <header className="app-topbar">
         <h1>{viewTitle}</h1>
         <div className="topbar-actions">
-          <small>{topbarState.status}</small>
-          <button type="button" disabled={topbarState.disabled} onClick={topbarState.action}>
-            {topbarState.label}
-          </button>
+          <div className="update-group">
+            <small>{topbarState.status}</small>
+            <button type="button" disabled={topbarState.disabled} onClick={topbarState.action}>
+              {topbarState.label}
+            </button>
+          </div>
+          <div className="theme-toggle-container">
+            <button
+              type="button"
+              className="theme-toggle-btn"
+              aria-label={theme === "light" ? "ダークモードに切り替え" : "ライトモードに切り替え"}
+              onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+            >
+              {theme === "light" ? "☾" : "☀︎"}
+            </button>
+          </div>
         </div>
       </header>
 
