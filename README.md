@@ -1,91 +1,114 @@
 # KOAN Plus
 
-KOAN Plus is a local-only Chrome extension that presents KOAN information in a
-readable dashboard. Ordinary KOAN pages are left unchanged.
+KOAN Plus is a local-only Chrome extension that turns Osaka University's KOAN
+and CLE information into a readable academic dashboard.
 
-## Data strategy
+The extension is designed to leave ordinary KOAN and CLE pages unchanged. It
+fetches data only when the dashboard is opened, when the user refreshes it, or
+when the user explicitly starts a heavier operation such as bulletin sync or
+grade retrieval.
 
-The dashboard fetches low-cost KOAN and CLE summaries when it opens and when
-the user presses **更新**. Bulletin snapshots remain separately controlled.
+## Features
 
-- A lightweight refresh requests the KOAN portal, this week's class changes,
-  and the unread bulletin list. A 10-minute cooldown is enforced in the request
-  layer across dashboard tabs to avoid duplicate requests from repeated opens.
-- A CLE refresh runs through an open, logged-in CLE tab. It requests the CLE
-  calendar and message-summary endpoints, then checks submission state only for
-  nearby assignment deadlines. CLE requests are GET-only.
-- CLE message bodies and assignment bodies are never fetched or stored. The
-  local cache contains assignment metadata, submission-state labels, and
-  per-course unread message counts.
-- A bulletin snapshot is run only when the user presses **掲示を同期**. It starts
-  independent bulletin-board flows for each genre, follows pagination, waits
-  at least 750 ms between page requests, and stores list metadata locally.
-  Snapshots are limited to once every 6 hours, 12 pages per genre, and 3
-  minutes per run. Incomplete runs are not cached.
-- Bulletin bodies are never prefetched because opening a detail page may change
+- Dashboard view for KOAN schedule, class changes, bulletins, CLE assignments,
+  CLE unread message counts, and grades.
+- Controlled KOAN refresh with request cooldowns to avoid duplicate work across
+  dashboard tabs.
+- CLE refresh through a logged-in CLE tab using GET-only API requests.
+- User-triggered bulletin snapshot sync with pagination, delay, and runtime
+  limits.
+- User-triggered grade retrieval from KOAN.
+- Optional local auto-login support for Osaka University authentication.
+- Optional MFA/TOTP automation after explicit risk consent.
+
+## Privacy And Data Handling
+
+KOAN Plus is built as a local browser extension. It does not run a backend
+service, and it does not upload QR images, credentials, bulletin bodies, CLE
+message bodies, or assignment bodies.
+
+Authentication cookies remain managed by Chrome. KOAN Plus does not read or
+store those cookies. Cached dashboard data stays in the extension origin's
+`localStorage`.
+
+If optional auto-login is enabled, the university ID, password, and optional
+TOTP secret are encrypted locally with AES-GCM using a non-extractable Web
+Crypto key stored with the ciphertext in the extension's IndexedDB. Keeping a
+password and TOTP secret on the same device improves convenience but weakens
+the separation between authentication factors. Use this feature only if you
+accept that tradeoff.
+
+## Request Strategy
+
+KOAN Plus intentionally separates lightweight refreshes from heavier user
+actions.
+
+- A lightweight dashboard refresh requests the KOAN portal, this week's class
+  changes, unread bulletin metadata, CLE calendar items, and CLE message
+  summary data.
+- CLE assignment status enrichment is limited to nearby assignment deadlines.
+- Bulletin snapshot sync runs only when the user presses **掲示を同期**. It
+  follows pagination with delays and stores list metadata only.
+- Bulletin bodies are not prefetched because opening a detail page may change
   unread state.
-- Selecting a bulletin clears its unread badge in the local cache immediately.
-  The next lightweight refresh reconciles the badge with KOAN's unread list.
-- Cached bulletin detail URLs are never opened directly. When a user selects a
-  bulletin, KOAN Plus starts a fresh bulletin-board flow and resolves a current
-  `_flowExecutionKey` before opening the original KOAN detail page. Resolution
-  is limited to one request chain at a time, 12 pages, and 1 minute.
-- Authentication cookies remain managed by the browser. They are not read or
-  stored by KOAN Plus.
-- Optional IT authentication auto-login can be enabled from the settings tab.
-  The extension encrypts the university ID and password locally with AES-GCM
-  using a non-extractable Web Crypto key stored with the ciphertext in the
-  extension's IndexedDB. The content script is limited to Osaka University's
-  IdP and MFA origins.
-- MFA automation is separately optional and requires an explicit risk consent.
-  If enabled, KOAN Plus stores the TOTP secret inside the same encrypted vault
-  and generates the six-digit RFC 6238 code locally. Keeping the password and
-  TOTP secret on one device is more convenient but weakens the separation
-  between authentication factors.
-- The settings tab can read an `otpauth://totp/` QR image locally with Chrome's
-  barcode detector. QR images are never uploaded.
-- Before a KOAN refresh, the dashboard checks whether the KOAN session is
-  active. If authentication is needed and auto-login is configured, it opens
-  the Osaka University login flow in an inactive tab, waits for completion,
-  and then refreshes.
-- KOAN refresh runs before CLE refresh so the two SSO flows do not compete.
-  CLE login also uses an inactive tab. That CLE tab remains open in the
-  background because CLE API requests must run inside a CLE page context.
-- If a CLE tab exists but its API session has expired, KOAN Plus sends that tab
-  back through CLE login and retries the CLE refresh once. After two stable API
-  probes, subsequent requests stay pinned to that authenticated CLE tab.
-- When auto-login is disabled, authentication tabs opened by KOAN Plus remain
-  interactive and return focus to the originating KOAN Plus tab after login.
-  University pages opened directly by the user are never redirected back.
-- Cache data stays in the extension origin's `localStorage`.
-- Fetch helpers reject destinations outside `https://koan.osaka-u.ac.jp`.
-  CLE requests are separately restricted to `https://www.cle.osaka-u.ac.jp/learn/api/`.
-- Every KOAN HTTP request is aborted after 15 seconds. The extension contains
-  no timers or background jobs that periodically scrape KOAN or CLE.
-- Failed operations also have retry delays: 1 minute for lightweight and grade
-  refreshes, 10 minutes for bulletin snapshots, and 10 seconds for opening a
-  bulletin detail.
 - Grade data is fetched only when the user opens the grade tab and presses
-  **成績を取得**. The request runs through an open KOAN tab so the old Web Flow
-  session remains valid. It combines course-grade history with credit status,
-  groups credits by KOAN's minor subject categories, and is stored only in the
-  extension origin's `localStorage`.
+  **成績を取得**.
 
 KOAN does not expose a single low-cost page containing every current bulletin
-title. Its initial bulletin page exposes unread titles and genre counts. The
-snapshot operation is therefore intentionally visible and user-triggered.
+title. The bulletin snapshot operation is therefore intentionally visible and
+user-triggered.
 
-## Development
+## Install For Local Use
+
+This repository does not commit built extension files. Build the extension
+locally before loading it in Chrome.
 
 ```sh
 npm install
 npm run build
 ```
 
-The source code is written in TypeScript and React.
+Then:
 
-Load the generated `dist/` directory from `chrome://extensions` using
-**Load unpacked**.
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Choose **Load unpacked**.
+4. Select the generated `dist/` directory.
 
 Do not load the project root for normal use. The root manifest exists only to
 show a development guide if the wrong directory is selected.
+
+## Development
+
+```sh
+npm install
+npm run dev
+```
+
+Production build:
+
+```sh
+npm run build
+```
+
+Preview build output:
+
+```sh
+npm run preview
+```
+
+Generated files such as `dist/`, `node_modules/`, and `*.tsbuildinfo` should
+not be committed.
+
+## Repository Status
+
+This project is not an official Osaka University project. KOAN Plus is an
+independent local browser extension for personal academic workflow support.
+
+The extension depends on the current behavior of KOAN, CLE, and Osaka
+University authentication pages. Those services may change without notice, so
+users should review the code and build locally before use.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
