@@ -226,10 +226,26 @@ async function fetchMessages(tabId?: number) {
   );
 }
 
-export async function refreshCle(tabId?: number): Promise<CleData> {
+export async function refreshCle(tabId?: number, onProgress?: (value: string) => void): Promise<CleData> {
   const release = acquireLease();
   try {
-    const [tasks, messages] = await Promise.all([fetchTasks(tabId), fetchMessages(tabId)]);
+    onProgress?.("課題とメッセージを取得中");
+    const completed = new Set<string>();
+    const markDone = (label: string) => {
+      completed.add(label);
+      onProgress?.(`${[...completed].join(" / ")} 取得済み`);
+    };
+    const [tasks, messages] = await Promise.all([
+      fetchTasks(tabId).then((result) => {
+        markDone("課題");
+        return result;
+      }),
+      fetchMessages(tabId).then((result) => {
+        markDone("メッセージ");
+        return result;
+      }),
+    ]);
+    onProgress?.("取得結果を整理中");
     return {
       tasks,
       messages,
@@ -237,6 +253,7 @@ export async function refreshCle(tabId?: number): Promise<CleData> {
       updatedAt: new Date().toISOString(),
     };
   } finally {
+    onProgress?.("");
     release();
   }
 }

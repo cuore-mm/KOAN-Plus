@@ -44,7 +44,10 @@ import {
   loadAuthSettings,
   refreshCleLogin,
   saveAuthSettings,
+  getSavedMfaSecrets,
 } from "./auth";
+import QRCode from "qrcode";
+
 
 const EMPTY = {
   schedule: [],
@@ -66,6 +69,8 @@ const fmtTime = (value: string | null) =>
 
 const isExpired = (value: string | null, ttl: number) =>
   !value || Date.now() - new Date(value).getTime() >= ttl;
+
+const compactStatus = (label: string, value: string) => value ? `${label}: ${value}` : "";
 
 function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() => {
@@ -116,9 +121,11 @@ function App() {
         return;
       }
       const auth = await ensureKoanLogin();
-      if (auth.loginStarted) setStatus("自動ログイン完了 / 更新中");
-      else setStatus("更新中");
-      const result = await refreshLight(data.notices);
+      if (auth.loginStarted) setStatus("自動ログイン完了 / データ取得準備中");
+      else setStatus("データ取得準備中");
+      const result = await refreshLight(data.notices, (value) => {
+        if (value) setStatus(value);
+      });
       setData((current) => {
         const next = { ...current, ...result };
         saveCache(next);
@@ -137,15 +144,19 @@ function App() {
     setCleStatus("CLEログイン状態を確認中");
     try {
       const auth = await ensureCleLogin();
-      if (auth.loginStarted) setCleStatus("CLE自動ログイン完了 / 更新中");
-      else setCleStatus("CLE更新中");
+      if (auth.loginStarted) setCleStatus("自動ログイン完了 / データ取得準備中");
+      else setCleStatus("データ取得準備中");
       let next;
       try {
-        next = await refreshCle(auth.tabId);
+        next = await refreshCle(auth.tabId, (value) => {
+          if (value) setCleStatus(value);
+        });
       } catch {
-        setCleStatus("CLEセッションを再認証中");
+        setCleStatus("セッションを再認証中");
         const refreshedAuth = await refreshCleLogin();
-        next = await refreshCle(refreshedAuth.tabId);
+        next = await refreshCle(refreshedAuth.tabId, (value) => {
+          if (value) setCleStatus(value);
+        });
       }
       setCleData(next);
       saveCleCache(next);
@@ -158,8 +169,7 @@ function App() {
   };
 
   const update = async () => {
-    await updateKoan();
-    await updateCle();
+    await Promise.all([updateKoan(), updateCle()]);
   };
 
   const syncSnapshot = async () => {
@@ -261,7 +271,12 @@ function App() {
     action: update,
     disabled: loading || cleLoading,
     label: loading || cleLoading ? "更新中..." : "更新",
-    status: loading || cleLoading ? "更新中..." : `更新済み ${fmtTime(latestUpdatedAt)}`,
+    status: loading || cleLoading
+      ? [
+          compactStatus("KOAN", status),
+          compactStatus("CLE", cleStatus),
+        ].filter(Boolean).join(" / ") || "更新中..."
+      : `更新済み ${fmtTime(latestUpdatedAt)}`,
   };
 
   return (
@@ -367,33 +382,162 @@ const EMPTY_AUTH_SETTINGS: AuthSettings = {
 
 function Settings() {
   const [settings, setSettings] = useState(EMPTY_AUTH_SETTINGS);
+  const [persistedSettings, setPersistedSettings] = useState(EMPTY_AUTH_SETTINGS);
   const [id, setId] = useState("");
   const [password, setPassword] = useState("");
   const [totpSecret, setTotpSecret] = useState("");
   const [mfaConsent, setMfaConsent] = useState(false);
   const [mfaEnabled, setMfaEnabled] = useState(false);
-  const [status, setStatus] = useState("設定を確認中");
+  const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
 
   // UI States
   const [showDetails, setShowDetails] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [savedSecrets, setSavedSecrets] = useState<{
+    totpSecret: string;
+    temporaryCancelCode: string;
+  } | null>(null);
+  const [showCancelCode, setShowCancelCode] = useState(false);
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [showMfaResetModal, setShowMfaResetModal] = useState(false);
+
+  const reloadSettings = async () => {
+    try {
+      const next = await loadAuthSettings();
+      setSettings(next);
+      setPersistedSettings(next);
+      setMfaEnabled(next.mfaEnabled);
+      setMfaConsent(next.mfaEnabled);
+      if (next.configured && next.mfaEnabled) {
+        const secrets = await getSavedMfaSecrets();
+        if (secrets.configured && secrets.totpSecret) {
+          setSavedSecrets({
+            totpSecret: secrets.totpSecret,
+            temporaryCancelCode: secrets.temporaryCancelCode || "",
+          });
+          return;
+        }
+      }
+      setSavedSecrets(null);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   useEffect(() => {
-    loadAuthSettings()
-      .then((next) => {
-        setSettings(next);
-        setMfaEnabled(next.mfaEnabled);
-        setStatus("");
-      })
-      .catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
+    void reloadSettings();
+
+    const handleFocus = () => {
+      void reloadSettings();
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
   }, []);
+
+  const hasSavedMfa = Boolean(savedSecrets?.totpSecret);
+  const hasCredentialInput = Boolean(id.trim() || password);
+  const hasRequiredNewCredentials = settings.configured || Boolean(id.trim() && password);
+  const enabledChanged = settings.enabled !== persistedSettings.enabled;
+  const mfaAutomationChanged = settings.enabled && mfaEnabled !== persistedSettings.mfaEnabled;
+  const mfaConsentChanged = settings.enabled && mfaEnabled && mfaConsent !== persistedSettings.mfaEnabled;
+  const hasUnsavedChanges = enabledChanged || hasCredentialInput || mfaAutomationChanged || mfaConsentChanged;
+  const mfaReadyToSave = !settings.enabled || !mfaEnabled || (
+    mfaConsent && Boolean(hasSavedMfa || settings.mfaEnabled)
+  );
+
+  const startAutoCollect = (forceReset = false) => {
+    if (!mfaConsent) {
+      setStatus("MFA自動化のリスクに同意してから設定してください。");
+      return;
+    }
+    if (hasSavedMfa && !forceReset) {
+      setShowMfaResetModal(true);
+      return;
+    }
+    const chromeObj = typeof window !== "undefined" ? (window as any).chrome : undefined;
+    if (chromeObj && chromeObj.tabs?.create) {
+      setStatus(hasSavedMfa
+        ? "二段階認証を再設定中です。新しい登録が完了すると、この端末に保存済みのMFA情報は置き換わります。"
+        : "二段階認証の登録画面を開いています。完了まで数秒お待ちください。");
+      setSaving(true);
+      
+      chromeObj.tabs.create({
+        url: "about:blank",
+        active: false // 非アクティブ（バックグラウンド）で開く
+      }, (tab: any) => {
+        if (!tab || !tab.id) {
+          setSaving(false);
+          setStatus("バックグラウンドタブの作成に失敗しました。");
+          return;
+        }
+
+        // バックグラウンドに自動取得対象タブとして登録
+        chromeObj.runtime.sendMessage({
+          type: "auth-mfa-register-auto-tab",
+          tabId: tab.id
+        }, (response: any) => {
+          if (!response?.ok) {
+            setSaving(false);
+            setStatus(response?.error || "自動取得タブの登録に失敗しました。");
+            return;
+          }
+          chromeObj.tabs.update(tab.id, {
+            url: "https://auth-mfa.auth.osaka-u.ac.jp/AttributeRegistSite/MfaInfoServlet#auto-collect"
+          });
+        });
+
+        // 12秒のセーフティタイマー（ログイン要求やエラー等で進まない場合に前面に出す）
+        const timeoutId = setTimeout(() => {
+          if (chromeObj.tabs?.update) {
+            chromeObj.tabs.update(tab.id, { active: true });
+            setStatus("自動ログインが完了しなかったため、タブを前面に表示しました。ログインを完了させてください。");
+          }
+        }, 12000);
+
+        // タブが閉じられたことを検知してリロード
+        const listener = (tabId: number) => {
+          if (tabId === tab.id) {
+            chromeObj.tabs.onRemoved.removeListener(listener);
+            clearTimeout(timeoutId);
+            
+            void reloadSettings().then(() => {
+              setSaving(false);
+              setStatus("二段階認証の登録を保存しました。今後はこの端末で6桁コードを生成できます。");
+            }).catch((e) => {
+              setSaving(false);
+              setStatus(`自動取得後の読み込みに失敗しました: ${e.message}`);
+            });
+          }
+        };
+        chromeObj.tabs.onRemoved.addListener(listener);
+      });
+    } else {
+      setStatus("自動取得は拡張機能のポップアップまたはオプション画面から実行してください。");
+    }
+  };
+
+  const qrCanvasRef = (node: HTMLCanvasElement | null) => {
+    if (node && savedSecrets?.totpSecret) {
+      const uri = `otpauth://totp/osaka-u?secret=${savedSecrets.totpSecret}&issuer=osaka-u`;
+      QRCode.toCanvas(node, uri, { width: 200, margin: 2 }, (error) => {
+        if (error) console.error("Failed to generate QR code:", error);
+      });
+    }
+  };
+
 
   const run = async (task: () => Promise<AuthSettings>, success: string) => {
     setSaving(true);
     try {
       const next = await task();
       setSettings(next);
+      setPersistedSettings(next);
+      setId("");
+      setPassword("");
+      setTotpSecret("");
+      setMfaEnabled(next.mfaEnabled);
+      setMfaConsent(next.mfaEnabled);
       setStatus(success);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -431,11 +575,9 @@ function Settings() {
     }, "保存済みの認証情報を削除しました。");
   };
 
-  const canSave = !saving && (
-    settings.enabled
-      ? settings.configured || Boolean(id && password)
-      : settings.configured
-  ) && (!settings.enabled || !mfaEnabled || mfaConsent);
+  const canSave = !saving && hasUnsavedChanges && (
+    settings.enabled ? hasRequiredNewCredentials : settings.configured
+  ) && mfaReadyToSave;
 
   const saveLabel = saving
     ? "保存中..."
@@ -513,15 +655,17 @@ function Settings() {
 
               {mfaEnabled && (
                 <div className="mfa-settings-fields">
-                  <label className="settings-grid-field">
-                    <span>TOTP シークレット</span>
-                    <input
-                      autoComplete="off"
-                      onChange={(event) => setTotpSecret(event.target.value)}
-                      placeholder={settings.mfaEnabled ? "保存済み（変更時のみ入力）" : "例: JBSWY3DPEHPK3PXP"}
-                      value={totpSecret}
-                    />
-                  </label>
+                  <div className={`mfa-guide ${hasSavedMfa ? "ready" : ""}`}>
+                    <div>
+                      <strong>{hasSavedMfa ? "この端末にMFA情報が登録済みです" : "MFAを使うには、この端末にも登録が必要です"}</strong>
+                      <p>
+                        {hasSavedMfa
+                          ? "阪大MFAで再登録すると、以前この端末に保存していたMFA情報は新しい情報で置き換わります。スマートフォン等の認証アプリも使う場合は、下のQRから同じ登録情報を追加してください。"
+                          : "阪大MFAの登録画面で、この端末を認証アプリ相当として追加します。登録後、この端末内で6桁コードを生成してログインを補助します。"}
+                      </p>
+                    </div>
+                    <span>{hasSavedMfa ? "登録済み" : "未登録"}</span>
+                  </div>
 
                   <label className="mfa-consent">
                     <input
@@ -529,9 +673,91 @@ function Settings() {
                       onChange={(event) => setMfaConsent(event.target.checked)}
                       type="checkbox"
                     />
-                    <span>パスワードと TOTP シークレットを同じ端末に保存すると、端末を奪われた場合に二要素を同時に失うリスクがあります。利便性とのトレードオフを理解し、MFA 自動化に同意します。</span>
+                    <span>パスワードとMFA情報を同じ端末に保存すると、端末を奪われた場合に二要素を同時に失うリスクがあります。利便性とのトレードオフを理解し、MFA自動化に同意します。</span>
                   </label>
+
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => startAutoCollect()}
+                      disabled={!mfaConsent || saving}
+                      className="mfa-btn primary full-width"
+                    >
+                      {hasSavedMfa ? "二段階認証を再設定" : "二段階認証をこの端末に登録"}
+                    </button>
+                    <p className="mfa-action-note">
+                      {hasSavedMfa
+                        ? "再設定では阪大MFAの登録画面を開き、新しいMFA情報でこの端末の保存内容を上書きします。"
+                        : "阪大MFAの登録画面を開きます。完了後、開いたタブは自動で閉じます。"}
+                    </p>
+                  </div>
+
+                  {savedSecrets && (
+                    <div className="mfa-saved-info" style={{
+                      marginTop: "16px",
+                      padding: "16px",
+                      background: "var(--bg-secondary)",
+                      borderRadius: "6px",
+                      border: "1px solid var(--border-color)",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "12px"
+                    }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ fontSize: "14px", fontWeight: "bold" }}>登録済み二段階認証情報</span>
+                        <button
+                          type="button"
+                          onClick={() => setShowQrModal(true)}
+                          className="mfa-btn"
+                        >
+                          認証アプリ登録用QRを表示
+                        </button>
+                      </div>
+                      
+                      {savedSecrets.temporaryCancelCode && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                          <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>一時解除コード</span>
+                          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                            <input
+                              type={showCancelCode ? "text" : "password"}
+                              readOnly
+                              value={savedSecrets.temporaryCancelCode}
+                              style={{
+                                flex: 1,
+                                padding: "6px 10px",
+                                background: "var(--bg-primary)",
+                                border: "1px solid var(--border-color)",
+                                borderRadius: "4px",
+                                fontFamily: "monospace",
+                                fontSize: "14px",
+                                color: "var(--text-primary)"
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowCancelCode(!showCancelCode)}
+                              className="mfa-btn"
+                            >
+                              {showCancelCode ? "隠す" : "表示"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(savedSecrets.temporaryCancelCode);
+                                setStatus("一時解除コードをクリップボードにコピーしました。");
+                                setTimeout(() => setStatus(""), 3000);
+                              }}
+                              className="mfa-btn"
+                            >
+                              コピー
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
+
               )}
             </>
           )}
@@ -615,7 +841,63 @@ function Settings() {
           </div>
         </div>
       )}
+
+      {/* MFA Reset Confirmation Modal */}
+      {showMfaResetModal && (
+        <div className="settings-modal-overlay">
+          <div className="settings-modal" role="dialog" aria-modal="true">
+            <h3 className="modal-title">二段階認証を再設定しますか</h3>
+            <p className="modal-text">
+              再設定を完了すると、この端末に保存済みのMFA情報は新しい登録情報で置き換わります。以前この端末で使っていた6桁コードは使えなくなる可能性があります。
+            </p>
+            <div className="modal-actions">
+              <button className="modal-btn cancel" onClick={() => setShowMfaResetModal(false)} type="button">
+                キャンセル
+              </button>
+              <button
+                className="modal-btn confirm"
+                onClick={() => {
+                  setShowMfaResetModal(false);
+                  startAutoCollect(true);
+                }}
+                type="button"
+              >
+                再設定を開始
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QR Code Modal */}
+      {showQrModal && (
+        <div className="settings-modal-overlay" style={{ zIndex: 100000 }}>
+          <div className="settings-modal" role="dialog" aria-modal="true" style={{ maxWidth: "360px", textAlign: "center" }}>
+            <h3 style={{ marginTop: 0, marginBottom: "8px", color: "var(--text-primary)" }}>認証アプリ登録用QRコード</h3>
+            <p style={{ fontSize: "12px", color: "var(--text-secondary)", marginBottom: "16px" }}>
+              スマートフォンなどの認証アプリ（Google Authenticator等）でスキャンしてください。
+            </p>
+            <div style={{ background: "#fff", padding: "16px", borderRadius: "8px", display: "inline-block", marginBottom: "16px" }}>
+              <canvas ref={qrCanvasRef} />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              <div style={{ fontSize: "12px", fontFamily: "monospace", wordBreak: "break-all", background: "var(--bg-secondary)", padding: "8px", borderRadius: "4px", color: "var(--text-primary)" }}>
+                登録キー: {savedSecrets?.totpSecret}
+              </div>
+              <button
+                className="modal-btn cancel"
+                onClick={() => setShowQrModal(false)}
+                type="button"
+                style={{ width: "100%", marginTop: "8px" }}
+              >
+                閉じる
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+
   );
 }
 

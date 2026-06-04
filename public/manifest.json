@@ -23,6 +23,7 @@
   "content_scripts": [
     {
       "matches": [
+        "https://www.cle.osaka-u.ac.jp/*",
         "https://ou-idp.auth.osaka-u.ac.jp/idp/*",
         "https://auth-mfa.auth.osaka-u.ac.jp/*"
       ],

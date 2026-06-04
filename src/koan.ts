@@ -489,18 +489,40 @@ export function attentionScore(notice: Notice) {
   );
 }
 
-export async function refreshLight(previousNotices: Notice[] = []) {
+export async function refreshLight(previousNotices: Notice[] = [], onProgress?: (value: string) => void) {
   requireCooldown(LIGHT_COMPLETED_KEY, LIGHT_REFRESH_TTL_MS, "通常更新は10分に1回までです。");
   requireCooldown(LIGHT_ATTEMPT_KEY, 60 * 1000, "通常更新の再試行は1分後にできます。");
   const release = acquireLease(LIGHT_LEASE_KEY, REQUEST_TIMEOUT_MS + 5000, "別の画面で通常更新中です。");
   localStorage.setItem(LIGHT_ATTEMPT_KEY, String(Date.now()));
   try {
+    onProgress?.("ポータル・時間割・掲示を取得中");
+    const completed = new Set<string>();
+    const markDone = (label: string) => {
+      completed.add(label);
+      onProgress?.(`${[...completed].join(" / ")} 取得済み`);
+    };
     const [portal, schedulePages, changes, board] = await Promise.all([
-      fetchHtml(PORTAL_URL),
-      fetchScheduleRange().catch(() => []),
-      fetchHtml(CHANGES_URL),
-      fetchHtml(BOARD_URL),
+      fetchHtml(PORTAL_URL).then((result) => {
+        markDone("ポータル");
+        return result;
+      }),
+      fetchScheduleRange().then((result) => {
+        markDone("時間割");
+        return result;
+      }).catch(() => {
+        markDone("時間割");
+        return [];
+      }),
+      fetchHtml(CHANGES_URL).then((result) => {
+        markDone("休講補講");
+        return result;
+      }),
+      fetchHtml(BOARD_URL).then((result) => {
+        markDone("新着掲示");
+        return result;
+      }),
     ]);
+    onProgress?.("取得結果を整理中");
     requireLogin(portal.doc);
     const oldKeys = new Set(previousNotices.map(noticeKey));
     const unread = parseNotices(board.doc, board.url, true).map((notice) => ({
@@ -524,6 +546,7 @@ export async function refreshLight(previousNotices: Notice[] = []) {
       lightUpdatedAt: new Date().toISOString(),
     };
   } finally {
+    onProgress?.("");
     release();
   }
 }

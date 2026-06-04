@@ -16,6 +16,14 @@ const decoder = new TextDecoder();
 let koanLoginTask;
 let cleLoginTask;
 const manualFlows = new Map();
+let pendingMfa = null;
+const AUTO_COLLECT_TAB_IDS_KEY = "authAutoCollectTabIds";
+const autoCollectTabIds = new Set();
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  autoCollectTabIds.delete(tabId);
+  void persistAutoCollectTabIds();
+});
 
 const toBase64 = (bytes) => {
   let binary = "";
@@ -178,6 +186,42 @@ function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function restoreAutoCollectTabIds() {
+  if (!chrome.storage?.session) return;
+  const stored = await chrome.storage.session.get(AUTO_COLLECT_TAB_IDS_KEY);
+  const tabIds = Array.isArray(stored[AUTO_COLLECT_TAB_IDS_KEY])
+    ? stored[AUTO_COLLECT_TAB_IDS_KEY]
+    : [];
+  autoCollectTabIds.clear();
+  for (const tabId of tabIds) {
+    if (Number.isInteger(tabId)) autoCollectTabIds.add(tabId);
+  }
+}
+
+async function persistAutoCollectTabIds() {
+  if (!chrome.storage?.session) return;
+  await chrome.storage.session.set({
+    [AUTO_COLLECT_TAB_IDS_KEY]: [...autoCollectTabIds],
+  });
+}
+
+async function addAutoCollectTabId(tabId) {
+  await restoreAutoCollectTabIds();
+  autoCollectTabIds.add(tabId);
+  await persistAutoCollectTabIds();
+}
+
+async function removeAutoCollectTabId(tabId) {
+  await restoreAutoCollectTabIds();
+  autoCollectTabIds.delete(tabId);
+  await persistAutoCollectTabIds();
+}
+
+async function isAutoCollectTabId(tabId) {
+  await restoreAutoCollectTabIds();
+  return autoCollectTabIds.has(tabId);
+}
+
 async function withTimeout(task, milliseconds) {
   let timeoutId;
   try {
@@ -331,6 +375,131 @@ async function authResponse(message, sender) {
   const record = await readAuthRecord();
   if (message.type === "auth-settings") return { ok: true, ...await readAuthSettings(record) };
 
+  if (message.type === "auth-mfa-pending-save") {
+    const { secret, temporaryCancelCode } = message;
+    if (!secret || !temporaryCancelCode) {
+      throw new Error("シークレットまたは一時解除コードが指定されていません。");
+    }
+    decodeBase32(secret); // Validate base32 secret
+    pendingMfa = { secret, temporaryCancelCode };
+    return { ok: true, code: await generateTotp(secret) };
+  }
+
+  if (message.type === "auth-mfa-click-proceed") {
+    if (new URL(sender.url || "").origin !== MFA_ORIGIN) {
+      throw new Error("MFA情報画面以外では遷移操作を実行しません。");
+    }
+    if (!sender.tab?.id) throw new Error("MFA情報画面のタブを特定できませんでした。");
+    const [execution] = await chrome.scripting.executeScript({
+      target: { tabId: sender.tab.id },
+      world: "MAIN",
+      func: () => {
+        const viewIdInput = document.querySelector('input[name="viewId"]');
+        const isDisplayPage = viewIdInput?.value === "MfaInfoDisplay.jsp" ||
+          document.body.innerText.includes("MFA情報表示");
+        if (!isDisplayPage) {
+          return { clicked: false, method: "not-display-page" };
+        }
+
+        if (typeof globalThis.execSrvStatus === "function") {
+          globalThis.execSrvStatus("register");
+          return { clicked: true, method: "execSrvStatus" };
+        }
+
+        const button = [...document.querySelectorAll('input[type="button"], input[type="submit"], button')].find((candidate) =>
+          (candidate.value || "").includes("MFA登録に進む") ||
+          (candidate.textContent || "").includes("MFA登録に進む")
+        );
+        if (button instanceof HTMLElement) {
+          button.click();
+          return { clicked: true, method: "button-click-main" };
+        }
+
+        const form = document.forms.namedItem("cmdForm") || document.querySelector("form");
+        const methodName = document.querySelector('input[name="methodName"]');
+        if (form instanceof HTMLFormElement && methodName instanceof HTMLInputElement) {
+          methodName.value = "register";
+          HTMLFormElement.prototype.submit.call(form);
+          return { clicked: true, method: "form-submit-fallback" };
+        }
+
+        return { clicked: false, method: "no-target" };
+      },
+    });
+    return { ok: true, ...(execution?.result || { clicked: false }) };
+  }
+
+  if (message.type === "auth-mfa-confirm-save") {
+    if (!pendingMfa) {
+      return { ok: false, error: "仮保存されたMFA情報がありません。" };
+    }
+    const current = record || await readAuthRecord();
+    const previous = current?.payload ? await decryptCredentials(current) : {};
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"],
+    );
+    const payload = await encryptCredentials({
+      id: previous.id || "",
+      password: previous.password || "",
+      totpSecret: pendingMfa.secret,
+      temporaryCancelCode: pendingMfa.temporaryCancelCode,
+      mfaConsent: true,
+    }, key);
+    await writeAuthRecord({
+      enabled: true,
+      autoSubmit: true,
+      mfaEnabled: true,
+      key,
+      payload,
+    });
+    pendingMfa = null; // Clear pending state
+    return { ok: true };
+  }
+
+  if (message.type === "auth-get-secrets") {
+    if (sender.id !== chrome.runtime.id) {
+      throw new Error("この操作は拡張機能の内部からのみ許可されています。");
+    }
+    if (!record?.enabled || !record.mfaEnabled) {
+      return { ok: true, configured: false };
+    }
+    try {
+      const credentials = await decryptCredentials(record);
+      return {
+        ok: true,
+        configured: true,
+        totpSecret: credentials.totpSecret || "",
+        temporaryCancelCode: credentials.temporaryCancelCode || "",
+      };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  if (message.type === "auth-mfa-register-auto-tab") {
+    const tabId = message.tabId || (sender.tab && sender.tab.id);
+    if (tabId) {
+      await addAutoCollectTabId(tabId);
+    }
+    return { ok: true };
+  }
+
+  if (message.type === "auth-mfa-check-auto-tab") {
+    const isAuto = Boolean(sender.tab && await isAutoCollectTabId(sender.tab.id));
+    return { ok: true, isAutoCollect: isAuto };
+  }
+
+  if (message.type === "auth-close-tab") {
+    if (sender.tab?.id) {
+      await removeAutoCollectTabId(sender.tab.id);
+      await chrome.tabs.remove(sender.tab.id);
+      return { ok: true };
+    }
+    return { ok: false, error: "タブが特定できませんでした。" };
+  }
+
   if (message.type === "auth-delete") {
     await clearAuthRecord();
     return { ok: true, configured: false, enabled: false, autoSubmit: true, mfaEnabled: false, idHint: "" };
@@ -372,6 +541,7 @@ async function authResponse(message, sender) {
       id: values.id || previous.id,
       password: values.password || previous.password,
       totpSecret,
+      temporaryCancelCode: values.mfaEnabled ? previous.temporaryCancelCode || "" : "",
       mfaConsent: Boolean(values.mfaEnabled && totpSecret && values.mfaConsent),
     }, key);
     await writeAuthRecord({
@@ -396,8 +566,21 @@ async function authResponse(message, sender) {
     return ensureCleLogin(record, sender, true);
   }
 
+  if (message.type === "auth-auto-login-state") {
+    const origin = new URL(sender.url || "").origin;
+    if (origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) {
+      throw new Error("認証画面以外には自動ログイン状態を渡しません。");
+    }
+    return {
+      ok: true,
+      enabled: Boolean(record?.enabled && record.payload),
+      autoSubmit: record?.autoSubmit !== false,
+    };
+  }
+
   if (message.type === "auth-credentials") {
-    if (new URL(sender.url || "").origin !== AUTH_ORIGIN) throw new Error("認証基盤以外には認証情報を渡しません。");
+    const origin = new URL(sender.url || "").origin;
+    if (origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) throw new Error("認証画面以外には認証情報を渡しません。");
     if (!record?.enabled) return { ok: true };
     const credentials = await decryptCredentials(record);
     return { ok: true, credentials: { id: credentials.id, password: credentials.password }, autoSubmit: true };
@@ -426,7 +609,8 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-totp") {
-    if (new URL(sender.url || "").origin !== MFA_ORIGIN) throw new Error("MFA 認証画面以外には認証コードを渡しません。");
+    const origin = new URL(sender.url || "").origin;
+    if (origin !== MFA_ORIGIN && origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) throw new Error("MFA 認証画面以外には認証コードを渡しません。");
     if (!record?.enabled || !record.mfaEnabled) return { ok: true };
     const credentials = await decryptCredentials(record);
     if (!credentials.mfaConsent || !credentials.totpSecret) return { ok: true };

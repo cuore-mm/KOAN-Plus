@@ -52,3 +52,19 @@ export function ensureCleLogin() {
 export function refreshCleLogin() {
   return sendAuthMessage({ type: "auth-refresh-cle" });
 }
+
+export type MfaSecrets = {
+  configured: boolean;
+  totpSecret?: string;
+  temporaryCancelCode?: string;
+  error?: string;
+};
+
+export async function getSavedMfaSecrets(): Promise<MfaSecrets> {
+  if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
+    throw new Error("拡張機能のコンテキスト以外から呼び出されています。");
+  }
+  const response = await chrome.runtime.sendMessage({ type: "auth-get-secrets" }) as MfaSecrets & { ok: boolean };
+  if (!response.ok) throw new Error(response.error || "シークレットの取得に失敗しました。");
+  return response;
+}
