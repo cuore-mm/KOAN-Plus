@@ -1,6 +1,7 @@
 const BASE_URL = "https://koan.osaka-u.ac.jp/campusweb/";
 export const PORTAL_URL = `${BASE_URL}campusportal.do?page=main`;
 export const SCHEDULE_URL = `${BASE_URL}campussquare.do?_flowId=PTW0001200-flow`;
+export const COURSE_REGISTRATION_URL = `${BASE_URL}campussquare.do?_flowId=RSW0001000-flow`;
 export const CHANGES_URL = `${BASE_URL}campussquare.do?_flowId=KHW0001100-flow`;
 export const BOARD_URL = `${BASE_URL}campussquare.do?_flowId=KJW0001100-flow`;
 export const GRADE_HISTORY_URL = `${BASE_URL}campussquare.do?_flowId=SIW0001200-flow`;
@@ -43,6 +44,16 @@ export const GENRES = [
 
 
 export type ScheduleItem = { date?: string; period: string; title: string; room: string };
+export type CourseRegistration = {
+  code: string;
+  departmentCode: string;
+  year: string;
+  title: string;
+  day: string;
+  period: string;
+  teacherAndRoom: string;
+  syllabusUrl: string;
+};
 export type ChangeItem = { type: string; date: string; period: string; course: string };
 export type Notice = {
   title: string;
@@ -58,6 +69,7 @@ export type Notice = {
 };
 export type KoanData = {
   schedule: ScheduleItem[];
+  courses: CourseRegistration[];
   changes: ChangeItem[];
   notices: Notice[];
   lightUpdatedAt: string | null;
@@ -360,6 +372,78 @@ function mergeSchedule(items: ScheduleItem[]) {
   });
 }
 
+function parseSyllabusCall(value: string) {
+  const match = value.match(/syllabusRefer\('([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\)/);
+  return match
+    ? { year: match[1], departmentCode: match[2], code: match[3] }
+    : null;
+}
+
+function parseCourseRegistrations(doc: Document): CourseRegistration[] {
+  const table = doc.querySelector("table.rishu-koma");
+  if (!table) return [];
+  const weekdays = ["月", "火", "水", "木", "金", "土"];
+  const courses: CourseRegistration[] = [];
+  for (const row of [...table.querySelectorAll(":scope > tbody > tr")].slice(1)) {
+    const rowCells = [...row.children].filter((cell) => cell.tagName === "TD");
+    const period = normalize(rowCells[0]?.textContent);
+    rowCells.slice(1).forEach((cell, index) => {
+      const rows = [...cell.querySelectorAll(":scope table tr")]
+        .map((innerRow) => normalize(innerRow.textContent))
+        .filter(Boolean);
+      if (!rows.length || rows[0] === "未登録") return;
+      const onclick = [...cell.querySelectorAll("a")]
+        .map((link) => link.getAttribute("onclick") || "")
+        .find((value) => value.includes("syllabusRefer")) || "";
+      const syllabus = parseSyllabusCall(onclick);
+      const code = syllabus?.code || rows[0];
+      courses.push({
+        code,
+        departmentCode: syllabus?.departmentCode || "",
+        year: syllabus?.year || "",
+        title: rows[1] || "",
+        day: weekdays[index] || "",
+        period,
+        teacherAndRoom: rows[2] || "",
+        syllabusUrl: syllabus
+          ? `${BASE_URL}campussquare.do?_flowId=SYW0001000-flow&_eventId=syllabus&nendo=${syllabus.year}&jikanwarishozokucd=${syllabus.departmentCode}&jikanwaricd=${syllabus.code}`
+          : "",
+      });
+    });
+  }
+  return courses;
+}
+
+function mergeCourses(items: CourseRegistration[]) {
+  const grouped = new Map<string, CourseRegistration>();
+  for (const item of items) {
+    const current = grouped.get(item.code);
+    if (!current) {
+      grouped.set(item.code, item);
+      continue;
+    }
+    const slots = new Set(
+      `${current.day}${periodNumber(current.period) || current.period}`
+        .split(",")
+        .filter(Boolean),
+    );
+    const nextSlot = `${item.day}${periodNumber(item.period) || item.period}`;
+    if (nextSlot) slots.add(nextSlot);
+    grouped.set(item.code, {
+      ...current,
+      day: [...new Set([current.day, item.day].filter(Boolean))].join(","),
+      period: [...slots].join(","),
+    });
+  }
+  return [...grouped.values()].sort((left, right) =>
+    left.code.localeCompare(right.code),
+  );
+}
+
+function periodNumber(value: string) {
+  return value.match(/\d+/)?.[0] || "";
+}
+
 function parseCellCourse(cell: Element) {
   const text = normalize(cell.textContent);
   const details = [...cell.querySelectorAll("td")]
@@ -501,7 +585,7 @@ export async function refreshLight(previousNotices: Notice[] = [], onProgress?: 
       completed.add(label);
       onProgress?.(`${[...completed].join(" / ")} 取得済み`);
     };
-    const [portal, schedulePages, changes, board] = await Promise.all([
+    const [portal, schedulePages, courses, changes, board] = await Promise.all([
       fetchHtml(PORTAL_URL).then((result) => {
         markDone("ポータル");
         return result;
@@ -511,6 +595,13 @@ export async function refreshLight(previousNotices: Notice[] = [], onProgress?: 
         return result;
       }).catch(() => {
         markDone("時間割");
+        return [];
+      }),
+      fetchHtml(COURSE_REGISTRATION_URL).then((result) => {
+        markDone("履修授業");
+        return parseCourseRegistrations(result.doc);
+      }).catch(() => {
+        markDone("履修授業");
         return [];
       }),
       fetchHtml(CHANGES_URL).then((result) => {
@@ -533,6 +624,7 @@ export async function refreshLight(previousNotices: Notice[] = [], onProgress?: 
     const weeklySchedule = mergeSchedule(schedulePages.flatMap(parseWeeklySchedule));
     return {
       schedule: weeklySchedule.length ? weeklySchedule : parseSchedule(portal.doc),
+      courses: mergeCourses(courses),
       changes: parseChanges(changes.doc),
       notices: mergeNotices([
         ...previousNotices.map((notice) => ({

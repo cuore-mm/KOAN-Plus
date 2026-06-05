@@ -6,6 +6,7 @@ import {
   PORTAL_URL,
   SNAPSHOT_TTL_MS,
   type ChangeItem,
+  type CourseRegistration,
   type GradeData,
   type KoanData,
   type Notice,
@@ -23,8 +24,10 @@ import {
   CLE_MESSAGES_URL,
   EMPTY_CLE_DATA,
   type CleData,
+  type CleCourse,
   type CleTask,
   cleMessageUrl,
+  cleCourseUrl,
   cleTaskUrl,
   refreshCle,
 } from "./cle";
@@ -51,6 +54,7 @@ import QRCode from "qrcode";
 
 const EMPTY = {
   schedule: [],
+  courses: [],
   changes: [],
   notices: [],
   lightUpdatedAt: null,
@@ -105,7 +109,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [genre, setGenre] = useState("");
   const [scope, setScope] = useState("attention");
-  const [view, setView] = useState<"dashboard" | "reference" | "grades" | "settings">("dashboard");
+  const [view, setView] = useState<"dashboard" | "courses" | "reference" | "grades" | "settings">("dashboard");
   const [gradesData, setGradesData] = useState<GradeData | null>(() =>
     loadGradesCache<GradeData>(),
   );
@@ -249,6 +253,7 @@ function App() {
   const latestUpdatedAt = updateTimes[updateTimes.length - 1] || null;
   const viewTitle = {
     dashboard: "ホーム",
+    courses: "授業",
     reference: "掲示",
     grades: "成績",
     settings: "設定",
@@ -317,6 +322,12 @@ function App() {
             data={data}
             onOpenNotice={markNoticeRead}
           />
+        ) : view === "courses" ? (
+          <CoursesPage
+            cleData={cleData}
+            data={data}
+            onOpenNotice={markNoticeRead}
+          />
         ) : view === "reference" ? (
           <ReferenceDesk
             genre={genre}
@@ -341,11 +352,12 @@ function Sidebar({
   onViewChange,
   view,
 }: {
-  onViewChange: (view: "dashboard" | "reference" | "grades" | "settings") => void;
-  view: "dashboard" | "reference" | "grades" | "settings";
+  onViewChange: (view: "dashboard" | "courses" | "reference" | "grades" | "settings") => void;
+  view: "dashboard" | "courses" | "reference" | "grades" | "settings";
 }) {
   const items = [
     ["dashboard", "ホーム"],
+    ["courses", "授業"],
     ["reference", "掲示"],
     ["grades", "成績"],
     ["settings", "設定"],
@@ -919,6 +931,19 @@ function dueLabel(value: string) {
   return `あと${Math.ceil(hours / 24)}日`;
 }
 
+function taskLabel(task: CleTask) {
+  if (["提出済み", "採点済み", "期限切れ"].includes(task.status)) {
+    return task.status;
+  }
+  return dueLabel(task.dueAt);
+}
+
+function taskTone(task: CleTask) {
+  if (["提出済み", "採点済み"].includes(task.status)) return "done";
+  if (task.status === "期限切れ" || dueLabel(task.dueAt) === "期限超過") return "attention";
+  return "neutral";
+}
+
 function courseDisplayName(value: string) {
   const withoutCode = value.replace(/^[^:]+:\s*\d+\s*/, "");
   const japanese = withoutCode.split(/\s*\/\s*/)[0];
@@ -926,6 +951,338 @@ function courseDisplayName(value: string) {
     .replace(/\s*【[^】]*】/g, "")
     .replace(/\s+[月火水木金土日]\d+\s*$/, "")
     .trim() || value;
+}
+
+function normalizeCourseTitle(value: string) {
+  return courseDisplayName(value)
+    .replace(/^【取消】/, "")
+    .replace(/\s*【[^】]*】/g, "")
+    .replace(/[ 　]+/g, "")
+    .toLowerCase();
+}
+
+function timetableCodeFromCleDisplay(value: string) {
+  return value.match(/^\d{4}-\d{2}-(\d{6})-/)?.[1] || "";
+}
+
+type CourseSummary = {
+  code: string;
+  koan: CourseRegistration;
+  cleCourse?: CleCourse;
+  tasks: CleTask[];
+  messages: CleData["messages"];
+  notices: Notice[];
+  changes: ChangeItem[];
+  schedules: ScheduleItem[];
+};
+
+function courseMatchesText(course: CourseRegistration, value: string) {
+  const courseTitle = normalizeCourseTitle(course.title);
+  const text = normalizeCourseTitle(value);
+  return Boolean(courseTitle && text && (text.includes(courseTitle) || courseTitle.includes(text)));
+}
+
+function buildCourseSummaries(data: KoanData, cleData: CleData): CourseSummary[] {
+  const cleByCode = new Map<string, CleCourse>();
+  const cleCodeByCourseId = new Map<string, string>();
+  for (const course of cleData.courses || []) {
+    const code = course.timetableCode || timetableCodeFromCleDisplay(course.displayId);
+    if (!code) continue;
+    cleByCode.set(code, course);
+    cleCodeByCourseId.set(course.courseId, code);
+  }
+  return (data.courses || []).filter((course) => !/【取消】|取消/.test(course.title)).map((course) => {
+    const cleCourse = cleByCode.get(course.code);
+    const tasks = cleData.tasks.filter((task) => {
+      const code = cleCodeByCourseId.get(task.courseId) || timetableCodeFromCleDisplay(task.courseName);
+      return code ? code === course.code : courseMatchesText(course, task.courseName);
+    });
+    const messages = cleData.messages.filter((message) => {
+      const code = cleCodeByCourseId.get(message.courseId) || timetableCodeFromCleDisplay(message.courseName);
+      return code ? code === course.code : courseMatchesText(course, message.courseName);
+    });
+    const schedules = data.schedule.filter((item) => courseMatchesText(course, item.title));
+    const changes = data.changes.filter((item) => courseMatchesText(course, item.course));
+    const notices = data.notices
+      .filter((notice) => courseMatchesText(course, notice.title))
+      .sort((left, right) => attentionScore(right) - attentionScore(left))
+      .slice(0, 5);
+    return {
+      code: course.code,
+      koan: course,
+      cleCourse,
+      tasks: tasks.sort((left, right) => left.dueAt.localeCompare(right.dueAt)),
+      messages,
+      notices,
+      changes,
+      schedules,
+    };
+  });
+}
+
+const timetableDays = ["月", "火", "水", "木", "金", "土"] as const;
+const timetablePeriods = ["1", "2", "3", "4", "5", "6"];
+
+function courseSlots(course: CourseRegistration) {
+  const slotPattern = /([月火水木金土日])\s*(\d+)/g;
+  const slots = [...course.period.matchAll(slotPattern)]
+    .map((match) => ({ day: match[1], period: match[2] }));
+  if (slots.length) return slots;
+  const period = periodNumber(course.period);
+  return course.day && period ? [{ day: course.day, period }] : [];
+}
+
+function courseSlotLabel(course: CourseRegistration) {
+  const slots = courseSlots(course);
+  if (slots.length) return slots.map((slot) => `${slot.day}${slot.period}`).join(",");
+  return [course.day, course.period].filter(Boolean).join(" ");
+}
+
+function courseTeacherRoom(value: string) {
+  const normalized = value.replace(/\s*\/\s*/g, " / ").replace(/\s+/g, " ").trim();
+  if (!normalized) return { teacher: "未取得", room: "未取得" };
+  const slashParts = normalized.split(" / ").map((part) => part.trim()).filter(Boolean);
+  if (slashParts.length >= 2) {
+    return { teacher: slashParts[0], room: slashParts.slice(1).join(" / ") };
+  }
+  const roomKeyword = /(法経|講義室|教室|研究室|演習室|セミナー室|レバレジーズ|オンライン|未定|豊中|吹田|箕面)/;
+  const keywordIndex = normalized.search(roomKeyword);
+  if (keywordIndex > 0) {
+    return {
+      teacher: normalized.slice(0, keywordIndex).trim(),
+      room: normalized.slice(keywordIndex).trim(),
+    };
+  }
+  return { teacher: normalized, room: "未取得" };
+}
+
+function courseTermHeading(courses: CourseSummary[]) {
+  const year = courses.find((course) => course.koan.year)?.koan.year || String(new Date().getFullYear());
+  const month = new Date().getMonth() + 1;
+  const term = month >= 10 || month <= 3 ? "秋学期" : "春学期";
+  return `${year}年 ${term}`;
+}
+
+function CoursesPage({
+  cleData,
+  data,
+  onOpenNotice,
+}: {
+  cleData: CleData;
+  data: KoanData;
+  onOpenNotice: (notice: Notice) => void;
+}) {
+  const courses = useMemo(() => buildCourseSummaries(data, cleData), [cleData, data]);
+  const [selectedCode, setSelectedCode] = useState("");
+  useEffect(() => {
+    if (!courses.some((course) => course.code === selectedCode)) {
+      setSelectedCode("");
+    }
+  }, [courses, selectedCode]);
+  const selected = courses.find((course) => course.code === selectedCode);
+  const regularCourses = courses.filter((course) => courseSlots(course.koan).some((slot) =>
+    timetableDays.includes(slot.day as typeof timetableDays[number]) &&
+    timetablePeriods.includes(slot.period),
+  ));
+  const irregularCourses = courses.filter((course) => !regularCourses.includes(course));
+  return (
+    <div className="courses-page">
+      <div className="course-timetable-pane">
+        {courses.length ? (
+          <>
+            <div className="course-timetable-heading">
+              <h2>{courseTermHeading(courses)}</h2>
+            </div>
+            <CourseTimetable
+              courses={regularCourses}
+              onSelect={setSelectedCode}
+              selectedCode={selectedCode}
+            />
+            <div className="irregular-courses">
+              <h3>集中講義・曜日未定</h3>
+              {irregularCourses.length ? (
+                <div>
+                  {irregularCourses.map((course) => (
+                    <button
+                      className={course.code === selectedCode ? "active" : ""}
+                      key={course.code}
+                      onClick={() => setSelectedCode(course.code)}
+                      type="button"
+                    >
+                      <span>{course.koan.title}</span>
+                      <small>{courseSlotLabel(course.koan) || "曜日時限未定"}</small>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="irregular-empty">該当する授業はありません。</p>
+              )}
+            </div>
+          </>
+        ) : <p className="empty">授業情報はまだ取得されていません。右上の更新でKOANとCLEを読み込めます。</p>}
+      </div>
+
+      <div className="course-detail-pane">
+        {selected ? (
+          <CourseDetail course={selected} onOpenNotice={onOpenNotice} />
+        ) : (
+          <CourseDefaultDetail />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CourseTimetable({
+  courses,
+  onSelect,
+  selectedCode,
+}: {
+  courses: CourseSummary[];
+  onSelect: (code: string) => void;
+  selectedCode: string;
+}) {
+  return (
+    <div className="course-timetable" role="grid" aria-label="授業時間割">
+      <div className="timetable-corner" aria-hidden="true"></div>
+      {timetableDays.map((day) => <div className="timetable-day" key={day}>{day}</div>)}
+      {timetablePeriods.map((period) => (
+        <div className="timetable-row" key={period}>
+          <div className="timetable-period">{period}</div>
+          {timetableDays.map((day) => {
+            const slotCourses = courses.filter((course) =>
+              courseSlots(course.koan).some((slot) => slot.day === day && slot.period === period),
+            );
+            return (
+              <div className="timetable-cell" key={`${day}-${period}`}>
+                {slotCourses.map((course) => {
+                  const activeTasks = course.tasks.filter((task) => !["提出済み", "採点済み"].includes(task.status));
+                  return (
+                    <button
+                      className={course.code === selectedCode ? "timetable-course selected" : "timetable-course"}
+                      key={course.code}
+                      onClick={() => onSelect(course.code)}
+                      title={`${course.koan.title}${activeTasks.length ? ` / 未完了課題 ${activeTasks.length}件` : ""}`}
+                      type="button"
+                    >
+                      <b>{course.koan.title}</b>
+                      {!!activeTasks.length && (
+                        <span
+                          aria-label={`未完了課題 ${activeTasks.length}件`}
+                          className="timetable-task-indicator"
+                        />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CourseDefaultDetail() {
+  return (
+    <div className="course-default-detail" aria-label="授業未選択">
+      <div className="course-empty-state">
+        <div className="course-empty-icon" aria-hidden="true">
+          <span />
+        </div>
+        <strong>授業を選択して詳細を表示</strong>
+        <p>時間割のコマを選ぶと、課題・連絡・変更情報をここに表示します。</p>
+      </div>
+    </div>
+  );
+}
+
+function CourseDetail({
+  course,
+  onOpenNotice,
+}: {
+  course: CourseSummary;
+  onOpenNotice: (notice: Notice) => void;
+}) {
+  const teacherRoom = courseTeacherRoom(course.koan.teacherAndRoom);
+  return (
+    <div className="course-detail">
+      <div className="course-detail-header">
+        <div className="course-detail-title">
+          <h2>{course.koan.title}</h2>
+          <div className="course-detail-meta">
+            <div><span>曜日時限</span><b>{courseSlotLabel(course.koan) || "未定"}</b></div>
+            <div><span>教員</span><b>{teacherRoom.teacher}</b></div>
+            <div><span>教室</span><b>{teacherRoom.room}</b></div>
+          </div>
+        </div>
+      </div>
+
+      <div className="course-detail-flow">
+        <section className="course-detail-block course-tasks-block">
+          <h3>課題</h3>
+          <div className="course-line-list">
+            {course.tasks.length ? course.tasks.map((task) => (
+              <a className="course-line-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
+                <b className={`course-status-label ${taskTone(task)}`}>{taskLabel(task)}</b>
+                <span>{task.title}<small>{fmtDue(task.dueAt)}まで / {task.status}</small></span>
+              </a>
+            )) : <p className="subtle-empty">表示する課題はありません。</p>}
+          </div>
+        </section>
+
+        <section className="course-detail-block course-messages-block">
+          <h3>連絡</h3>
+          <div className="course-line-list">
+            {course.messages.length ? course.messages.map((message) => (
+              <a className="course-line-row" href={cleMessageUrl(message.courseId)} key={message.courseId} target="_blank">
+                <b>{message.unreadCount ? "未読" : "連絡"}</b>
+                <span>{message.courseName}<small>{message.unreadCount ? `${message.unreadCount}件の未読` : "既読"}</small></span>
+              </a>
+            )) : <p className="subtle-empty">表示する連絡はありません。</p>}
+          </div>
+        </section>
+
+        <section className="course-detail-block course-updates-block">
+          <h3>変更・掲示</h3>
+          <div className="course-line-list">
+            {course.changes.map((change, index) => (
+              <div className="course-line-row" key={`${change.date}-${change.period}-${index}`}>
+                <b>{change.type}</b>
+                <span>{change.date} {change.period}</span>
+              </div>
+            ))}
+            {course.notices.map((notice) => (
+              <button
+                className="course-line-row course-notice-row"
+                key={noticeKey(notice)}
+                onClick={() => onOpenNotice(notice)}
+                type="button"
+              >
+                <b>掲示</b>
+                <span>{notice.title}<small>{[notice.period, notice.genre].filter(Boolean).join(" / ") || notice.author}</small></span>
+              </button>
+            ))}
+            {!course.changes.length && !course.notices.length && <p className="subtle-empty">表示する変更・掲示はありません。</p>}
+          </div>
+        </section>
+      </div>
+
+      <div className="course-link-actions">
+        {course.koan.syllabusUrl ? (
+          <a href={course.koan.syllabusUrl} target="_blank">シラバス</a>
+        ) : (
+          <span className="disabled">シラバス</span>
+        )}
+        {course.cleCourse ? (
+          <a href={cleCourseUrl(course.cleCourse.courseId)} target="_blank">CLE</a>
+        ) : (
+          <span className="disabled">CLE</span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function Dashboard({

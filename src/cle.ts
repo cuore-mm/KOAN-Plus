@@ -32,7 +32,15 @@ export type CleMessageCourse = {
   unreadCount: number;
 };
 
+export type CleCourse = {
+  courseId: string;
+  displayId: string;
+  timetableCode: string;
+  name: string;
+};
+
 export type CleData = {
+  courses: CleCourse[];
   tasks: CleTask[];
   messages: CleMessageCourse[];
   unreadMessages: number;
@@ -40,6 +48,7 @@ export type CleData = {
 };
 
 export const EMPTY_CLE_DATA: CleData = {
+  courses: [],
   tasks: [],
   messages: [],
   unreadMessages: 0,
@@ -96,6 +105,10 @@ function asNumber(value: unknown) {
 function results(value: unknown) {
   const items = asRecord(value).results;
   return Array.isArray(items) ? items.map(asRecord) : [];
+}
+
+function courseCodeFromDisplayId(value: string) {
+  return value.match(/^\d{4}-\d{2}-(\d{6})-/)?.[1] || "";
 }
 
 async function withTimeout<T>(task: Promise<T>, milliseconds: number) {
@@ -226,6 +239,34 @@ async function fetchMessages(tabId?: number) {
   );
 }
 
+async function fetchCourses(tabId?: number) {
+  try {
+    const response = await fetchJson(
+      `${API_ORIGIN}/public/v1/users/me/courses?limit=100&expand=course`,
+      tabId,
+    );
+    return results(response)
+      .map((item): CleCourse => {
+        const course = asRecord(item.course);
+        const courseId = asString(item.courseId) || asString(course.id);
+        const displayId =
+          asString(course.courseId) ||
+          asString(course.externalId) ||
+          asString(item.courseId);
+        return {
+          courseId,
+          displayId,
+          timetableCode: courseCodeFromDisplayId(displayId),
+          name: asString(course.name) || asString(item.name) || displayId,
+        };
+      })
+      .filter((course) => course.courseId && course.timetableCode)
+      .sort((left, right) => left.displayId.localeCompare(right.displayId));
+  } catch {
+    return [];
+  }
+}
+
 export async function refreshCle(tabId?: number, onProgress?: (value: string) => void): Promise<CleData> {
   const release = acquireLease();
   try {
@@ -235,7 +276,7 @@ export async function refreshCle(tabId?: number, onProgress?: (value: string) =>
       completed.add(label);
       onProgress?.(`${[...completed].join(" / ")} 取得済み`);
     };
-    const [tasks, messages] = await Promise.all([
+    const [tasks, messages, courses] = await Promise.all([
       fetchTasks(tabId).then((result) => {
         markDone("課題");
         return result;
@@ -244,9 +285,14 @@ export async function refreshCle(tabId?: number, onProgress?: (value: string) =>
         markDone("メッセージ");
         return result;
       }),
+      fetchCourses(tabId).then((result) => {
+        markDone("コース");
+        return result;
+      }),
     ]);
     onProgress?.("取得結果を整理中");
     return {
+      courses,
       tasks,
       messages,
       unreadMessages: messages.reduce((sum, item) => sum + item.unreadCount, 0),
@@ -264,4 +310,8 @@ export function cleTaskUrl(task: CleTask) {
 
 export function cleMessageUrl(courseId: string) {
   return `${CLE_ORIGIN}/ultra/courses/${encodeURIComponent(courseId)}/messages`;
+}
+
+export function cleCourseUrl(courseId: string) {
+  return `${CLE_ORIGIN}/ultra/courses/${encodeURIComponent(courseId)}/outline`;
 }
