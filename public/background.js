@@ -462,14 +462,14 @@ async function authResponse(message, sender) {
     if (sender.id !== chrome.runtime.id) {
       throw new Error("この操作は拡張機能の内部からのみ許可されています。");
     }
-    if (!record?.enabled || !record.mfaEnabled) {
+    if (!record?.payload) {
       return { ok: true, configured: false };
     }
     try {
       const credentials = await decryptCredentials(record);
       return {
         ok: true,
-        configured: true,
+        configured: Boolean(credentials.totpSecret),
         totpSecret: credentials.totpSecret || "",
         temporaryCancelCode: credentials.temporaryCancelCode || "",
       };
@@ -522,10 +522,9 @@ async function authResponse(message, sender) {
       if (!record?.payload) throw new Error("ID とパスワードを入力してください。");
     }
     const previous = record?.payload ? await decryptCredentials(record) : {};
-    const totpSecret = values.mfaEnabled
-      ? normalizeTotpSecret(values.totpSecret) || previous.totpSecret
-      : "";
-    if (values.mfaEnabled && !values.mfaConsent) {
+    const totpSecret = normalizeTotpSecret(values.totpSecret) || previous.totpSecret || "";
+    const mfaConsent = Boolean(totpSecret && (values.mfaConsent || previous.mfaConsent));
+    if (values.mfaEnabled && !mfaConsent) {
       throw new Error("MFA 自動化のリスクを確認し、同意してください。");
     }
     if (values.mfaEnabled && !totpSecret) {
@@ -541,13 +540,13 @@ async function authResponse(message, sender) {
       id: values.id || previous.id,
       password: values.password || previous.password,
       totpSecret,
-      temporaryCancelCode: values.mfaEnabled ? previous.temporaryCancelCode || "" : "",
-      mfaConsent: Boolean(values.mfaEnabled && totpSecret && values.mfaConsent),
+      temporaryCancelCode: previous.temporaryCancelCode || "",
+      mfaConsent,
     }, key);
     await writeAuthRecord({
       enabled: true,
       autoSubmit: true,
-      mfaEnabled: Boolean(values.mfaEnabled && totpSecret && values.mfaConsent),
+      mfaEnabled: Boolean(values.mfaEnabled && totpSecret && mfaConsent),
       key,
       payload,
     });
