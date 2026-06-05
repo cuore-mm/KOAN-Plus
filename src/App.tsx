@@ -228,7 +228,8 @@ function App() {
         if (needle && !text.includes(needle)) return false;
         if (genre && notice.genre !== genre) return false;
         if (scope === "unread" && !notice.unread) return false;
-        if (scope === "attention" && attentionScore(notice) < 20) return false;
+        if (scope === "important" && !isImportantNotice(notice)) return false;
+        if (scope === "attention" && attentionScore(notice) < 120) return false;
         return true;
       })
       .sort((a, b) => attentionScore(b) - attentionScore(a));
@@ -331,6 +332,7 @@ function App() {
         ) : view === "reference" ? (
           <ReferenceDesk
             genre={genre}
+            allNotices={data.notices}
             notices={notices}
             onGenreChange={setGenre}
             onOpen={markNoticeRead}
@@ -1896,6 +1898,7 @@ function ActivityNotice({
 }
 
 function ReferenceDesk({
+  allNotices,
   genre,
   notices,
   onGenreChange,
@@ -1906,6 +1909,7 @@ function ReferenceDesk({
   scope,
   snapshotUpdatedAt,
 }: {
+  allNotices: Notice[];
   genre: string;
   notices: Notice[];
   onGenreChange: (value: string) => void;
@@ -1916,28 +1920,66 @@ function ReferenceDesk({
   scope: string;
   snapshotUpdatedAt: string | null;
 }) {
+  const summary = {
+    all: allNotices.length,
+    unread: allNotices.filter((notice) => notice.unread).length,
+    attention: allNotices.filter((notice) => attentionScore(notice) >= 120).length,
+    important: allNotices.filter(isImportantNotice).length,
+  };
+  const tabs = [
+    ["attention", "要確認", summary.attention],
+    ["unread", "未読", summary.unread],
+    ["important", "重要", summary.important],
+    ["all", "すべて", summary.all],
+  ] as const;
+
   return (
     <div className="reference-page">
-      <section className="section notices-section">
-        <div className="section-heading">
-          <div>
-            <h2>掲示一覧</h2>
-            <p>同期 {fmtTime(snapshotUpdatedAt)}</p>
-          </div>
-          <strong>{notices.length}</strong>
+      <section className="notice-summary" aria-label="掲示サマリー">
+        <div>
+          <span>全</span>
+          <strong>{summary.all}</strong>
+          <small>件</small>
         </div>
-        <div className="filters">
+        <div className="needs-action">
+          <span>未読</span>
+          <strong>{summary.unread}</strong>
+          <small>件</small>
+        </div>
+        <div className="needs-action">
+          <span>要確認</span>
+          <strong>{summary.attention}</strong>
+          <small>件</small>
+        </div>
+        <p>同期 {fmtTime(snapshotUpdatedAt)}</p>
+      </section>
+
+      <section className="notice-operations" aria-label="掲示の絞り込み">
+        <div className="notice-scope-tabs" role="tablist" aria-label="状態">
+          {tabs.map(([value, label, count]) => (
+            <button
+              aria-selected={scope === value}
+              className={scope === value ? "active" : ""}
+              key={value}
+              onClick={() => onScopeChange(value)}
+              role="tab"
+              type="button"
+            >
+              <span>{label}</span>
+              <b>{count}</b>
+            </button>
+          ))}
+        </div>
+        <div className="notice-tools">
           <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="掲示を検索" />
           <select value={genre} onChange={(event) => onGenreChange(event.target.value)}>
             <option value="">全ジャンル</option>
             {GENRES.map((item) => <option key={item}>{item}</option>)}
           </select>
-          <select value={scope} onChange={(event) => onScopeChange(event.target.value)}>
-            <option value="attention">要確認</option>
-            <option value="unread">未読</option>
-            <option value="all">取得済みすべて</option>
-          </select>
         </div>
+      </section>
+
+      <section className="notice-list-section" aria-label="掲示一覧">
         <NoticeList notices={notices} onOpen={onOpen} />
       </section>
     </div>
@@ -1969,26 +2011,55 @@ function NoticeList({
   };
 
   if (!notices.length) return <p className="empty notice-empty">条件に一致する掲示はありません。</p>;
+  const importantNotices = notices.filter(isImportantNotice);
+  const otherNotices = notices.filter((notice) => !isImportantNotice(notice));
+  const showGroups = Boolean(importantNotices.length && otherNotices.length);
+  const renderRows = (items: Notice[]) => items.slice(0, 300).map((notice) => {
+    const key = `${notice.title}-${notice.period}`;
+    const openingThis = opening === key;
+    return (
+      <button
+        className={[
+          "notice-row",
+          notice.unread ? "unread" : "",
+          isImportantNotice(notice) ? "important" : "",
+        ].filter(Boolean).join(" ")}
+        type="button"
+        disabled={Boolean(opening)}
+        onClick={() => openNotice(notice)}
+        key={key}
+      >
+        <div className="notice-content">
+          <div className="notice-row-meta">
+            <span className="notice-chip genre-chip">{notice.genre}</span>
+            {attentionScore(notice) >= 120 && <span className="notice-chip state-chip important-chip">要確認</span>}
+            {notice.isNew && <span className="notice-chip state-chip">新着</span>}
+            {openingThis && <span className="notice-chip state-chip">取得中</span>}
+          </div>
+          <h3 title={notice.title}>{notice.title}</h3>
+          <p>{[notice.department, notice.author].filter(Boolean).join(" / ") || "発信元未取得"}</p>
+        </div>
+        <time>{notice.period || "期間未取得"}</time>
+      </button>
+    );
+  });
+
   return (
     <div className="notice-list">
-      {notices.slice(0, 300).map((notice) => {
-        const key = `${notice.title}-${notice.period}`;
-        return (
-          <button className="notice-row" type="button" disabled={Boolean(opening)} onClick={() => openNotice(notice)} key={key}>
-            <div className="notice-content">
-              <div className="notice-chip-row">
-                <span className="notice-chip genre-chip">{notice.genre}</span>
-                {opening === key && <span className="notice-chip state-chip">取得中</span>}
-                {notice.unread && <span className="notice-chip state-chip">未読</span>}
-                {notice.isNew && <span className="notice-chip state-chip">新着</span>}
-                {attentionScore(notice) >= 120 && <span className="notice-chip state-chip important-chip">要確認</span>}
-              </div>
-              <h3>{notice.title}</h3>
-              <p>{[notice.department, notice.author, notice.period].filter(Boolean).join(" / ")}</p>
-            </div>
-          </button>
-        );
-      })}
+      {showGroups ? (
+        <>
+          <div className="notice-group-heading">
+            <h2>重要掲示</h2>
+            <span>{importantNotices.length}件</span>
+          </div>
+          {renderRows(importantNotices)}
+          <div className="notice-group-heading secondary">
+            <h2>その他の掲示</h2>
+            <span>{otherNotices.length}件</span>
+          </div>
+          {renderRows(otherNotices)}
+        </>
+      ) : renderRows(notices)}
     </div>
   );
 }
