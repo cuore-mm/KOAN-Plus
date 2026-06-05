@@ -423,7 +423,6 @@ function Settings() {
   const [editingCredentials, setEditingCredentials] = useState(false);
   const [setupStarted, setSetupStarted] = useState(false);
   const [setupStep, setSetupStep] = useState<1 | 2 | 3>(1);
-  const [showDetails, setShowDetails] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [savedSecrets, setSavedSecrets] = useState<{
     totpSecret: string;
@@ -474,9 +473,8 @@ function Settings() {
   const maskedTotpSecret = savedSecrets?.totpSecret
     ? `${savedSecrets.totpSecret.slice(0, 4)}${"*".repeat(Math.max(6, savedSecrets.totpSecret.length - 8))}${savedSecrets.totpSecret.slice(-4)}`
     : "";
-  const maskedCancelCode = savedSecrets?.temporaryCancelCode
-    ? `${savedSecrets.temporaryCancelCode.slice(0, 2)}${"*".repeat(Math.max(4, savedSecrets.temporaryCancelCode.length - 4))}${savedSecrets.temporaryCancelCode.slice(-2)}`
-    : "";
+  const maskedCancelCode = savedSecrets?.temporaryCancelCode ? "••••••••" : "";
+  const savedIdLabel = settings.idHint || (settings.configured ? "保存済み" : "未保存");
   const setupCanGoNext = Boolean(id.trim() && password);
   const canSaveCredentials = !saving && Boolean(id.trim() && password);
   const canFinishSetup = !saving && Boolean(id.trim() && password) && (!mfaEnabled || (mfaConsent && Boolean(hasSavedMfa || totpSecret.trim())));
@@ -767,17 +765,21 @@ function Settings() {
                         <span>端末内保存とMFA自動化のリスクを理解し、この端末で利用することに同意します。</span>
                       </label>
                       {mfaEnabled && (
-                        <div className="manual-totp-panel setup-manual-totp">
-                          <label>
-                            <span>TOTP シークレットを手動入力</span>
-                            <input
-                              autoComplete="one-time-code"
-                              onChange={(event) => setTotpSecret(event.target.value)}
-                              placeholder="例: JBSWY3DPEHPK3PXP"
-                              value={totpSecret}
-                            />
-                          </label>
-                        </div>
+                        <details className="settings-details-accordion setup-details-accordion">
+                          <summary>詳細オプション</summary>
+                          <div className="manual-totp-panel setup-manual-totp">
+                            <label>
+                              <span>手動入力用キー</span>
+                              <input
+                                autoComplete="one-time-code"
+                                onChange={(event) => setTotpSecret(event.target.value)}
+                                placeholder="例: JBSWY3DPEHPK3PXP"
+                                type="password"
+                                value={totpSecret}
+                              />
+                            </label>
+                          </div>
+                        </details>
                       )}
                       <div className="settings-actions">
                         <button className="secondary-action" disabled={!mfaConsent || saving} onClick={() => {
@@ -839,7 +841,7 @@ function Settings() {
               <section className="section settings-card">
                 <label className="section-heading toggle-heading">
                   <div>
-                    <h2>自動ログインを使用する</h2>
+                    <h2>自動ログイン</h2>
                     <p>阪大認証画面で保存済みのID・パスワードを入力します。</p>
                   </div>
                   <div className="switch">
@@ -853,14 +855,14 @@ function Settings() {
                   </div>
                 </label>
 
-                {settings.enabled && <div className="settings-toggle-details">
+                <div className="settings-toggle-details">
                   <hr className="settings-divider" />
                   {!editingCredentials ? (
                     <div className="saved-id-row">
                       <dl className="settings-state-list compact">
                         <div>
                           <dt>保存済みID</dt>
-                          <dd>{settings.idHint || "保存済み"}</dd>
+                          <dd>{savedIdLabel}</dd>
                         </div>
                       </dl>
                       <button className="secondary-action" onClick={() => setEditingCredentials(true)} type="button">
@@ -905,14 +907,14 @@ function Settings() {
                       </div>
                     </div>
                   )}
-                </div>}
+                </div>
               </section>
 
               {/* 二段階認証セクション */}
               <section className="section settings-card">
                 <label className="section-heading toggle-heading">
                   <div>
-                    <h2>二段階認証を使用する</h2>
+                    <h2>二段階認証</h2>
                     <p>ログイン時に必要な6桁コードをこの端末で生成します。</p>
                   </div>
                   <div className="switch">
@@ -929,20 +931,15 @@ function Settings() {
                 {settings.mfaEnabled && <div className="settings-toggle-details">
                   <hr className="settings-divider" />
                   
-                  {hasSavedMfa ? (
-                    <div className="mfa-status-info">
-                      <span className="mfa-badge ready">登録済み</span>
-                      <p className="mfa-status-desc">この端末で自動的に二段階認証コードを生成して入力します。</p>
-                    </div>
-                  ) : (
+                  {!hasSavedMfa && (
                     <div className="mfa-status-info unconfigured">
                       <span className="mfa-badge disabled">未登録</span>
                       <p className="mfa-status-desc">自動ログインで二段階認証を通過させるには、MFA情報の登録が必要です。</p>
                     </div>
                   )}
 
-                  <div className="settings-actions">
-                    <button className={hasSavedMfa ? "subtle-action" : "primary-action"} disabled={saving || !settings.mfaEnabled} onClick={() => {
+                  <div className="settings-actions mfa-card-actions">
+                    <button className={hasSavedMfa ? "secondary-action" : "primary-action"} disabled={saving || !settings.mfaEnabled} onClick={() => {
                       setMfaConsentChecked1(false);
                       setMfaConsentChecked2(false);
                       setMfaWizardStep("consent");
@@ -950,17 +947,62 @@ function Settings() {
                     }} type="button">
                       {hasSavedMfa ? "再設定" : "二段階認証を自動登録する"}
                     </button>
+                    {hasSavedMfa && (
+                      <button className="secondary-action" onClick={() => {
+                        setMfaWizardStep("qr");
+                        setShowMfaWizardModal(true);
+                      }} type="button">
+                        登録用QRコードを表示
+                      </button>
+                    )}
                   </div>
 
+                  {savedSecrets?.temporaryCancelCode && (
+                    <div className="inline-secret-row">
+                      <div className="secret-row">
+                        <span className="secret-label">一時解除コード</span>
+                        <code>{showCancelCode ? savedSecrets.temporaryCancelCode : maskedCancelCode}</code>
+                        <div className="secret-actions">
+                          <button
+                            aria-label={showCancelCode ? "一時解除コードを隠す" : "一時解除コードを表示"}
+                            className="icon-action"
+                            onClick={() => setShowCancelCode(!showCancelCode)}
+                            title={showCancelCode ? "隠す" : "表示"}
+                            type="button"
+                          >
+                            {showCancelCode ? (
+                              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon">
+                                <path d="m15 18-.722-3.25"/>
+                                <path d="M2 8a10.645 10.645 0 0 0 20 0"/>
+                                <path d="m20 15-1.726-2.05"/>
+                                <path d="m4 15 1.726-2.05"/>
+                                <path d="m9 18 .722-3.25"/>
+                              </svg>
+                            ) : (
+                              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon">
+                                <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>
+                                <circle cx="12" cy="12" r="3"/>
+                              </svg>
+                            )}
+                          </button>
+                          <button className="subtle-action" onClick={() => copyValue(savedSecrets.temporaryCancelCode, "一時解除コードをコピーしました。")} type="button">
+                            コピー
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   <details className="settings-details-accordion">
-                    <summary>高度なオプション（手動入力）</summary>
+                    <summary>詳細オプション</summary>
                     <div className="manual-totp-panel">
                       <label>
-                        <span>TOTP シークレットを手動入力</span>
+                        <span>手動入力用キー</span>
                         <input
                           autoComplete="one-time-code"
                           onChange={(event) => setTotpSecret(event.target.value)}
                           placeholder={hasSavedMfa ? "登録済み（変更時のみ入力）" : "例: JBSWY3DPEHPK3PXP"}
+                          type="password"
                           value={totpSecret}
                         />
                       </label>
@@ -980,68 +1022,30 @@ function Settings() {
           <section className="section settings-card summary-card">
             <div className="section-heading">
               <div>
-                <h2>自動ログインのステータス</h2>
-                <p>現在の設定状況と暗号化保存の状態です。</p>
+                <h2>現在の状態</h2>
               </div>
             </div>
             <ul className="settings-status-list">
               <li>
-                <span className="status-label">自動ログイン機能</span>
+                <span className="status-label">自動ログイン</span>
                 <span className={`status-value ${settings.enabled ? "ready" : "disabled"}`}>
-                  {settings.configured ? settings.enabled ? "有効" : "無効" : "未設定"}
+                  {settings.enabled ? "有効" : "無効"}
                 </span>
               </li>
               <li>
-                <span className="status-label">ログインID・パスワード</span>
+                <span className="status-label">ログイン情報</span>
                 <span className={`status-value ${settings.configured ? "ready" : "disabled"}`}>
                   {settings.configured ? "保存済み" : "未保存"}
                 </span>
               </li>
               <li>
-                <span className="status-label">二段階認証（MFA）情報</span>
+                <span className="status-label">二段階認証</span>
                 <span className={`status-value ${hasSavedMfa ? "ready" : "disabled"}`}>
-                  {hasSavedMfa ? "登録済み" : settings.configured ? "未登録" : "未設定"}
+                  {hasSavedMfa ? "登録済み" : "未登録"}
                 </span>
               </li>
             </ul>
           </section>
-
-          {hasSavedMfa && (
-            <section className="section settings-card mfa-sidebar-card">
-              <div className="section-heading">
-                <div>
-                  <h2>二段階認証（MFA）の管理</h2>
-                  <p>登録済みの認証情報の確認や操作が行えます。</p>
-                </div>
-              </div>
-              <div className="card-body">
-                <div className="mfa-sidebar-actions">
-                  <button className="secondary-action" onClick={() => {
-                    setMfaWizardStep("qr");
-                    setShowMfaWizardModal(true);
-                  }} type="button">
-                    登録用QRコードを表示
-                  </button>
-                </div>
-                {savedSecrets?.temporaryCancelCode && (
-                  <div className="sidebar-cancel-code-box">
-                    <span className="sidebar-code-label">一時解除コード</span>
-                    <div className="sidebar-code-row">
-                      <code>{showCancelCode ? savedSecrets.temporaryCancelCode : maskedCancelCode}</code>
-                      <div className="sidebar-code-actions">
-                        <button className="subtle-action" onClick={() => setShowCancelCode(!showCancelCode)} type="button">
-                          {showCancelCode ? "隠す" : "表示"}
-                        </button>
-                        <button className="subtle-action" onClick={() => copyValue(savedSecrets.temporaryCancelCode, "一時解除コードをコピーしました。")} type="button">
-                          コピー
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </section>
-          )}
 
           <section className="section settings-card how-it-works-card">
             <div className="section-heading">
@@ -1052,46 +1056,18 @@ function Settings() {
             <div className="card-body">
               <p>認証情報はこの端末内だけに保存され、外部サーバーには送信されません。</p>
               <p>この機能は、自分だけが使う端末での利用を想定しています。</p>
-              <button type="button" className="btn-details-toggle" onClick={() => setShowDetails(true)}>
-                詳しく見る
-              </button>
+              <details className="security-details">
+                <summary>詳しく見る</summary>
+                <ul className="details-list">
+                  <li>保存される情報は、ログイン情報と二段階認証情報です。</li>
+                  <li>利用範囲は阪大ログイン画面での入力補助と6桁コード生成に限られます。</li>
+                  <li>共用端末や他人が使う端末では利用しないでください。</li>
+                </ul>
+              </details>
             </div>
           </section>
         </div>
       </div>
-
-      {/* Security Details Modal */}
-      {showDetails && (
-        <div className="settings-modal-overlay">
-          <div className="settings-modal details-modal" role="dialog" aria-modal="true">
-            <h3 className="modal-title">自動ログインの安全性</h3>
-            <p className="modal-text">保存と利用の範囲は、この端末内の自動ログイン補助に限定されます。</p>
-            <div className="details-groups">
-              <div>
-                <h4>保存される情報</h4>
-                <ul>
-                  <li>大阪大学個人ID</li>
-                  <li>パスワード</li>
-                  <li>二段階認証情報</li>
-                </ul>
-              </div>
-              <div>
-                <h4>使われる場面</h4>
-                <ul>
-                  <li>阪大ログイン画面での入力補助</li>
-                  <li>6桁認証コードの生成</li>
-                </ul>
-              </div>
-            </div>
-            <p className="modal-text">KOAN Plus 独自の外部サーバーへ認証情報を送信することはありません。共有端末では使わず、端末を手放す前には自動ログイン欄から認証情報を削除してください。</p>
-            <div className="modal-actions">
-              <button className="modal-btn cancel" onClick={() => setShowDetails(false)} type="button">
-                閉じる
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Delete Confirmation Modal */}
       {showDeleteModal && (
@@ -1125,32 +1101,34 @@ function Settings() {
                 
                 {/* Step 1: Consent */}
                 <div className="mfa-wizard-slide">
-                  <h3 className="modal-title">二段階認証の自動登録に関する重要なお願い</h3>
+                  <h3 className="modal-title">二段階認証を自動登録します</h3>
                   <div className="modal-text consent-content">
-                    <p>自動ログインで二段階認証を通過させるため、本拡張機能にMFA情報を登録します。登録の前に、以下の重要な注意点をご確認いただき、同意をお願いします。</p>
+                    <p>自動ログインで6桁コードを入力するため、この端末に二段階認証情報を保存します。</p>
                     
                     <div className="consent-alert-box">
-                      <h4>
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon warning">
-                          <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
-                          <line x1="12" y1="9" x2="12" y2="13"/>
-                          <line x1="12" y1="17" x2="12.01" y2="17"/>
-                        </svg>
-                        スマートフォン等への再登録が必要です
-                      </h4>
-                      <p>大阪大学のMFA仕様上、本拡張機能で新しく登録を行うと、<strong>これまでスマートフォン等の認証アプリ（Google Authenticator等）で生成していたコードは使用できなくなります（上書きされます）。</strong></p>
-                      <p>自動登録完了後に表示されるQRコードを、お使い of スマートフォン等で再度スキャンし、モバイルデバイスへの再登録を必ず行ってください。</p>
+                      <h4>1. 認証アプリの再登録が必要です</h4>
+                      <p>現在スマホ等で使っている認証コードは使えなくなります。</p>
+                      <p>登録後に再登録用QRコードが表示されるので、スマホ等の認証アプリで読み込んでください。</p>
+                      <details className="modal-details-accordion">
+                        <summary>詳しく見る</summary>
+                        <ul>
+                          <li>既存の認証アプリ情報は上書きされます。</li>
+                          <li>登録後に再登録用QRコードが表示されます。</li>
+                          <li>そのQRコードをスマホ等の認証アプリで読み込めば、スマホ側でも再び6桁コードを生成できます。</li>
+                        </ul>
+                      </details>
                     </div>
 
                     <div className="consent-alert-box">
-                      <h4>
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon security">
-                          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                        </svg>
-                        セキュリティのリスクについて
-                      </h4>
-                      <p>認証コード生成キーをこの端末内に保存するため、端末の紛失や盗難時に不正アクセスのリスクが生じます。利便性とセキュリティのリスクのトレードオフを理解したうえでご利用ください。</p>
+                      <h4>2. 端末内保存のリスクがあります</h4>
+                      <p>この端末を失うと、不正利用のリスクがあります。</p>
+                      <details className="modal-details-accordion">
+                        <summary>詳しく見る</summary>
+                        <ul>
+                          <li>認証情報は外部サーバーに送信されず、この端末内に保存されます。</li>
+                          <li>共用端末や他人が使う端末では利用しないでください。</li>
+                        </ul>
+                      </details>
                     </div>
                   </div>
 
@@ -1161,7 +1139,7 @@ function Settings() {
                         checked={mfaConsentChecked1}
                         onChange={(e) => setMfaConsentChecked1(e.target.checked)}
                       />
-                      <span>他端末（スマホ等）への再登録が必要になる仕様を理解しました。</span>
+                      <span>認証アプリの再登録が必要になり、登録後に表示されるQRコードを読み込む必要があることを理解しました</span>
                     </label>
                     <label className="consent-checkbox-label">
                       <input
@@ -1169,7 +1147,7 @@ function Settings() {
                         checked={mfaConsentChecked2}
                         onChange={(e) => setMfaConsentChecked2(e.target.checked)}
                       />
-                      <span>端末内保存に伴うセキュリティのリスクと利便性のトレードオフに同意します。</span>
+                      <span>端末内保存のリスクを理解しました</span>
                     </label>
                   </div>
 
@@ -1178,7 +1156,7 @@ function Settings() {
                       キャンセル
                     </button>
                     <button
-                      className="modal-btn confirm"
+                      className="modal-btn primary"
                       disabled={!mfaConsentChecked1 || !mfaConsentChecked2}
                       onClick={handleStartRegister}
                       type="button"
@@ -1215,18 +1193,37 @@ function Settings() {
                     </div>
                     <div className="mfa-qr-right-col">
                       <p className="modal-text qr-instruction-text">
-                        Google Authenticator等の<strong>認証アプリ内のスキャンカメラ</strong>でスキャンしてください。（スマートフォンの標準カメラアプリでは登録できません）
+                        Google Authenticator等の認証アプリでQRコードを読み込んでください。
                       </p>
                       
                       <div className="mfa-secret-panel modal-secret-panel">
                         <div className="secret-row">
-                          <span className="secret-label">登録キー</span>
+                          <span className="secret-label">手動入力用キー</span>
                           <code className="secret-code">{showMfaSecret ? savedSecrets?.totpSecret : maskedTotpSecret}</code>
                           <div className="secret-actions">
-                            <button className="subtle-action" onClick={() => setShowMfaSecret(!showMfaSecret)} type="button">
-                              {showMfaSecret ? "隠す" : "表示"}
+                            <button
+                              aria-label={showMfaSecret ? "手動入力用キーを隠す" : "手動入力用キーを表示"}
+                              className="icon-action"
+                              onClick={() => setShowMfaSecret(!showMfaSecret)}
+                              title={showMfaSecret ? "隠す" : "表示"}
+                              type="button"
+                            >
+                              {showMfaSecret ? (
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon">
+                                  <path d="m15 18-.722-3.25"/>
+                                  <path d="M2 8a10.645 10.645 0 0 0 20 0"/>
+                                  <path d="m20 15-1.726-2.05"/>
+                                  <path d="m4 15 1.726-2.05"/>
+                                  <path d="m9 18 .722-3.25"/>
+                                </svg>
+                              ) : (
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon">
+                                  <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>
+                                  <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                              )}
                             </button>
-                            <button className="subtle-action" disabled={!savedSecrets?.totpSecret} onClick={() => savedSecrets?.totpSecret && copyValue(savedSecrets.totpSecret, "登録キーをコピーしました。")} type="button">
+                            <button className="subtle-action" disabled={!savedSecrets?.totpSecret} onClick={() => savedSecrets?.totpSecret && copyValue(savedSecrets.totpSecret, "手動入力用キーをコピーしました。")} type="button">
                               コピー
                             </button>
                           </div>

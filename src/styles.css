@@ -1508,7 +1508,7 @@ main.page-layout {
   align-items: start;
   display: grid;
   gap: 24px;
-  grid-template-columns: minmax(520px, 1fr) 336px;
+  grid-template-columns: minmax(560px, 1fr) minmax(320px, 352px);
   max-width: 1280px;
   width: 100%;
 }
@@ -2755,6 +2755,44 @@ main.page-layout .btn-details-toggle:hover {
   background: var(--bg-hover);
 }
 
+main.page-layout .security-details {
+  margin-top: 10px;
+}
+
+main.page-layout .security-details summary,
+main.page-layout .modal-details-accordion summary {
+  color: var(--color-primary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  list-style: none;
+}
+
+main.page-layout .security-details summary::-webkit-details-marker,
+main.page-layout .modal-details-accordion summary::-webkit-details-marker {
+  display: none;
+}
+
+main.page-layout .security-details summary:hover,
+main.page-layout .modal-details-accordion summary:hover {
+  color: var(--color-accent);
+}
+
+main.page-layout .modal-details-accordion summary::before {
+  color: var(--text-sidebar-muted);
+  content: "▶";
+  display: inline-block;
+  font-size: 9px;
+  transition: transform 140ms ease;
+}
+
+main.page-layout .modal-details-accordion[open] summary::before {
+  transform: rotate(90deg);
+}
+
 main.page-layout .details-list {
   margin: 12px 0 0;
   padding-left: 18px;
@@ -2770,7 +2808,7 @@ main.page-layout .details-list li {
 
 main.page-layout .danger-text-action {
   background: var(--bg-shell);
-  border: 1px solid var(--color-danger);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 34%, var(--border-primary));
   border-radius: 7px;
   color: var(--color-danger);
   cursor: pointer;
@@ -2786,9 +2824,9 @@ main.page-layout .danger-text-action {
 }
 
 main.page-layout .danger-text-action:hover {
-  background: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 8%, var(--bg-shell));
   border-color: var(--color-danger);
-  color: #ffffff;
+  color: var(--color-danger);
 }
 
 main.page-layout .danger-text-action:focus,
@@ -2800,9 +2838,9 @@ main.page-layout .danger-text-action:focus-visible {
 }
 
 main.page-layout .danger-text-action:focus:hover {
-  background: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 8%, var(--bg-shell));
   border-color: var(--color-danger);
-  color: #ffffff;
+  color: var(--color-danger);
 }
 
 main.page-layout .danger-text-action:disabled {
@@ -3143,7 +3181,8 @@ main.page-layout .settings-card > .danger-text-action {
 
 main.page-layout .primary-action,
 main.page-layout .secondary-action,
-main.page-layout .subtle-action {
+main.page-layout .subtle-action,
+main.page-layout .icon-action {
   align-items: center;
   border-radius: 7px;
   cursor: pointer;
@@ -3187,9 +3226,25 @@ main.page-layout .subtle-action {
   color: var(--text-title);
 }
 
+main.page-layout .icon-action {
+  background: var(--bg-shell);
+  border: 1px solid var(--border-primary);
+  color: var(--text-title);
+  min-height: 32px;
+  padding: 0;
+  width: 34px;
+}
+
+main.page-layout .icon-action:hover {
+  background: var(--bg-hover);
+  border-color: var(--bg-accent-light);
+  color: var(--color-accent);
+}
+
 main.page-layout .primary-action:disabled,
 main.page-layout .secondary-action:disabled,
-main.page-layout .subtle-action:disabled {
+main.page-layout .subtle-action:disabled,
+main.page-layout .icon-action:disabled {
   background: var(--bg-shell);
   border-color: var(--border-primary);
   color: var(--text-secondary);
@@ -3240,6 +3295,10 @@ main.page-layout .setup-manual-totp {
   margin-top: 0;
 }
 
+main.page-layout .setup-details-accordion {
+  max-width: 480px;
+}
+
 @media (max-width: 640px) {
   main.page-layout .manual-totp-panel {
     align-items: stretch;
@@ -3279,11 +3338,17 @@ main.page-layout .mfa-secret-panel {
   padding: 12px;
 }
 
+main.page-layout .inline-secret-row {
+  border-top: 1px solid var(--border-primary);
+  margin-top: 14px;
+  padding-top: 12px;
+}
+
 main.page-layout .secret-row {
   align-items: center;
   display: grid;
   gap: 8px;
-  grid-template-columns: 110px minmax(0, 1fr) auto auto;
+  grid-template-columns: max-content max-content auto;
 }
 
 main.page-layout .secret-row span {
@@ -3298,11 +3363,24 @@ main.page-layout .secret-row code {
   border-radius: 6px;
   color: var(--text-title);
   font-size: 12px;
+  letter-spacing: 0.08em;
   min-height: 32px;
   overflow: hidden;
   padding: 8px 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  width: max-content;
+}
+
+main.page-layout .secret-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+main.page-layout .inline-secret-row .secret-row {
+  grid-template-columns: max-content max-content max-content;
 }
 
 main.page-layout .how-it-works-card .card-body,
@@ -3398,10 +3476,10 @@ main.page-layout .settings-details-accordion[open] summary::before {
 
 main.page-layout .settings-details-accordion .manual-totp-panel {
   margin-top: 12px;
-  padding: 16px;
-  background: var(--bg-hover);
-  border: 1px solid var(--border-primary);
-  border-radius: 8px;
+  padding: 8px 0 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 
 /* MFAステータス表示 */
@@ -3410,6 +3488,10 @@ main.page-layout .settings-details-accordion .manual-totp-panel {
   align-items: center;
   gap: 12px;
   margin: 12px 0 16px;
+}
+
+.mfa-card-actions {
+  margin-top: 12px;
 }
 
 .mfa-badge {
@@ -3595,6 +3677,7 @@ main.page-layout .settings-status.global {
 
 .mfa-qr-right-col .modal-secret-panel {
   margin-bottom: 0;
+  margin-top: 10px;
   background: var(--bg-hover);
   border: 1px solid var(--border-primary);
   border-radius: 8px;
@@ -3637,6 +3720,12 @@ main.page-layout .settings-status.global {
   padding: 4px 8px;
 }
 
+.mfa-qr-right-col .secret-actions .icon-action {
+  min-height: 30px;
+  padding: 0;
+  width: 32px;
+}
+
 .modal-actions.qr-actions {
   margin-top: 16px;
   padding-top: 16px;
@@ -3665,7 +3754,7 @@ main.page-layout .settings-status.global {
 .consent-content {
   font-size: 13px;
   line-height: 1.6;
-  color: var(--text-primary);
+  color: var(--text-title);
   margin-bottom: 20px;
 }
 
@@ -3676,6 +3765,19 @@ main.page-layout .settings-status.global {
   padding: 10px 14px;
   margin-top: 8px;
   text-align: left;
+}
+
+.modal-details-accordion {
+  margin-top: 12px;
+  text-align: left;
+}
+
+.modal-details-accordion ul {
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 10px 0 0;
+  padding-left: 18px;
 }
 
 .consent-alert-box h4 {
@@ -3705,7 +3807,7 @@ main.page-layout .settings-status.global {
 .consent-alert-box p {
   margin: 0 0 6px 0;
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
 
 .consent-alert-box p:last-child {
@@ -3743,65 +3845,6 @@ main.page-layout .settings-status.global {
   font-weight: 700;
   color: var(--text-title);
   line-height: 1.4;
-}
-
-/* 右カラム MFA管理カード */
-.mfa-sidebar-card .card-body {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.mfa-sidebar-actions button {
-  width: 100%;
-}
-
-.sidebar-cancel-code-box {
-  background: var(--bg-hover);
-  border: 1px solid var(--border-primary);
-  border-radius: 8px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.sidebar-code-label {
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.sidebar-code-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.sidebar-code-row code {
-  font-family: monospace;
-  font-size: 13px;
-  font-weight: bold;
-  color: var(--text-title);
-  background: var(--bg-shell);
-  padding: 2px 6px;
-  border-radius: 4px;
-  border: 1px solid var(--border-primary);
-  flex: 1;
-  text-align: center;
-}
-
-.sidebar-code-actions {
-  display: flex;
-  gap: 4px;
-}
-
-.sidebar-code-actions button.subtle-action {
-  min-height: 28px;
-  padding: 0 8px;
-  font-size: 11px;
 }
 
 .modal-delete-list {
@@ -3914,6 +3957,24 @@ main.page-layout .settings-status.global {
 
 .modal-btn.confirm:hover {
   background: var(--color-danger-dark);
+}
+
+.modal-btn.primary {
+  background: var(--bg-button-primary);
+  border-color: var(--border-button-primary);
+  color: var(--text-button-primary);
+}
+
+.modal-btn.primary:hover {
+  background: var(--bg-button-primary-hover);
+}
+
+.modal-btn.primary:disabled {
+  background: var(--bg-shell);
+  border-color: var(--border-primary);
+  color: var(--text-secondary);
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 @keyframes fadeIn {
