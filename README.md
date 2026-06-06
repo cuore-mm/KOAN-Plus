@@ -33,10 +33,11 @@ store those cookies. Cached dashboard data stays in the extension origin's
 
 If optional auto-login is enabled, the university ID, password, and optional
 TOTP secret are encrypted locally with AES-GCM using a non-extractable Web
-Crypto key stored with the ciphertext in the extension's IndexedDB. Keeping a
-password and TOTP secret on the same device improves convenience but weakens
-the separation between authentication factors. Use this feature only if you
-accept that tradeoff.
+Crypto key stored with the ciphertext in the extension's IndexedDB. This
+protects against casual plaintext inspection, but it does not protect secrets
+from a compromised browser profile, device, or extension runtime. Keeping a
+password and TOTP secret on the same device also weakens the separation between
+authentication factors. Use this feature only if you accept those tradeoffs.
 
 ## Request Strategy
 
@@ -93,6 +94,8 @@ Do not load the project root for normal use. The root manifest exists only to
 show a development guide if the wrong directory is selected.
 
 ## Development
+
+Requires Node.js 20.19 or later, or Node.js 22.12 or later.
 
 ```sh
 npm install

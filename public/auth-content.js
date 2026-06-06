@@ -239,7 +239,7 @@
     banner.innerHTML = `
       <div style="font-weight: bold; margin-bottom: 8px; color: #60a5fa;">KOAN Plus 自動設定</div>
       <div style="margin-bottom: 8px; line-height: 1.4;">
-        一時解除コード <strong style="font-size: 16px; color: #f43f5e; background: #311b22; padding: 2px 6px; border-radius: 4px;">${code}</strong> を自動生成して入力しました。
+        一時解除コード <strong id="koan-plus-mfa-cancel-code" style="font-size: 16px; color: #f43f5e; background: #311b22; padding: 2px 6px; border-radius: 4px;"></strong> を自動生成して入力しました。
       </div>
       <div style="font-size: 12px; color: #94a3b8; line-height: 1.4; margin-bottom: 12px;">
         登録完了後、拡張機能の設定画面からいつでもこのコードを確認・コピーできます。
@@ -256,6 +256,7 @@
         ">了解</button>
       </div>
     `;
+    banner.querySelector("#koan-plus-mfa-cancel-code").textContent = String(code);
     document.body.appendChild(banner);
     document.getElementById("koan-plus-mfa-banner-close").addEventListener("click", () => {
       banner.remove();
