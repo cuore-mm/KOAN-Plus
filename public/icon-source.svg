@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
   <title id="title">KOAN Plus icon</title>
-  <rect width="1024" height="1024" rx="224" fill="#172554"/>
-  <path d="M260 250h118v211l197-211h153L502 486l243 288H594L420 566l-42 43v165H260V250Z" fill="#38bdf8"/>
-  <path d="M714 322h54v82h82v54h-82v82h-54v-82h-82v-54h82v-82Z" fill="#f8fafc"/>
+  <rect x="24" y="24" width="976" height="976" rx="224" fill="#fbfaff" stroke="#eceaf4" stroke-width="32"/>
+  <path d="M250 244h126v220l202-220h158L500 492l250 288H590L418 572l-42 44v164H250V244Z" fill="#35365f"/>
+  <path d="M710 286h62v92h92v62h-92v92h-62v-92h-92v-62h92v-92Z" fill="#ff855f"/>
 </svg>

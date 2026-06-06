@@ -1,0 +1,158 @@
+# KOAN Plus
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./README.md)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2020.19.0-green.svg)](https://nodejs.org/)
+
+[Japanese Version Available Here (日本語版はこちら)](./README.md)
+
+KOAN Plus is a local-only Chrome extension that turns Osaka University's KOAN
+and CLE information into a readable academic dashboard.
+
+The extension is designed to leave ordinary KOAN and CLE pages unchanged. It
+fetches data only when the dashboard is opened, when the user refreshes it, or
+when the user explicitly starts a heavier operation such as bulletin sync or
+grade retrieval.
+
+---
+
+## ⚠️ Security & Policy Risks (Important)
+
+> [!WARNING]
+> **Use at Your Own Risk**
+> KOAN Plus is an unofficial tool. Using automation features (such as auto-login and MFA/TOTP automation) might violate Osaka University's Information Security Policies or Terms of Service. 
+> 
+> Automating MFA weakens the security of your account because it stores the TOTP secret key on the same device used to log in. Osaka University authentication systems or administrator policies might restrict, block, or take action against accounts that utilize automated login scripts. The developer holds no responsibility for any account suspension, data loss, or other damages caused by the use of this extension.
+
+---
+
+## Features
+
+- Dashboard view for KOAN schedule, class changes, bulletins, CLE assignments,
+  CLE unread message counts, and grades.
+- Controlled KOAN refresh with request cooldowns to avoid duplicate work across
+  dashboard tabs.
+- CLE refresh through a logged-in CLE tab using GET-only API requests.
+- User-triggered bulletin snapshot sync with pagination, delay, and runtime
+  limits.
+- User-triggered grade retrieval from KOAN.
+- Optional local auto-login support for Osaka University authentication.
+- Optional MFA/TOTP automation after explicit risk consent.
+
+## Privacy And Data Handling
+
+KOAN Plus is built as a local browser extension. It does not run a backend
+service, and it does not upload QR images, credentials, bulletin bodies, CLE
+message bodies, or assignment bodies.
+
+Authentication cookies remain managed by Chrome. KOAN Plus does not read or
+store those cookies. Cached dashboard data stays in the extension origin's
+`localStorage`.
+
+If optional auto-login is enabled, the university ID, password, and optional
+totp secret are encrypted locally with AES-GCM using a non-extractable Web
+Crypto key stored with the ciphertext in the extension's IndexedDB. This
+protects against casual plaintext inspection, but it does not protect secrets
+from a compromised browser profile, device, or extension runtime. Keeping a
+password and TOTP secret on the same device also weakens the separation between
+authentication factors. Use this feature only if you accept those tradeoffs.
+
+## Request Strategy
+
+KOAN Plus intentionally separates lightweight refreshes from heavier user
+actions.
+
+- Dashboard data refreshes once after an extension/browser restart. Opening
+  additional dashboard tabs does not trigger another automatic refresh.
+- Further refreshes run only when the user presses an update button. Dashboard
+  refresh attempts are serialized across tabs and limited to once per minute.
+- A lightweight dashboard refresh requests the KOAN portal, this week's class
+  changes, unread bulletin metadata, CLE calendar items, and CLE message
+  summary data.
+- KOAN refreshes reuse category caches: class changes and unread bulletins use
+  a short interval, the current schedule uses a medium interval, future
+  schedule pages use a longer interval, and course registration mappings are
+  refreshed daily.
+- CLE refreshes reuse cached data by category. Message summaries refresh more
+  often than assignment lists, course mappings refresh much less often, and
+  assignment status enrichment has its own longer interval because it costs
+  additional per-assignment requests.
+- CLE assignment status enrichment prioritizes nearby unfinished assignments.
+  Graded items are not rechecked; submitted and expired items use longer
+  intervals.
+- Bulletin snapshot sync runs only when the user presses **掲示を同期**. It
+  follows pagination with delays and stores list metadata only.
+- Bulletin bodies are not prefetched because opening a detail page may change
+  unread state.
+- Grade data is fetched only when the user opens the grade tab and presses
+  **成績を取得**.
+
+KOAN does not expose a single low-cost page containing every current bulletin
+title. The bulletin snapshot operation is therefore intentionally visible and
+user-triggered.
+
+## Install For Local Use
+
+This repository does not commit built extension files. Build the extension
+locally before loading it in Chrome.
+
+```sh
+npm install
+npm run build
+```
+
+Then:
+
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Choose **Load unpacked**.
+4. Select the generated `dist/` directory.
+
+Do not load the project root for normal use. The root manifest exists only to
+show a development guide if the wrong directory is selected.
+
+## Development & Requirements
+
+### System Requirements
+
+- **Supported Browsers**: Google Chrome (and other modern Chromium-based browsers supporting Manifest V3)
+- **Node.js**: 20.19 or later, or 22.12 or later (for local builds)
+
+### Development Setup
+
+```sh
+npm install
+npm run dev
+```
+
+Production build:
+
+```sh
+npm run build
+```
+
+Preview build output:
+
+```sh
+npm run preview
+```
+
+Generated files such as `dist/`, `node_modules/`, and `*.tsbuildinfo` should
+not be committed.
+
+## Repository Status
+
+This project is not an official Osaka University project. KOAN Plus is an
+independent local browser extension for personal academic workflow support.
+
+The extension depends on the current behavior of KOAN, CLE, and Osaka
+University authentication pages. Those services may change without notice, so
+users should review the code and build locally before use.
+
+## Contributing
+
+Contributions of any kind are welcome! You can report bugs, suggest features, or improve documentation by opening an Issue. Pull Requests are also highly appreciated.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

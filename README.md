@@ -1,131 +1,115 @@
 # KOAN Plus
 
-KOAN Plus is a local-only Chrome extension that turns Osaka University's KOAN
-and CLE information into a readable academic dashboard.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./README.md)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2020.19.0-green.svg)](https://nodejs.org/)
 
-The extension is designed to leave ordinary KOAN and CLE pages unchanged. It
-fetches data only when the dashboard is opened, when the user refreshes it, or
-when the user explicitly starts a heavier operation such as bulletin sync or
-grade retrieval.
+[English Version Available Here (英語版はこちら)](./README.en.md)
 
-## Features
 
-- Dashboard view for KOAN schedule, class changes, bulletins, CLE assignments,
-  CLE unread message counts, and grades.
-- Controlled KOAN refresh with request cooldowns to avoid duplicate work across
-  dashboard tabs.
-- CLE refresh through a logged-in CLE tab using GET-only API requests.
-- User-triggered bulletin snapshot sync with pagination, delay, and runtime
-  limits.
-- User-triggered grade retrieval from KOAN.
-- Optional local auto-login support for Osaka University authentication.
-- Optional MFA/TOTP automation after explicit risk consent.
+KOAN Plus は、大阪大学のポータルサイト「KOAN」および学習管理システム「CLE」の情報を取得し、見やすいアカデミックダッシュボードとして統合表示する、ローカル完結型の Chrome 拡張機能です。
 
-## Privacy And Data Handling
+本拡張機能は、通常の KOAN や CLE のページデザインには影響を与えません。ダッシュボードを開いたとき、ユーザーが手動で更新したとき、または掲示の同期や成績取得など明示的な操作を行ったときにのみ、必要なデータを取得します。
 
-KOAN Plus is built as a local browser extension. It does not run a backend
-service, and it does not upload QR images, credentials, bulletin bodies, CLE
-message bodies, or assignment bodies.
+---
 
-Authentication cookies remain managed by Chrome. KOAN Plus does not read or
-store those cookies. Cached dashboard data stays in the extension origin's
-`localStorage`.
+## ⚠️ セキュリティおよび利用規約に関するリスク（重要）
 
-If optional auto-login is enabled, the university ID, password, and optional
-TOTP secret are encrypted locally with AES-GCM using a non-extractable Web
-Crypto key stored with the ciphertext in the extension's IndexedDB. This
-protects against casual plaintext inspection, but it does not protect secrets
-from a compromised browser profile, device, or extension runtime. Keeping a
-password and TOTP secret on the same device also weakens the separation between
-authentication factors. Use this feature only if you accept those tradeoffs.
+> [!WARNING]
+> **自己責任でのご利用をお願いします**
+> 本拡張機能は非公式のツールです。自動ログインや MFA（多要素認証）の自動化機能を使用することは、**大阪大学の情報セキュリティポリシーや利用規約に抵触する可能性があります**。
+> 
+> 特に MFA の自動化は、ログインに使用する同一のデバイス上に TOTP シークレットを保存するため、多要素認証のセキュリティ強度が低下します。大学のシステム変更やセキュリティ監査などにより、自動ログインを行うアカウントが一時的に制限・停止されるリスクを理解した上でご利用ください。本ツールの利用によって生じたアカウントの停止、データの紛失、その他の不利益について、開発者は一切の責任を負いません。
 
-## Request Strategy
+---
 
-KOAN Plus intentionally separates lightweight refreshes from heavier user
-actions.
+## 主な機能
 
-- Dashboard data refreshes once after an extension/browser restart. Opening
-  additional dashboard tabs does not trigger another automatic refresh.
-- Further refreshes run only when the user presses an update button. Dashboard
-  refresh attempts are serialized across tabs and limited to once per minute.
-- A lightweight dashboard refresh requests the KOAN portal, this week's class
-  changes, unread bulletin metadata, CLE calendar items, and CLE message
-  summary data.
-- KOAN refreshes reuse category caches: class changes and unread bulletins use
-  a short interval, the current schedule uses a medium interval, future
-  schedule pages use a longer interval, and course registration mappings are
-  refreshed daily.
-- CLE refreshes reuse cached data by category. Message summaries refresh more
-  often than assignment lists, course mappings refresh much less often, and
-  assignment status enrichment has its own longer interval because it costs
-  additional per-assignment requests.
-- CLE assignment status enrichment prioritizes nearby unfinished assignments.
-  Graded items are not rechecked; submitted and expired items use longer
-  intervals.
-- Bulletin snapshot sync runs only when the user presses **掲示を同期**. It
-  follows pagination with delays and stores list metadata only.
-- Bulletin bodies are not prefetched because opening a detail page may change
-  unread state.
-- Grade data is fetched only when the user opens the grade tab and presses
-  **成績を取得**.
+- **ダッシュボード表示**: KOANの時間割、休講・教室変更、新着掲示、CLEの課題、CLEの未読メッセージ数、成績などを一元管理。
+- **制御された更新（負荷軽減）**: ダッシュボードの無駄な同時更新を防ぐため、タブ間で通信を同期し、1分間のクールタイムを設定。
+- **CLEとの安全な連携**: ログイン済みのCLEタブを利用し、GETリクエストのみでカレンダーやメッセージのサマリーを取得。
+- **掲示板のスナップショット同期**: ユーザーが手動で「掲示を同期」した際のみ、適切なウェイト（遅延）を挟みつつページング処理を行い、一覧を取得。詳細な本文は自動取得しません。
+- **成績データの個別取得**: 成績タブを開いてユーザーが「成績を取得」ボタンを押したときのみ取得を実行。
+- **オプションの自動ログインサポート**: IDおよびパスワードを保存した自動ログイン。
+- **オプションのMFA自動化**: リスクへの同意を前提とした、TOTP（ワンタイムパスワード）の自動入力。
 
-KOAN does not expose a single low-cost page containing every current bulletin
-title. The bulletin snapshot operation is therefore intentionally visible and
-user-triggered.
+## プライバシーとデータ取り扱い
 
-## Install For Local Use
+KOAN Plus はローカルで動作する拡張機能です。バックグラウンドの外部サーバーは持たず、QR画像、認証情報、掲示内容、CLEのメッセージ本文などのデータを外部へ送信・アップロードすることは一切ありません。
 
-This repository does not commit built extension files. Build the extension
-locally before loading it in Chrome.
+セッションクッキーは Chrome 自体によって管理され、本拡張機能が直接クッキーを読み取ったり保存したりすることはありません。ダッシュボードのキャッシュデータは、拡張機能ローカルの `localStorage` にのみ保存されます。
+
+自動ログインを有効にした場合、学内個人ID、パスワード、およびTOTPシークレットは、Web Crypto API を用いた **AES-GCM (256-bit)** によってローカルで暗号化され、暗号文と非エクスポートの暗号鍵が拡張機能の IndexedDB に保存されます。これにより、簡易的なプレーンテキストでの盗み見からは保護されますが、デバイスやブラウザのプロファイル自体が侵害された場合、機密情報は保護できません。十分注意してください。
+
+## 通信・リクエスト方針
+
+KOAN Plus は、軽量なデータ更新と、負荷の高いユーザー操作を意図的に分離しています。
+
+- **初回読み込み**: ダッシュボードのデータは、拡張機能またはブラウザの起動後に1回だけ自動更新されます。追加でダッシュボードのタブを開いても、自動更新はトリガーされません。
+- **手動更新**: 更新ボタンを押したときのみ再更新が走ります。このダッシュボード更新はタブ間で同期（排他制御）され、最大でも1分間に1回に制限されます。
+- **軽量な更新内容**: 通常のダッシュボード更新では、KOANポータル、今週の授業変更情報、未読掲示のメタデータ、CLEカレンダーアイテム、CLEメッセージサマリーのみを取得します。
+- **キャッシュの活用 (KOAN)**: 授業変更情報や未読掲示は短い間隔、現在の時間割は中程度の間隔、将来の時間割は長めの間隔、履修科目マッピングは1日1回のキャッシュを使用します。
+- **キャッシュの活用 (CLE)**: メッセージサマリーは頻繁に更新しますが、課題一覧は長めの間隔、コースマッピングは非常に長い間隔で更新します。また、個々の課題のステータス詳細（提出済み、採点済み等）の取得は個別リクエストが発生するため、独自の長い更新間隔を設けています。
+- **CLE課題の詳細確認**: 期限が近く未完了の課題を優先的にチェックします。採点済みの項目は再チェックせず、提出済みや期限切れの項目は更新頻度を下げます。
+- **掲示同期の制限**: 掲示板のスナップショット同期は、ユーザーが **[掲示を同期]** ボタンを押したときのみ実行されます。ページ送り時に遅延（ディレイ）を挟み、一覧のメタデータのみを保存します。
+- **掲示本文の不保持**: 掲示の詳細を開くと未読状態が変わるため、本文の自動事前取得（プリフェッチ）は行いません。
+- **成績取得の制限**: 成績データは、ユーザーが成績タブを開いて **[成績を取得]** を押したときのみ取得されます。
+
+KOANはすべての掲示タイトルを1ページで軽量に取得するAPIや画面を提供していないため、掲示スナップショットの取得はユーザーが意図して実行するよう設計されています。
+
+## ローカルでのインストール方法
+
+本リポジトリにはビルド済みの拡張機能ファイルは含まれていません。ローカルでビルドして Chrome に読み込ませてください。
 
 ```sh
 npm install
 npm run build
 ```
 
-Then:
+その後：
+1. `chrome://extensions` を開く。
+2. 右上の「デベロッパー モード」を有効にする。
+3. **[パッケージ化されていない拡張機能を読み込む]** を選択。
+4. 生成された `dist/` ディレクトリを選択します。
 
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Choose **Load unpacked**.
-4. Select the generated `dist/` directory.
+※ プロジェクトのルートディレクトリをそのまま読み込ませないでください。ルートの `manifest.json` は、誤ったディレクトリを読み込んだ際に開発ガイドを表示するためのダミーです。
 
-Do not load the project root for normal use. The root manifest exists only to
-show a development guide if the wrong directory is selected.
+## 開発方法と動作環境
 
-## Development
+### 動作環境
 
-Requires Node.js 20.19 or later, or Node.js 22.12 or later.
+- **対応ブラウザ**: Google Chrome (および Manifest V3 に対応する最新の Chromium 系ブラウザ)
+- **Node.js**: 20.19 以上、または 22.12 以上 (ローカルビルド時)
+
+### 開発手順
 
 ```sh
 npm install
 npm run dev
 ```
 
-Production build:
-
+本番用ビルド:
 ```sh
 npm run build
 ```
 
-Preview build output:
-
+ビルド結果のプレビュー:
 ```sh
 npm run preview
 ```
 
-Generated files such as `dist/`, `node_modules/`, and `*.tsbuildinfo` should
-not be committed.
+`dist/` や `node_modules/`、`*.tsbuildinfo` などの生成ファイルはコミットしないでください。
 
-## Repository Status
+## 免責事項
 
-This project is not an official Osaka University project. KOAN Plus is an
-independent local browser extension for personal academic workflow support.
+本プロジェクトは、大阪大学公式のプロジェクトではありません。個人の学修管理をサポートするために開発された非公式のローカルブラウザ拡張機能です。
 
-The extension depends on the current behavior of KOAN, CLE, and Osaka
-University authentication pages. Those services may change without notice, so
-users should review the code and build locally before use.
+本拡張機能は、KOAN、CLE、および大阪大学の認証ページの仕様に依存しています。これらのサービス仕様は予告なく変更されることがあり、それにより機能が動作しなくなる可能性があります。
 
-## License
+## コントリビューション
 
-MIT. See [LICENSE](./LICENSE).
+バグの報告、機能の提案、またはドキュメントやコードの改善など、皆様からの貢献をお待ちしています。バグ報告や要望は GitHub Issues から、コードの修正は Pull Request にてお寄せください。
+
+## ライセンス
+
+MIT. [LICENSE](./LICENSE) を参照してください。
