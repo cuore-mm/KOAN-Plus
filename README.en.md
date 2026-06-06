@@ -18,7 +18,7 @@ grade retrieval.
 > **Use at Your Own Risk**
 > KOAN Plus is an unofficial tool. Using automation features (such as auto-login and MFA/TOTP automation) might violate Osaka University's Information Security Policies or Terms of Service. 
 > 
-> Automating MFA weakens the security of your account because it stores the TOTP secret key on the same device used to log in. Osaka University authentication systems or administrator policies might restrict, block, or take action against accounts that utilize automated login scripts. The developer holds no responsibility for any account suspension, data loss, or other damages caused by the use of this extension.
+> Automating MFA weakens the security of your account because it stores the TOTP secret key on the same device used to log in. Osaka University authentication systems or administrator policies might restrict, block, or take action against accounts that utilize automated login scripts. Except in cases of the developer's intent or gross negligence, the developer is not liable for account suspension, data loss, or other damages caused by the use of this extension.
 
 ---
 

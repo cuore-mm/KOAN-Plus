@@ -54,6 +54,7 @@ import {
   getSavedMfaSecrets,
 } from "./auth";
 import QRCode from "qrcode";
+import ThemeToggle, { loadTheme } from "./ThemeToggle";
 
 
 const EMPTY = {
@@ -85,15 +86,10 @@ const isExpired = (value: string | null, ttl: number) =>
 
 const compactStatus = (label: string, value: string) => value ? `${label}: ${value}` : "";
 
-function App() {
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    const stored = localStorage.getItem("koan-plus-theme");
-    if (stored === "light" || stored === "dark") return stored;
-    if (typeof window !== "undefined" && window.matchMedia) {
-      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-    }
-    return "light";
-  });
+type AppView = "dashboard" | "courses" | "reference" | "grades" | "settings";
+
+function App({ initialView = "dashboard" }: { initialView?: AppView }) {
+  const [theme, setTheme] = useState(loadTheme);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -118,7 +114,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [genre, setGenre] = useState("");
   const [scope, setScope] = useState("attention");
-  const [view, setView] = useState<"dashboard" | "courses" | "reference" | "grades" | "settings">("dashboard");
+  const [view, setView] = useState<AppView>(initialView);
   const [gradesData, setGradesData] = useState<GradeData | null>(() =>
     loadGradesCache<GradeData>(),
   );
@@ -261,9 +257,13 @@ function App() {
   };
 
   useEffect(() => {
-    void claimStartupRefresh()
+    void loadAuthSettings()
+      .then((authSettings) => {
+        if (!authSettings.configured || !authSettings.enabled) return;
+        return claimStartupRefresh();
+      })
       .then((shouldRefresh) => {
-        if (shouldRefresh) return runUpdate(true);
+        if (shouldRefresh === true) return runUpdate(true);
       })
       .catch(() => {});
   }, []);
@@ -351,32 +351,7 @@ function App() {
               {topbarState.label}
             </button>
           </div>
-          <div className="theme-toggle-container">
-            <button
-              type="button"
-              className="theme-toggle-btn"
-              aria-label={theme === "light" ? "ダークモードに切り替え" : "ライトモードに切り替え"}
-              onClick={() => setTheme(theme === "light" ? "dark" : "light")}
-            >
-              {theme === "light" ? (
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon moon">
-                  <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
-                </svg>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon sun">
-                  <circle cx="12" cy="12" r="4"/>
-                  <path d="M12 2v2"/>
-                  <path d="M12 20v2"/>
-                  <path d="m4.93 4.93 1.41 1.41"/>
-                  <path d="m17.66 17.66 1.41 1.41"/>
-                  <path d="M2 12h2"/>
-                  <path d="M20 12h2"/>
-                  <path d="m6.34 17.66-1.41 1.41"/>
-                  <path d="m19.07 4.93-1.41 1.41"/>
-                </svg>
-              )}
-            </button>
-          </div>
+          <ThemeToggle onToggle={() => setTheme(theme === "light" ? "dark" : "light")} theme={theme} />
         </div>
       </header>
 
@@ -435,8 +410,8 @@ function Sidebar({
   onViewChange,
   view,
 }: {
-  onViewChange: (view: "dashboard" | "courses" | "reference" | "grades" | "settings") => void;
-  view: "dashboard" | "courses" | "reference" | "grades" | "settings";
+  onViewChange: (view: AppView) => void;
+  view: AppView;
 }) {
   const items = [
     ["dashboard", "ホーム"],
