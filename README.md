@@ -43,10 +43,24 @@ accept that tradeoff.
 KOAN Plus intentionally separates lightweight refreshes from heavier user
 actions.
 
+- Dashboard data refreshes once after an extension/browser restart. Opening
+  additional dashboard tabs does not trigger another automatic refresh.
+- Further refreshes run only when the user presses an update button. Dashboard
+  refresh attempts are serialized across tabs and limited to once per minute.
 - A lightweight dashboard refresh requests the KOAN portal, this week's class
   changes, unread bulletin metadata, CLE calendar items, and CLE message
   summary data.
-- CLE assignment status enrichment is limited to nearby assignment deadlines.
+- KOAN refreshes reuse category caches: class changes and unread bulletins use
+  a short interval, the current schedule uses a medium interval, future
+  schedule pages use a longer interval, and course registration mappings are
+  refreshed daily.
+- CLE refreshes reuse cached data by category. Message summaries refresh more
+  often than assignment lists, course mappings refresh much less often, and
+  assignment status enrichment has its own longer interval because it costs
+  additional per-assignment requests.
+- CLE assignment status enrichment prioritizes nearby unfinished assignments.
+  Graded items are not rechecked; submitted and expired items use longer
+  intervals.
 - Bulletin snapshot sync runs only when the user presses **掲示を同期**. It
   follows pagination with delays and stores list metadata only.
 - Bulletin bodies are not prefetched because opening a detail page may change

@@ -11,6 +11,10 @@ type AuthResponse = AuthSettings & {
   error?: string;
   loginStarted?: boolean;
   tabId?: number;
+  shouldRefresh?: boolean;
+  portalHtml?: string;
+  portalUrl?: string;
+  allowed?: boolean;
 };
 
 async function sendAuthMessage(message: unknown): Promise<AuthResponse> {
@@ -41,6 +45,10 @@ export function deleteAuthSettings() {
   return sendAuthMessage({ type: "auth-delete" });
 }
 
+export function deleteMfaSettings() {
+  return sendAuthMessage({ type: "auth-delete-mfa" });
+}
+
 export function ensureKoanLogin() {
   return sendAuthMessage({ type: "auth-ensure-koan" });
 }
@@ -51,6 +59,16 @@ export function ensureCleLogin() {
 
 export function refreshCleLogin() {
   return sendAuthMessage({ type: "auth-refresh-cle" });
+}
+
+export async function claimStartupRefresh() {
+  const response = await sendAuthMessage({ type: "auth-claim-startup-refresh" });
+  return Boolean(response.shouldRefresh);
+}
+
+export async function claimDashboardRefresh() {
+  const response = await sendAuthMessage({ type: "auth-claim-dashboard-refresh" });
+  return response.allowed !== false;
 }
 
 export type MfaSecrets = {

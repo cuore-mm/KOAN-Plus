@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BOARD_URL,
   GENRES,
-  LIGHT_REFRESH_TTL_MS,
   PORTAL_URL,
   SNAPSHOT_TTL_MS,
   type ChangeItem,
@@ -12,6 +11,7 @@ import {
   type Notice,
   type ScheduleItem,
   attentionScore,
+  isKoanCacheFresh,
   mergeNotices,
   noticeKey,
   refreshGrades,
@@ -29,6 +29,7 @@ import {
   cleMessageUrl,
   cleCourseUrl,
   cleTaskUrl,
+  isCleCacheFresh,
   refreshCle,
 } from "./cle";
 import {
@@ -41,7 +42,10 @@ import {
 } from "./storage";
 import {
   type AuthSettings,
+  claimDashboardRefresh,
+  claimStartupRefresh,
   deleteAuthSettings,
+  deleteMfaSettings,
   ensureCleLogin,
   ensureKoanLogin,
   loadAuthSettings,
@@ -59,6 +63,11 @@ const EMPTY = {
   notices: [],
   lightUpdatedAt: null,
   snapshotUpdatedAt: null,
+  scheduleUpdatedAt: null,
+  futureScheduleUpdatedAt: null,
+  coursesUpdatedAt: null,
+  changesUpdatedAt: null,
+  noticesUpdatedAt: null,
 };
 
 const fmtTime = (value: string | null) =>
@@ -115,20 +124,28 @@ function App() {
   );
   const [gradesLoading, setGradesLoading] = useState(false);
   const [gradesStatus, setGradesStatus] = useState("");
+  const updateLock = useRef(false);
+  const snapshotLock = useRef(false);
+  const gradesLock = useRef(false);
 
-  const updateKoan = async () => {
+  const updateKoan = async (force = false) => {
     setLoading(true);
     setStatus("ログイン状態を確認中");
     try {
-      if (!isExpired(data.lightUpdatedAt, LIGHT_REFRESH_TTL_MS)) {
+      if (!force && isKoanCacheFresh(data)) {
         setStatus(`キャッシュ表示中 / 更新 ${fmtTime(data.lightUpdatedAt)}`);
         return;
       }
       const auth = await ensureKoanLogin();
       if (auth.loginStarted) setStatus("自動ログイン完了 / データ取得準備中");
       else setStatus("データ取得準備中");
-      const result = await refreshLight(data.notices, (value) => {
-        if (value) setStatus(value);
+      const result = await refreshLight(data, {
+        force,
+        portalHtml: auth.portalHtml,
+        portalUrl: auth.portalUrl,
+        onProgress: (value) => {
+          if (value) setStatus(value);
+        },
       });
       setData((current) => {
         const next = { ...current, ...result };
@@ -143,24 +160,30 @@ function App() {
     }
   };
 
-  const updateCle = async () => {
+  const updateCle = async (force = false) => {
     setCleLoading(true);
     setCleStatus("CLEログイン状態を確認中");
     try {
+      if (!force && isCleCacheFresh(cleData)) {
+        setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
+        return;
+      }
       const auth = await ensureCleLogin();
       if (auth.loginStarted) setCleStatus("自動ログイン完了 / データ取得準備中");
       else setCleStatus("データ取得準備中");
       let next;
       try {
-        next = await refreshCle(auth.tabId, (value) => {
+        next = await refreshCle(cleData, auth.tabId, (value) => {
           if (value) setCleStatus(value);
-        });
-      } catch {
+        }, force);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/別の画面|1分後/.test(message)) throw error;
         setCleStatus("セッションを再認証中");
         const refreshedAuth = await refreshCleLogin();
-        next = await refreshCle(refreshedAuth.tabId, (value) => {
+        next = await refreshCle(cleData, refreshedAuth.tabId, (value) => {
           if (value) setCleStatus(value);
-        });
+        }, force);
       }
       setCleData(next);
       saveCleCache(next);
@@ -172,11 +195,30 @@ function App() {
     }
   };
 
-  const update = async () => {
-    await Promise.all([updateKoan(), updateCle()]);
+  const runUpdate = async (force = false) => {
+    if (updateLock.current) return;
+    if (!force && isKoanCacheFresh(data) && isCleCacheFresh(cleData)) {
+      setStatus(`キャッシュ表示中 / 更新 ${fmtTime(data.lightUpdatedAt)}`);
+      setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
+      return;
+    }
+    updateLock.current = true;
+    try {
+      if (!await claimDashboardRefresh()) {
+        setStatus("更新の再試行は1分後にできます。");
+        setCleStatus("更新の再試行は1分後にできます。");
+        return;
+      }
+      await Promise.all([updateKoan(force), updateCle(force)]);
+    } finally {
+      updateLock.current = false;
+    }
   };
+  const update = () => runUpdate(false);
 
   const syncSnapshot = async () => {
+    if (snapshotLock.current) return;
+    snapshotLock.current = true;
     setSnapshotLoading(true);
     setStatus("掲示スナップショットを同期中");
     try {
@@ -196,10 +238,13 @@ function App() {
     } finally {
       setProgress("");
       setSnapshotLoading(false);
+      snapshotLock.current = false;
     }
   };
 
   const updateGrades = async () => {
+    if (gradesLock.current) return;
+    gradesLock.current = true;
     setGradesLoading(true);
     setGradesStatus("成績を取得中");
     try {
@@ -211,11 +256,16 @@ function App() {
       setGradesStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setGradesLoading(false);
+      gradesLock.current = false;
     }
   };
 
   useEffect(() => {
-    void update();
+    void claimStartupRefresh()
+      .then((shouldRefresh) => {
+        if (shouldRefresh) return runUpdate(true);
+      })
+      .catch(() => {});
   }, []);
 
   const notices = useMemo(() => {
@@ -424,6 +474,7 @@ function Settings() {
   const [setupStarted, setSetupStarted] = useState(false);
   const [setupStep, setSetupStep] = useState<1 | 2 | 3>(1);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [showMfaDeleteModal, setShowMfaDeleteModal] = useState(false);
   const [savedSecrets, setSavedSecrets] = useState<{
     totpSecret: string;
     temporaryCancelCode: string;
@@ -443,7 +494,7 @@ function Settings() {
       setMfaEnabled(next.mfaEnabled);
       setMfaConsent(next.mfaEnabled);
       if (next.configured) setSetupStarted(false);
-      if (next.configured) {
+      try {
         const secrets = await getSavedMfaSecrets();
         if (secrets.configured && secrets.totpSecret) {
           setSavedSecrets({
@@ -452,6 +503,8 @@ function Settings() {
           });
           return;
         }
+      } catch (e) {
+        console.error("Failed to load saved MFA secrets:", e);
       }
       setSavedSecrets(null);
     } catch (error) {
@@ -470,11 +523,8 @@ function Settings() {
   }, []);
 
   const hasSavedMfa = Boolean(savedSecrets?.totpSecret);
-  const maskedTotpSecret = savedSecrets?.totpSecret
-    ? `${savedSecrets.totpSecret.slice(0, 4)}${"*".repeat(Math.max(6, savedSecrets.totpSecret.length - 8))}${savedSecrets.totpSecret.slice(-4)}`
-    : "";
+  const maskedTotpSecret = savedSecrets?.totpSecret ? "••••••••" : "";
   const maskedCancelCode = savedSecrets?.temporaryCancelCode ? "••••••••" : "";
-  const savedIdLabel = settings.idHint || (settings.configured ? "保存済み" : "未保存");
   const setupCanGoNext = Boolean(id.trim() && password);
   const canSaveCredentials = !saving && Boolean(id.trim() && password);
   const canFinishSetup = !saving && Boolean(id.trim() && password) && (!mfaEnabled || (mfaConsent && Boolean(hasSavedMfa || totpSecret.trim())));
@@ -573,13 +623,13 @@ function Settings() {
       setMfaConsent(next.mfaEnabled);
       setEditingCredentials(false);
       setSetupStarted(false);
-      if (next.configured) {
+      try {
         const secrets = await getSavedMfaSecrets();
         setSavedSecrets(secrets.configured && secrets.totpSecret ? {
           totpSecret: secrets.totpSecret,
           temporaryCancelCode: secrets.temporaryCancelCode || "",
         } : null);
-      } else {
+      } catch {
         setSavedSecrets(null);
       }
       setStatus(success);
@@ -688,6 +738,21 @@ function Settings() {
       setSetupStep(1);
       return next;
     }, "保存済みの認証情報を削除しました。");
+  };
+
+  const confirmMfaDelete = () => {
+    setShowMfaDeleteModal(true);
+  };
+
+  const removeSavedMfa = () => {
+    setShowMfaDeleteModal(false);
+    void run(async () => {
+      const next = await deleteMfaSettings();
+      setTotpSecret("");
+      setMfaConsent(false);
+      setMfaEnabled(false);
+      return next;
+    }, "保存済みの二段階認証情報を削除しました。");
   };
 
   return (
@@ -859,12 +924,6 @@ function Settings() {
                   <hr className="settings-divider" />
                   {!editingCredentials ? (
                     <div className="saved-id-row">
-                      <dl className="settings-state-list compact">
-                        <div>
-                          <dt>保存済みID</dt>
-                          <dd>{savedIdLabel}</dd>
-                        </div>
-                      </dl>
                       <button className="secondary-action" onClick={() => setEditingCredentials(true)} type="button">
                         ログイン情報を変更
                       </button>
@@ -938,60 +997,31 @@ function Settings() {
                     </div>
                   )}
 
-                  <div className="settings-actions mfa-card-actions">
-                    <button className={hasSavedMfa ? "secondary-action" : "primary-action"} disabled={saving || !settings.mfaEnabled} onClick={() => {
-                      setMfaConsentChecked1(false);
-                      setMfaConsentChecked2(false);
-                      setMfaWizardStep("consent");
-                      setShowMfaWizardModal(true);
-                    }} type="button">
-                      {hasSavedMfa ? "再設定" : "二段階認証を自動登録する"}
-                    </button>
-                    {hasSavedMfa && (
-                      <button className="secondary-action" onClick={() => {
-                        setMfaWizardStep("qr");
+                  <div className="settings-actions-row">
+                    <div className="settings-actions">
+                      <button className={hasSavedMfa ? "secondary-action" : "primary-action"} disabled={saving || !settings.mfaEnabled} onClick={() => {
+                        setMfaConsentChecked1(false);
+                        setMfaConsentChecked2(false);
+                        setMfaWizardStep("consent");
                         setShowMfaWizardModal(true);
                       }} type="button">
-                        登録用QRコードを表示
+                        {hasSavedMfa ? "再設定" : "二段階認証を自動登録する"}
+                      </button>
+                      {hasSavedMfa && (
+                        <button className="secondary-action" onClick={() => {
+                          setMfaWizardStep("qr");
+                          setShowMfaWizardModal(true);
+                        }} type="button">
+                          登録情報・QRコードを表示
+                        </button>
+                      )}
+                    </div>
+                    {hasSavedMfa && (
+                      <button className="danger-text-action" disabled={saving} onClick={confirmMfaDelete} type="button">
+                        登録情報を削除
                       </button>
                     )}
                   </div>
-
-                  {savedSecrets?.temporaryCancelCode && (
-                    <div className="inline-secret-row">
-                      <div className="secret-row">
-                        <span className="secret-label">一時解除コード</span>
-                        <code>{showCancelCode ? savedSecrets.temporaryCancelCode : maskedCancelCode}</code>
-                        <div className="secret-actions">
-                          <button
-                            aria-label={showCancelCode ? "一時解除コードを隠す" : "一時解除コードを表示"}
-                            className="icon-action"
-                            onClick={() => setShowCancelCode(!showCancelCode)}
-                            title={showCancelCode ? "隠す" : "表示"}
-                            type="button"
-                          >
-                            {showCancelCode ? (
-                              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon">
-                                <path d="m15 18-.722-3.25"/>
-                                <path d="M2 8a10.645 10.645 0 0 0 20 0"/>
-                                <path d="m20 15-1.726-2.05"/>
-                                <path d="m4 15 1.726-2.05"/>
-                                <path d="m9 18 .722-3.25"/>
-                              </svg>
-                            ) : (
-                              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon">
-                                <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>
-                                <circle cx="12" cy="12" r="3"/>
-                              </svg>
-                            )}
-                          </button>
-                          <button className="subtle-action" onClick={() => copyValue(savedSecrets.temporaryCancelCode, "一時解除コードをコピーしました。")} type="button">
-                            コピー
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
 
                   <details className="settings-details-accordion">
                     <summary>詳細オプション</summary>
@@ -1017,7 +1047,7 @@ function Settings() {
           )}
         </div>
 
-        {/* 右カラム：ステータス・安全性について */}
+        {/* 右カラム：ステータス・認証情報の扱い */}
         <div className="settings-sidebar">
           <section className="section settings-card summary-card">
             <div className="section-heading">
@@ -1050,20 +1080,27 @@ function Settings() {
           <section className="section settings-card how-it-works-card">
             <div className="section-heading">
               <div>
-                <h2>安全性について</h2>
+                <h2>認証情報の扱い</h2>
               </div>
             </div>
-            <div className="card-body">
-              <p>認証情報はこの端末内だけに保存され、外部サーバーには送信されません。</p>
-              <p>この機能は、自分だけが使う端末での利用を想定しています。</p>
-              <details className="security-details">
-                <summary>詳しく見る</summary>
-                <ul className="details-list">
-                  <li>保存される情報は、ログイン情報と二段階認証情報です。</li>
-                  <li>利用範囲は阪大ログイン画面での入力補助と6桁コード生成に限られます。</li>
-                  <li>共用端末や他人が使う端末では利用しないでください。</li>
-                </ul>
-              </details>
+            <div className="credential-safety-body">
+              <dl className="credential-safety-list">
+                <div>
+                  <dt>保存場所</dt>
+                  <dd>個人ID・パスワード・二段階認証情報は、この端末内だけに保存します。</dd>
+                </div>
+                <div>
+                  <dt>使用範囲</dt>
+                  <dd>阪大のログイン画面への入力と、6桁認証コードの生成にのみ使用します。</dd>
+                </div>
+                <div>
+                  <dt>利用する端末</dt>
+                  <dd>自分だけが管理する端末で利用し、共用端末では登録しないでください。</dd>
+                </div>
+              </dl>
+              <p className="credential-safety-note">
+                端末を譲渡・廃棄するときは、先に登録情報を削除してください。
+              </p>
             </div>
           </section>
         </div>
@@ -1078,8 +1115,10 @@ function Settings() {
             <ul className="modal-delete-list">
               <li>大阪大学個人ID</li>
               <li>パスワード</li>
-              <li>二段階認証情報</li>
             </ul>
+            <p className="modal-text" style={{ fontSize: "0.85em", color: "var(--text-muted, #6c757d)", marginTop: "8px" }}>
+              ※登録済みの二段階認証情報は維持されます。
+            </p>
             <div className="modal-actions">
               <button className="modal-btn cancel" onClick={() => setShowDeleteModal(false)} type="button">
                 キャンセル
@@ -1092,66 +1131,78 @@ function Settings() {
         </div>
       )}
 
+      {/* MFA Delete Confirmation Modal */}
+      {showMfaDeleteModal && (
+        <div className="settings-modal-overlay">
+          <div className="settings-modal" role="dialog" aria-modal="true">
+            <h3 className="modal-title">二段階認証情報を削除しますか</h3>
+            <p className="modal-text">登録されている二段階認証情報（手動入力キー、一時解除コード）をこの端末から削除します。この操作は取り消せません。</p>
+            <div className="modal-actions">
+              <button className="modal-btn cancel" onClick={() => setShowMfaDeleteModal(false)} type="button">
+                キャンセル
+              </button>
+              <button className="modal-btn confirm" onClick={removeSavedMfa} type="button">
+                削除する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MFA Wizard Modal */}
       {showMfaWizardModal && (
-        <div className="settings-modal-overlay">
+        <div className="settings-modal-overlay mfa-wizard-overlay">
           <div className="settings-modal mfa-wizard-modal" role="dialog" aria-modal="true">
             <div className="mfa-wizard-viewport">
               <div className={`mfa-wizard-track step-${mfaWizardStep}`}>
                 
                 {/* Step 1: Consent */}
-                <div className="mfa-wizard-slide">
-                  <h3 className="modal-title">二段階認証を自動登録します</h3>
-                  <div className="modal-text consent-content">
-                    <p>自動ログインで6桁コードを入力するため、この端末に二段階認証情報を保存します。</p>
-                    
-                    <div className="consent-alert-box">
-                      <h4>1. 認証アプリの再登録が必要です</h4>
-                      <p>現在スマホ等で使っている認証コードは使えなくなります。</p>
-                      <p>登録後に再登録用QRコードが表示されるので、スマホ等の認証アプリで読み込んでください。</p>
-                      <details className="modal-details-accordion">
-                        <summary>詳しく見る</summary>
-                        <ul>
-                          <li>既存の認証アプリ情報は上書きされます。</li>
-                          <li>登録後に再登録用QRコードが表示されます。</li>
-                          <li>そのQRコードをスマホ等の認証アプリで読み込めば、スマホ側でも再び6桁コードを生成できます。</li>
-                        </ul>
-                      </details>
+                <div className="mfa-wizard-slide mfa-consent-slide">
+                  <header className="mfa-consent-header">
+                    <h3 className="modal-title">二段階認証を自動登録します</h3>
+                    <p>始める前に、認証アプリの再設定と端末内保存について確認してください。</p>
+                  </header>
+
+                  <div className="mfa-consent-body">
+                    <div className="consent-notice">
+                      <span className="consent-notice-number">1</span>
+                      <div>
+                        <h4>現在の認証コードは使えなくなります</h4>
+                        <p>登録すると、現在スマホ等で使っている認証アプリの設定が更新されます。</p>
+                        <p>登録完了後に表示されるQRコードを、認証アプリでもう一度読み込んでください。</p>
+                      </div>
                     </div>
 
-                    <div className="consent-alert-box">
-                      <h4>2. 端末内保存のリスクがあります</h4>
-                      <p>この端末を失うと、不正利用のリスクがあります。</p>
-                      <details className="modal-details-accordion">
-                        <summary>詳しく見る</summary>
-                        <ul>
-                          <li>認証情報は外部サーバーに送信されず、この端末内に保存されます。</li>
-                          <li>共用端末や他人が使う端末では利用しないでください。</li>
-                        </ul>
-                      </details>
+                    <div className="consent-notice">
+                      <span className="consent-notice-number">2</span>
+                      <div>
+                        <h4>認証情報をこの端末に保存します</h4>
+                        <p>認証情報は外部サーバーへ送信せず、この端末内だけに保存します。</p>
+                        <p>紛失時の不正利用を防ぐため、共用端末や他人が使う端末では登録しないでください。</p>
+                      </div>
+                    </div>
+
+                    <div className="consent-checkboxes">
+                      <label className="consent-checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={mfaConsentChecked1}
+                          onChange={(e) => setMfaConsentChecked1(e.target.checked)}
+                        />
+                        <span>認証アプリの再登録が必要であることを理解しました</span>
+                      </label>
+                      <label className="consent-checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={mfaConsentChecked2}
+                          onChange={(e) => setMfaConsentChecked2(e.target.checked)}
+                        />
+                        <span>端末内保存のリスクを理解しました</span>
+                      </label>
                     </div>
                   </div>
 
-                  <div className="consent-checkboxes">
-                    <label className="consent-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={mfaConsentChecked1}
-                        onChange={(e) => setMfaConsentChecked1(e.target.checked)}
-                      />
-                      <span>認証アプリの再登録が必要になり、登録後に表示されるQRコードを読み込む必要があることを理解しました</span>
-                    </label>
-                    <label className="consent-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={mfaConsentChecked2}
-                        onChange={(e) => setMfaConsentChecked2(e.target.checked)}
-                      />
-                      <span>端末内保存のリスクを理解しました</span>
-                    </label>
-                  </div>
-
-                  <div className="modal-actions">
+                  <footer className="modal-actions mfa-consent-footer">
                     <button className="modal-btn cancel" onClick={() => setShowMfaWizardModal(false)} type="button">
                       キャンセル
                     </button>
@@ -1163,7 +1214,7 @@ function Settings() {
                     >
                       登録を開始
                     </button>
-                  </div>
+                  </footer>
                 </div>
 
                 {/* Step 2: Registering (Loading) */}
@@ -1184,7 +1235,10 @@ function Settings() {
 
                 {/* Step 3: QR Code & Secrets */}
                 <div className="mfa-wizard-slide step-qr-slide">
-                  <h3 className="modal-title">認証アプリ登録用QRコード</h3>
+                  <h3 className="modal-title">登録情報・QRコード</h3>
+                  <p className="modal-text qr-instruction-text">
+                    Google Authenticator等の認証アプリでQRコードを読み込んでください。
+                  </p>
                   <div className="mfa-qr-layout-container">
                     <div className="mfa-qr-left-col">
                       <div className="qr-box">
@@ -1192,10 +1246,6 @@ function Settings() {
                       </div>
                     </div>
                     <div className="mfa-qr-right-col">
-                      <p className="modal-text qr-instruction-text">
-                        Google Authenticator等の認証アプリでQRコードを読み込んでください。
-                      </p>
-                      
                       <div className="mfa-secret-panel modal-secret-panel">
                         <div className="secret-row">
                           <span className="secret-label">手動入力用キー</span>
@@ -1228,6 +1278,40 @@ function Settings() {
                             </button>
                           </div>
                         </div>
+
+                        {savedSecrets?.temporaryCancelCode && (
+                          <div className="secret-row">
+                            <span className="secret-label">一時解除コード</span>
+                            <code className="secret-code">{showCancelCode ? savedSecrets.temporaryCancelCode : maskedCancelCode}</code>
+                            <div className="secret-actions">
+                              <button
+                                aria-label={showCancelCode ? "一時解除コードを隠す" : "一時解除コードを表示"}
+                                className="icon-action"
+                                onClick={() => setShowCancelCode(!showCancelCode)}
+                                title={showCancelCode ? "隠す" : "表示"}
+                                type="button"
+                              >
+                                {showCancelCode ? (
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon">
+                                    <path d="m15 18-.722-3.25"/>
+                                    <path d="M2 8a10.645 10.645 0 0 0 20 0"/>
+                                    <path d="m20 15-1.726-2.05"/>
+                                    <path d="m4 15 1.726-2.05"/>
+                                    <path d="m9 18 .722-3.25"/>
+                                  </svg>
+                                ) : (
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon">
+                                    <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                  </svg>
+                                )}
+                              </button>
+                              <button className="subtle-action" onClick={() => copyValue(savedSecrets.temporaryCancelCode, "一時解除コードをコピーしました。")} type="button">
+                                コピー
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

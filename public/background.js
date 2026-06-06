@@ -18,7 +18,11 @@ let cleLoginTask;
 const manualFlows = new Map();
 let pendingMfa = null;
 const AUTO_COLLECT_TAB_IDS_KEY = "authAutoCollectTabIds";
+const STARTUP_REFRESH_CLAIMED_KEY = "startupRefreshClaimed";
+const DASHBOARD_REFRESH_ATTEMPT_KEY = "dashboardRefreshAttempt";
 const autoCollectTabIds = new Set();
+let startupRefreshClaimTask = Promise.resolve();
+let dashboardRefreshClaimTask = Promise.resolve();
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   autoCollectTabIds.delete(tabId);
@@ -149,18 +153,23 @@ async function generateTotp(secret, now = Date.now()) {
 async function readAuthSettings(record) {
   const current = record || await readAuthRecord();
   let idHint = "";
+  let isConfigured = false;
   if (current?.payload) {
     try {
       const credentials = await decryptCredentials(current);
-      idHint = credentials.id.length <= 4
-        ? "*".repeat(credentials.id.length)
-        : `${credentials.id.slice(0, 2)}${"*".repeat(credentials.id.length - 4)}${credentials.id.slice(-2)}`;
+      if (credentials.id && credentials.password) {
+        isConfigured = true;
+        idHint = credentials.id.length <= 4
+          ? "*".repeat(credentials.id.length)
+          : `${credentials.id.slice(0, 2)}${"*".repeat(credentials.id.length - 4)}${credentials.id.slice(-2)}`;
+      }
     } catch {
       idHint = "保存済み";
+      isConfigured = true;
     }
   }
   return {
-    configured: Boolean(current?.payload),
+    configured: isConfigured,
     enabled: Boolean(current?.enabled),
     autoSubmit: current?.autoSubmit !== false,
     mfaEnabled: Boolean(current?.mfaEnabled),
@@ -174,11 +183,13 @@ async function probeKoanLogin() {
       credentials: "include",
       redirect: "follow",
     });
-    return response.ok &&
+    const text = await response.text();
+    const ok = response.ok &&
       new URL(response.url).origin === "https://koan.osaka-u.ac.jp" &&
-      /id=["']portal-body["']/.test(await response.text());
+      /id=["']portal-body["']/.test(text);
+    return { ok, text: ok ? text : "", url: response.url };
   } catch {
-    return false;
+    return { ok: false, text: "", url: KOAN_PORTAL_URL };
   }
 }
 
@@ -259,7 +270,15 @@ async function openLoginTab(url, record, sender, activeWhenManual = true) {
 }
 
 async function ensureKoanLogin(record, sender) {
-  if (await probeKoanLogin()) return { ok: true, loginStarted: false };
+  const initialProbe = await probeKoanLogin();
+  if (initialProbe.ok) {
+    return {
+      ok: true,
+      loginStarted: false,
+      portalHtml: initialProbe.text,
+      portalUrl: initialProbe.url,
+    };
+  }
   if (koanLoginTask) return koanLoginTask;
 
   koanLoginTask = (async () => {
@@ -268,12 +287,18 @@ async function ensureKoanLogin(record, sender) {
       const deadline = Date.now() + 90 * 1000;
       while (Date.now() < deadline) {
         await wait(1000);
-        if (await probeKoanLogin()) {
+        const probe = await probeKoanLogin();
+        if (probe.ok) {
           if (tab.id) {
             if (manual) await returnToDashboard(tab.id);
             else await chrome.tabs.remove(tab.id);
           }
-          return { ok: true, loginStarted: true };
+          return {
+            ok: true,
+            loginStarted: true,
+            portalHtml: probe.text,
+            portalUrl: probe.url,
+          };
         }
       }
       throw new Error(manual
@@ -330,8 +355,7 @@ async function findCleTab() {
 async function ensureCleLogin(record, sender, force = false) {
   let tab = await findCleTab();
   if (!force && tab?.id && await cleApiReady(tab.id)) {
-    await wait(1000);
-    if (await cleApiReady(tab.id)) return { ok: true, loginStarted: false, tabId: tab.id };
+    return { ok: true, loginStarted: false, tabId: tab.id };
   }
   if (cleLoginTask) return cleLoginTask;
 
@@ -348,8 +372,6 @@ async function ensureCleLogin(record, sender, force = false) {
       while (Date.now() < deadline) {
         await wait(1000);
         if (tab.id && await cleApiReady(tab.id)) {
-          await wait(1000);
-          if (!await cleApiReady(tab.id)) continue;
           if (manual) {
             const flow = manualFlows.get(tab.id);
             manualFlows.delete(tab.id);
@@ -372,6 +394,31 @@ async function ensureCleLogin(record, sender, force = false) {
 }
 
 async function authResponse(message, sender) {
+  if (message.type === "auth-claim-startup-refresh") {
+    const claim = startupRefreshClaimTask.then(async () => {
+      if (!chrome.storage?.session) return true;
+      const stored = await chrome.storage.session.get(STARTUP_REFRESH_CLAIMED_KEY);
+      if (stored[STARTUP_REFRESH_CLAIMED_KEY]) return false;
+      await chrome.storage.session.set({ [STARTUP_REFRESH_CLAIMED_KEY]: true });
+      return true;
+    });
+    startupRefreshClaimTask = claim.then(() => undefined, () => undefined);
+    return { ok: true, shouldRefresh: await claim };
+  }
+
+  if (message.type === "auth-claim-dashboard-refresh") {
+    const claim = dashboardRefreshClaimTask.then(async () => {
+      if (!chrome.storage?.session) return true;
+      const stored = await chrome.storage.session.get(DASHBOARD_REFRESH_ATTEMPT_KEY);
+      const previous = Number(stored[DASHBOARD_REFRESH_ATTEMPT_KEY]) || 0;
+      if (Date.now() - previous < 60 * 1000) return false;
+      await chrome.storage.session.set({ [DASHBOARD_REFRESH_ATTEMPT_KEY]: Date.now() });
+      return true;
+    });
+    dashboardRefreshClaimTask = claim.then(() => undefined, () => undefined);
+    return { ok: true, allowed: await claim };
+  }
+
   const record = await readAuthRecord();
   if (message.type === "auth-settings") return { ok: true, ...await readAuthSettings(record) };
 
@@ -501,8 +548,77 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-delete") {
-    await clearAuthRecord();
-    return { ok: true, configured: false, enabled: false, autoSubmit: true, mfaEnabled: false, idHint: "" };
+    const record = await readAuthRecord();
+    if (record?.payload) {
+      try {
+        const credentials = await decryptCredentials(record);
+        if (credentials.totpSecret) {
+          const key = await crypto.subtle.generateKey(
+            { name: "AES-GCM", length: 256 },
+            false,
+            ["encrypt", "decrypt"],
+          );
+          const payload = await encryptCredentials({
+            id: "",
+            password: "",
+            totpSecret: credentials.totpSecret,
+            temporaryCancelCode: credentials.temporaryCancelCode || "",
+            mfaConsent: credentials.mfaConsent,
+          }, key);
+          await writeAuthRecord({
+            enabled: false,
+            autoSubmit: true,
+            mfaEnabled: false,
+            key,
+            payload,
+          });
+        } else {
+          await clearAuthRecord();
+        }
+      } catch {
+        await clearAuthRecord();
+      }
+    } else {
+      await clearAuthRecord();
+    }
+    return { ok: true, ...await readAuthSettings(await readAuthRecord()) };
+  }
+
+  if (message.type === "auth-delete-mfa") {
+    const record = await readAuthRecord();
+    if (record?.payload) {
+      try {
+        const credentials = await decryptCredentials(record);
+        if (credentials.id && credentials.password) {
+          const key = await crypto.subtle.generateKey(
+            { name: "AES-GCM", length: 256 },
+            false,
+            ["encrypt", "decrypt"],
+          );
+          const payload = await encryptCredentials({
+            id: credentials.id,
+            password: credentials.password,
+            totpSecret: "",
+            temporaryCancelCode: "",
+            mfaConsent: false,
+          }, key);
+          await writeAuthRecord({
+            enabled: record.enabled,
+            autoSubmit: record.autoSubmit,
+            mfaEnabled: false,
+            key,
+            payload,
+          });
+        } else {
+          await clearAuthRecord();
+        }
+      } catch {
+        await clearAuthRecord();
+      }
+    } else {
+      await clearAuthRecord();
+    }
+    return { ok: true, ...await readAuthSettings(await readAuthRecord()) };
   }
 
   if (message.type === "auth-save") {

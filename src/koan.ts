@@ -9,6 +9,9 @@ export const CREDIT_STATUS_URL = `${BASE_URL}campussquare.do?_flowId=SIW0001300-
 
 export const SNAPSHOT_TTL_MS = 6 * 60 * 60 * 1000;
 export const LIGHT_REFRESH_TTL_MS = 10 * 60 * 1000;
+export const SCHEDULE_REFRESH_TTL_MS = 30 * 60 * 1000;
+export const FUTURE_SCHEDULE_REFRESH_TTL_MS = 6 * 60 * 60 * 1000;
+export const COURSES_REFRESH_TTL_MS = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 15 * 1000;
 const BOARD_REQUEST_GAP_MS = 750;
 const MAX_BOARD_PAGES_PER_GENRE = 12;
@@ -18,7 +21,6 @@ const SNAPSHOT_MAX_DURATION_MS = 3 * 60 * 1000;
 const NOTICE_RESOLVE_MAX_DURATION_MS = 60 * 1000;
 const LIGHT_LEASE_KEY = "koan-plus-light-refresh-lease-v1";
 const LIGHT_ATTEMPT_KEY = "koan-plus-light-refresh-attempt-v1";
-const LIGHT_COMPLETED_KEY = "koan-plus-light-refresh-completed-v1";
 const SNAPSHOT_LEASE_KEY = "koan-plus-snapshot-lease-v1";
 const SNAPSHOT_ATTEMPT_KEY = "koan-plus-snapshot-attempt-v1";
 const SNAPSHOT_COMPLETED_KEY = "koan-plus-snapshot-completed-v1";
@@ -74,6 +76,11 @@ export type KoanData = {
   notices: Notice[];
   lightUpdatedAt: string | null;
   snapshotUpdatedAt: string | null;
+  scheduleUpdatedAt: string | null;
+  futureScheduleUpdatedAt: string | null;
+  coursesUpdatedAt: string | null;
+  changesUpdatedAt: string | null;
+  noticesUpdatedAt: string | null;
 };
 export type GradeHistoryItem = {
   code: string;
@@ -166,6 +173,45 @@ async function fetchHtml(url: string, options?: RequestInit) {
 function readTimestamp(key: string) {
   const value = Number.parseInt(localStorage.getItem(key) || "", 10);
   return Number.isFinite(value) ? value : 0;
+}
+
+function timestampValue(value: string | null | undefined) {
+  const timestamp = value ? new Date(value).getTime() : 0;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function isFresh(value: string | null | undefined, ttl: number) {
+  const timestamp = timestampValue(value);
+  return timestamp > 0 && Date.now() - timestamp < ttl;
+}
+
+function koanPartUpdatedAt(
+  data: KoanData | null | undefined,
+  key: keyof Pick<
+    KoanData,
+    | "scheduleUpdatedAt"
+    | "futureScheduleUpdatedAt"
+    | "coursesUpdatedAt"
+    | "changesUpdatedAt"
+    | "noticesUpdatedAt"
+  >,
+) {
+  return data?.[key] || data?.lightUpdatedAt || null;
+}
+
+function latestTimestamp(values: Array<string | null | undefined>) {
+  const latest = Math.max(0, ...values.map(timestampValue));
+  return latest ? new Date(latest).toISOString() : null;
+}
+
+export function isKoanCacheFresh(data: KoanData) {
+  return (
+    isFresh(koanPartUpdatedAt(data, "changesUpdatedAt"), LIGHT_REFRESH_TTL_MS) &&
+    isFresh(koanPartUpdatedAt(data, "noticesUpdatedAt"), LIGHT_REFRESH_TTL_MS) &&
+    isFresh(koanPartUpdatedAt(data, "scheduleUpdatedAt"), SCHEDULE_REFRESH_TTL_MS) &&
+    isFresh(koanPartUpdatedAt(data, "futureScheduleUpdatedAt"), FUTURE_SCHEDULE_REFRESH_TTL_MS) &&
+    isFresh(koanPartUpdatedAt(data, "coursesUpdatedAt"), COURSES_REFRESH_TTL_MS)
+  );
 }
 
 function acquireLease(key: string, milliseconds: number, message: string) {
@@ -350,16 +396,42 @@ async function submitScheduleEvent(doc: Document, eventId: string) {
   });
 }
 
-async function fetchScheduleRange() {
+async function fetchScheduleRange(includeFuture: boolean) {
   const pages: Document[] = [];
   let page = await fetchHtml(SCHEDULE_URL);
   const horizon = addDays(new Date(), SCHEDULE_RANGE_WEEKS * 7).getTime();
   for (let index = 0; index < MAX_SCHEDULE_MONTH_PAGES; index += 1) {
     pages.push(page.doc);
-    if (maxCalendarDate(page.doc) >= horizon) break;
+    if (!includeFuture || maxCalendarDate(page.doc) >= horizon) break;
     page = await submitScheduleEvent(page.doc, "setNextMonth");
   }
   return pages;
+}
+
+function calendarRange(doc: Document) {
+  const dates = [...doc.querySelectorAll("#schedule-calender > tbody > tr > td")]
+    .map(calendarDate)
+    .filter(Boolean)
+    .sort();
+  return dates.length ? { start: dates[0], end: dates[dates.length - 1] } : null;
+}
+
+function mergeCurrentSchedule(
+  currentPages: Document[],
+  previousSchedule: ScheduleItem[],
+  includeFuture: boolean,
+) {
+  const fetched = mergeSchedule(currentPages.flatMap(parseWeeklySchedule));
+  if (includeFuture || !currentPages.length) return fetched;
+  const range = calendarRange(currentPages[0]);
+  if (!range) return fetched.length ? fetched : previousSchedule;
+  return mergeSchedule([
+    ...fetched,
+    ...previousSchedule.filter((item) =>
+      !item.date || item.date < range.start || item.date > range.end),
+  ]).filter((item) =>
+    !item.date || new Date(item.date).getTime() <= addDays(new Date(), SCHEDULE_RANGE_WEEKS * 7).getTime(),
+  );
 }
 
 function mergeSchedule(items: ScheduleItem[]) {
@@ -573,72 +645,172 @@ export function attentionScore(notice: Notice) {
   );
 }
 
-export async function refreshLight(previousNotices: Notice[] = [], onProgress?: (value: string) => void) {
-  requireCooldown(LIGHT_COMPLETED_KEY, LIGHT_REFRESH_TTL_MS, "通常更新は10分に1回までです。");
-  requireCooldown(LIGHT_ATTEMPT_KEY, 60 * 1000, "通常更新の再試行は1分後にできます。");
-  const release = acquireLease(LIGHT_LEASE_KEY, REQUEST_TIMEOUT_MS + 5000, "別の画面で通常更新中です。");
+export async function refreshLight(
+  previous: KoanData,
+  options?: {
+    force?: boolean;
+    portalHtml?: string;
+    portalUrl?: string;
+    onProgress?: (value: string) => void;
+  },
+) {
+  const force = Boolean(options?.force);
+  if (!force) {
+    requireCooldown(LIGHT_ATTEMPT_KEY, 60 * 1000, "通常更新の再試行は1分後にできます。");
+  }
+  const release = acquireLease(LIGHT_LEASE_KEY, 90 * 1000, "別の画面で通常更新中です。");
   localStorage.setItem(LIGHT_ATTEMPT_KEY, String(Date.now()));
   try {
-    onProgress?.("ポータル・時間割・掲示を取得中");
+    const onProgress = options?.onProgress;
+    onProgress?.("KOANキャッシュを確認中");
     const completed = new Set<string>();
     const markDone = (label: string) => {
       completed.add(label);
       onProgress?.(`${[...completed].join(" / ")} 取得済み`);
     };
-    const [portal, schedulePages, courses, changes, board] = await Promise.all([
-      fetchHtml(PORTAL_URL).then((result) => {
-        markDone("ポータル");
-        return result;
-      }),
-      fetchScheduleRange().then((result) => {
-        markDone("時間割");
-        return result;
-      }).catch(() => {
-        markDone("時間割");
-        return [];
-      }),
-      fetchHtml(COURSE_REGISTRATION_URL).then((result) => {
-        markDone("履修授業");
-        return parseCourseRegistrations(result.doc);
-      }).catch(() => {
-        markDone("履修授業");
-        return [];
-      }),
-      fetchHtml(CHANGES_URL).then((result) => {
-        markDone("休講補講");
-        return result;
-      }),
-      fetchHtml(BOARD_URL).then((result) => {
-        markDone("新着掲示");
-        return result;
-      }),
+    const now = new Date().toISOString();
+    const changesFresh = !force &&
+      isFresh(koanPartUpdatedAt(previous, "changesUpdatedAt"), LIGHT_REFRESH_TTL_MS);
+    const noticesFresh = !force &&
+      isFresh(koanPartUpdatedAt(previous, "noticesUpdatedAt"), LIGHT_REFRESH_TTL_MS);
+    const scheduleFresh = !force &&
+      isFresh(koanPartUpdatedAt(previous, "scheduleUpdatedAt"), SCHEDULE_REFRESH_TTL_MS);
+    const futureScheduleFresh = !force &&
+      isFresh(
+        koanPartUpdatedAt(previous, "futureScheduleUpdatedAt"),
+        FUTURE_SCHEDULE_REFRESH_TTL_MS,
+      );
+    const coursesFresh = !force &&
+      isFresh(koanPartUpdatedAt(previous, "coursesUpdatedAt"), COURSES_REFRESH_TTL_MS);
+    const portal = options?.portalHtml
+      ? {
+        doc: new DOMParser().parseFromString(options.portalHtml, "text/html"),
+        url: options.portalUrl || PORTAL_URL,
+      }
+      : await fetchHtml(PORTAL_URL);
+    requireLogin(portal.doc);
+    markDone("ポータル");
+    const [scheduleResult, coursesResult, changesResult, boardResult] = await Promise.all([
+      scheduleFresh && futureScheduleFresh
+        ? Promise.resolve({
+          pages: [] as Document[],
+          updatedAt: koanPartUpdatedAt(previous, "scheduleUpdatedAt"),
+          futureUpdatedAt: koanPartUpdatedAt(previous, "futureScheduleUpdatedAt"),
+        }).then((result) => {
+          markDone("時間割キャッシュ");
+          return result;
+        })
+        : fetchScheduleRange(!futureScheduleFresh)
+          .then((pages) => {
+            markDone(!futureScheduleFresh ? "8週間時間割" : "当月時間割");
+            return {
+              pages,
+              updatedAt: now,
+              futureUpdatedAt: !futureScheduleFresh
+                ? now
+                : koanPartUpdatedAt(previous, "futureScheduleUpdatedAt"),
+            };
+          })
+          .catch(() => {
+            markDone("時間割キャッシュ");
+            return {
+              pages: [] as Document[],
+              updatedAt: koanPartUpdatedAt(previous, "scheduleUpdatedAt"),
+              futureUpdatedAt: koanPartUpdatedAt(previous, "futureScheduleUpdatedAt"),
+            };
+          }),
+      coursesFresh
+        ? Promise.resolve({
+          courses: previous.courses,
+          updatedAt: koanPartUpdatedAt(previous, "coursesUpdatedAt"),
+        }).then((result) => {
+          markDone("履修授業キャッシュ");
+          return result;
+        })
+        : fetchHtml(COURSE_REGISTRATION_URL)
+          .then((result) => {
+            markDone("履修授業");
+            return { courses: mergeCourses(parseCourseRegistrations(result.doc)), updatedAt: now };
+          })
+          .catch(() => {
+            markDone("履修授業キャッシュ");
+            return {
+              courses: previous.courses,
+              updatedAt: koanPartUpdatedAt(previous, "coursesUpdatedAt"),
+            };
+          }),
+      changesFresh
+        ? Promise.resolve({
+          changes: previous.changes,
+          updatedAt: koanPartUpdatedAt(previous, "changesUpdatedAt"),
+        }).then((result) => {
+          markDone("休講補講キャッシュ");
+          return result;
+        })
+        : fetchHtml(CHANGES_URL).then((result) => {
+          markDone("休講補講");
+          return { changes: parseChanges(result.doc), updatedAt: now };
+        }),
+      noticesFresh
+        ? Promise.resolve({
+          board: null,
+          updatedAt: koanPartUpdatedAt(previous, "noticesUpdatedAt"),
+        }).then((result) => {
+          markDone("新着掲示キャッシュ");
+          return result;
+        })
+        : fetchHtml(BOARD_URL).then((board) => {
+          markDone("新着掲示");
+          return { board, updatedAt: now };
+        }),
     ]);
     onProgress?.("取得結果を整理中");
-    requireLogin(portal.doc);
-    const oldKeys = new Set(previousNotices.map(noticeKey));
-    const unread = parseNotices(board.doc, board.url, true).map((notice) => ({
-      ...notice,
-      isNew: !oldKeys.has(noticeKey(notice)),
-    }));
-    localStorage.setItem(LIGHT_COMPLETED_KEY, String(Date.now()));
-    const weeklySchedule = mergeSchedule(schedulePages.flatMap(parseWeeklySchedule));
-    return {
-      schedule: weeklySchedule.length ? weeklySchedule : parseSchedule(portal.doc),
-      courses: mergeCourses(courses),
-      changes: parseChanges(changes.doc),
-      notices: mergeNotices([
-        ...previousNotices.map((notice) => ({
+    const oldKeys = new Set(previous.notices.map(noticeKey));
+    const unread = boardResult.board
+      ? parseNotices(boardResult.board.doc, boardResult.board.url, true).map((notice) => ({
+        ...notice,
+        isNew: !oldKeys.has(noticeKey(notice)),
+      }))
+      : [];
+    const schedule = scheduleResult.pages.length
+      ? mergeCurrentSchedule(
+        scheduleResult.pages,
+        previous.schedule,
+        !futureScheduleFresh,
+      )
+      : previous.schedule;
+    const notices = boardResult.board
+      ? mergeNotices([
+        ...previous.notices.map((notice) => ({
           ...notice,
           isNew: false,
           live: false,
           unread: false,
         })),
         ...unread,
-      ]),
-      lightUpdatedAt: new Date().toISOString(),
+      ])
+      : previous.notices;
+    const lightUpdatedAt = latestTimestamp([
+      scheduleResult.updatedAt,
+      scheduleResult.futureUpdatedAt,
+      coursesResult.updatedAt,
+      changesResult.updatedAt,
+      boardResult.updatedAt,
+    ]);
+    return {
+      schedule: schedule.length ? schedule : parseSchedule(portal.doc),
+      courses: coursesResult.courses,
+      changes: changesResult.changes,
+      notices,
+      lightUpdatedAt,
+      scheduleUpdatedAt: scheduleResult.updatedAt,
+      futureScheduleUpdatedAt: scheduleResult.futureUpdatedAt,
+      coursesUpdatedAt: coursesResult.updatedAt,
+      changesUpdatedAt: changesResult.updatedAt,
+      noticesUpdatedAt: boardResult.updatedAt,
     };
   } finally {
-    onProgress?.("");
+    options?.onProgress?.("");
     release();
   }
 }
