@@ -416,6 +416,21 @@ function App() {
   );
 }
 
+function getContactUrl() {
+  const baseUrl = "https://docs.google.com/forms/d/e/1FAIpQLSdo3KmL2KnbDLtqgQfjtqO2NG7W6M0rTVeEJ4I5aPyJ2HsQyA/viewform";
+  const chromeObj = typeof window !== "undefined" ? (window as any).chrome : undefined;
+  const version = chromeObj && chromeObj.runtime?.getManifest
+    ? chromeObj.runtime.getManifest().version
+    : "0.2.0";
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "unknown";
+
+  const params = new URLSearchParams();
+  params.append("entry.206461699", version);
+  params.append("entry.673140482", ua);
+
+  return `${baseUrl}?${params.toString()}`;
+}
+
 function Sidebar({
   onViewChange,
   view,
@@ -430,6 +445,9 @@ function Sidebar({
     ["grades", "成績"],
     ["settings", "設定"],
   ] as const;
+
+  const contactUrl = getContactUrl();
+
   return (
     <aside className="app-sidebar">
       <div className="sidebar-brand">
@@ -445,8 +463,9 @@ function Sidebar({
       </nav>
       <div className="sidebar-footer">
         <small>外部リンク</small>
-        <a href={PORTAL_URL} target="_blank">KOAN</a>
-        <a href={CLE_MESSAGES_URL} target="_blank">CLE</a>
+        <a href={PORTAL_URL} target="_blank" rel="noopener noreferrer">KOAN</a>
+        <a href={CLE_MESSAGES_URL} target="_blank" rel="noopener noreferrer">CLE</a>
+        <a href={contactUrl} target="_blank" rel="noopener noreferrer">お問い合わせ</a>
       </div>
     </aside>
   );
