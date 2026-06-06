@@ -1,0 +1,155 @@
+# Privacy Policy / プライバシーポリシー
+
+Last updated / 最終更新日: 2026-06-06
+
+## English
+
+### Overview
+
+KOAN Plus is a locally installed Chrome extension. It has no
+developer-operated backend, analytics, advertising, or automatic crash
+reporting. Academic and authentication data is processed on the user's device
+and sent only to the Osaka University services needed for the requested
+operation, except for the optional Google Forms contact flow described below.
+
+### Data Processed And Stored Locally
+
+KOAN Plus may process and store:
+
+- KOAN schedules, course registrations, class changes, bulletin metadata,
+  grades, credits, GPA data, and update timestamps;
+- CLE course mappings, assignment titles, due dates, submission or grading
+  status, unread message counts, and update timestamps;
+- display preferences and refresh coordination timestamps;
+- when auto-login is enabled, the university ID, password, TOTP secret,
+  temporary cancellation code, and MFA consent state.
+
+Dashboard data and preferences are stored in the extension origin's
+`localStorage`. Credentials and MFA data are encrypted with AES-GCM-256 and
+stored in IndexedDB together with a non-extractable encryption key.
+Short-lived tab and refresh coordination state is stored in
+`chrome.storage.session`.
+
+The local encryption prevents casual plaintext inspection. Because the key and
+ciphertext are available to the same extension runtime, it does not protect
+against compromise of the device, Chrome profile, or extension runtime.
+
+### Network Communications
+
+The extension has host access to and communicates with these Osaka University
+domains:
+
+- `https://koan.osaka-u.ac.jp` for KOAN data;
+- `https://www.cle.osaka-u.ac.jp` for CLE data and login;
+- `https://ou-idp.auth.osaka-u.ac.jp` for authentication;
+- `https://auth-mfa.auth.osaka-u.ac.jp` for MFA setup and authentication.
+
+Requests use the user's existing browser session. Chrome manages the session
+cookies; KOAN Plus does not request the cookies permission.
+
+The sidebar's **Contact** link opens a Google Form at `docs.google.com`.
+Opening the link sends the KOAN Plus version and browser User-Agent to Google
+as prefilled URL parameters. Any information the user enters and submits is
+processed by Google under Google's applicable terms and privacy policy. The
+form is optional and is never opened automatically.
+
+### Data Not Collected By The Maintainer
+
+KOAN Plus does not automatically send credentials, TOTP secrets, grades,
+schedules, bulletin data, CLE data, browsing history, analytics events, or
+crash reports to the maintainer. It does not prefetch bulletin bodies or CLE
+message bodies for local storage.
+
+### Retention And Deletion
+
+Local dashboard data remains in the extension's storage until it is replaced,
+cleared by the user or browser, or the extension is removed. Saved login and
+MFA data remains until the corresponding delete action is used, the extension
+storage is cleared, or the extension is removed.
+
+Users can delete login credentials and MFA data separately from the extension
+settings. Removing the extension or clearing its site data deletes its local
+storage. Data submitted to Google Forms is controlled by the form operator and
+Google and cannot be deleted through KOAN Plus.
+
+### Permissions
+
+KOAN Plus requests:
+
+- `scripting` to run restricted fetches and page actions in KOAN/CLE tabs;
+- `tabs` to find, open, update, and close authentication and CLE tabs;
+- `storage` for session-scoped refresh and tab coordination;
+- host permissions for the four Osaka University domains listed above.
+
+## 日本語
+
+### 概要
+
+KOAN Plus は、ユーザーがローカルにインストールする Chrome 拡張機能です。
+開発者が運営するバックエンド、アクセス解析、広告、自動クラッシュレポートは
+ありません。学務情報と認証情報はユーザーの端末上で処理され、要求された操作に
+必要な大阪大学のサービスにのみ送信されます。ただし、任意で利用する Google Forms
+のお問い合わせ機能は例外であり、後述します。
+
+### 端末上で処理・保存するデータ
+
+KOAN Plus は、次のデータを処理・保存する場合があります。
+
+- KOANの時間割、履修科目、休講・教室変更、掲示メタデータ、成績、単位、GPA、
+  更新日時
+- CLEの科目対応、課題名、期限、提出・採点状態、未読メッセージ数、更新日時
+- 表示設定、更新制御用のタイムスタンプ
+- 自動ログインを有効にした場合の学内個人ID、パスワード、TOTPシークレット、
+  一時解除コード、MFA同意状態
+
+ダッシュボードデータと表示設定は、拡張機能オリジンの `localStorage` に保存されます。
+認証情報とMFA情報は AES-GCM（256-bit）で暗号化され、非エクスポート鍵とともに
+IndexedDB に保存されます。タブと更新の制御に使う一時情報は
+`chrome.storage.session` に保存されます。
+
+この暗号化は、平文を偶発的に閲覧されることを防ぐためのものです。暗号鍵と暗号文は
+同じ拡張機能実行環境から利用できるため、端末、Chromeプロファイル、拡張機能実行環境
+が侵害された場合の保護にはなりません。
+
+### ネットワーク通信
+
+本拡張機能は、次の大阪大学ドメインへのホスト権限を持ち、通信します。
+
+- `https://koan.osaka-u.ac.jp`: KOANデータ
+- `https://www.cle.osaka-u.ac.jp`: CLEデータとログイン
+- `https://ou-idp.auth.osaka-u.ac.jp`: 認証
+- `https://auth-mfa.auth.osaka-u.ac.jp`: MFA登録と認証
+
+通信にはブラウザの既存セッションを利用します。セッションクッキーは Chrome が管理し、
+KOAN Plus は Cookie API の権限を要求しません。
+
+サイドバーの「お問い合わせ」は `docs.google.com` の Google Forms を開きます。
+リンクを開くと、KOAN Plus のバージョンとブラウザの User-Agent がフォームの
+事前入力用URLパラメータとして Google に送信されます。ユーザーがフォームに入力して
+送信した情報も、Google の適用される規約とプライバシーポリシーに基づいて処理されます。
+フォームは任意であり、自動的に開かれることはありません。
+
+### メンテナーが自動収集しないデータ
+
+KOAN Plus は、認証情報、TOTPシークレット、成績、時間割、掲示データ、CLEデータ、
+閲覧履歴、アクセス解析イベント、クラッシュレポートをメンテナーへ自動送信しません。
+また、掲示本文やCLEメッセージ本文をローカル保存するための事前取得は行いません。
+
+### 保存期間と削除
+
+ローカルのダッシュボードデータは、新しいデータで置き換えられるか、ユーザーまたは
+ブラウザによって消去されるか、拡張機能が削除されるまで保存されます。ログイン情報と
+MFA情報は、対応する削除操作、拡張機能データの消去、または拡張機能の削除まで保存されます。
+
+ログイン情報とMFA情報は、拡張機能の設定から個別に削除できます。拡張機能の削除または
+サイトデータの消去によって、ローカル保存データを削除できます。Google Forms に送信した
+データはフォーム運営者と Google が管理し、KOAN Plus からは削除できません。
+
+### 権限
+
+KOAN Plus は次の権限を要求します。
+
+- `scripting`: KOAN/CLEタブ内で、制限された取得処理とページ操作を行うため
+- `tabs`: 認証タブやCLEタブを検索、作成、更新、終了するため
+- `storage`: セッション単位の更新・タブ制御を保存するため
+- 上記4つの大阪大学ドメインに対するホスト権限

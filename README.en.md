@@ -1,8 +1,6 @@
 # KOAN Plus
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./README.md)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D%2020.19.0-green.svg)](https://nodejs.org/)
 
 [Japanese Version Available Here (日本語版はこちら)](./README.md)
 
@@ -14,9 +12,7 @@ fetches data only when the dashboard is opened, when the user refreshes it, or
 when the user explicitly starts a heavier operation such as bulletin sync or
 grade retrieval.
 
----
-
-## ⚠️ Security & Policy Risks (Important)
+## Security & Policy Risks
 
 > [!WARNING]
 > **Use at Your Own Risk**
@@ -39,23 +35,33 @@ grade retrieval.
 - Optional local auto-login support for Osaka University authentication.
 - Optional MFA/TOTP automation after explicit risk consent.
 
-## Privacy And Data Handling
+## Data And Permissions
 
-KOAN Plus is built as a local browser extension. It does not run a backend
-service, and it does not upload QR images, credentials, bulletin bodies, CLE
-message bodies, or assignment bodies.
+KOAN Plus has no developer-operated backend, analytics, advertising, or crash
+reporting. To retrieve academic data and perform authentication, it communicates
+with the Osaka University KOAN, CLE, identity provider, and MFA domains declared
+in the extension manifest.
 
-Authentication cookies remain managed by Chrome. KOAN Plus does not read or
-store those cookies. Cached dashboard data stays in the extension origin's
-`localStorage`.
+Dashboard caches, grades, CLE assignments, bulletin metadata, and preferences
+are stored in the extension origin's `localStorage`. Credentials are stored in
+IndexedDB, and short-lived refresh coordination state is stored in
+`chrome.storage.session`. Authentication cookies remain managed by Chrome; the
+extension does not request the cookies permission.
 
 If optional auto-login is enabled, the university ID, password, and optional
-totp secret are encrypted locally with AES-GCM using a non-extractable Web
-Crypto key stored with the ciphertext in the extension's IndexedDB. This
-protects against casual plaintext inspection, but it does not protect secrets
-from a compromised browser profile, device, or extension runtime. Keeping a
-password and TOTP secret on the same device also weakens the separation between
-authentication factors. Use this feature only if you accept those tradeoffs.
+TOTP secret and temporary cancellation code are encrypted locally with
+AES-GCM-256. The non-extractable key is stored in the same extension IndexedDB
+as the ciphertext. This protects against casual plaintext inspection, but not
+against compromise of the device, Chrome profile, or extension runtime.
+
+The **Contact** link opens Google Forms. Opening it sends the extension version
+and browser User-Agent to Google as prefilled query parameters. Information
+entered and submitted through the form is also processed by Google.
+
+The extension requests the `scripting`, `storage`, and `tabs` permissions plus
+host access to the four Osaka University domains listed in the manifest. See
+[PRIVACY.md](./PRIVACY.md) for data categories, retention, and deletion, and
+[SECURITY.md](./SECURITY.md) for vulnerability reporting.
 
 ## Request Strategy
 
@@ -151,7 +157,9 @@ users should review the code and build locally before use.
 
 ## Contributing
 
-Contributions of any kind are welcome! You can report bugs, suggest features, or improve documentation by opening an Issue. Pull Requests are also highly appreciated.
+Contributions are welcome. Use GitHub Issues for ordinary bugs and feature
+requests, and Pull Requests for code or documentation changes. Do not disclose
+security-sensitive details in a public issue; follow [SECURITY.md](./SECURITY.md).
 
 ## License
 
