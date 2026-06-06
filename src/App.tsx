@@ -1486,6 +1486,154 @@ function courseTermHeading(courses: CourseSummary[]) {
   return `${year}年 ${term}`;
 }
 
+type EmptyStateIconName =
+  | "calendar"
+  | "book-open"
+  | "check-circle"
+  | "message-square"
+  | "info"
+  | "sparkles"
+  | "mail-open"
+  | "inbox"
+  | "calendar-check"
+  | "search"
+  | "graduation-cap"
+  | "spinner";
+
+function EmptyStateIcon({ name }: { name: EmptyStateIconName }) {
+  const attrs = {
+    xmlns: "http://www.w3.org/2000/svg",
+    width: "24",
+    height: "24",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    className: `lucide-icon ${name === "spinner" ? "spinner" : ""}`,
+  } as const;
+
+  switch (name) {
+    case "calendar":
+      return (
+        <svg {...attrs}>
+          <path d="M8 2v4" />
+          <path d="M16 2v4" />
+          <rect width="18" height="18" x="3" y="4" rx="2" />
+          <path d="M3 10h18" />
+        </svg>
+      );
+    case "book-open":
+      return (
+        <svg {...attrs}>
+          <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+          <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+        </svg>
+      );
+    case "check-circle":
+      return (
+        <svg {...attrs}>
+          <circle cx="12" cy="12" r="10" />
+          <path d="m9 12 2 2 4-4" />
+        </svg>
+      );
+    case "message-square":
+      return (
+        <svg {...attrs}>
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      );
+    case "info":
+      return (
+        <svg {...attrs}>
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 16v-4" />
+          <path d="M12 8h.01" />
+        </svg>
+      );
+    case "sparkles":
+      return (
+        <svg {...attrs}>
+          <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275Z" />
+          <path d="m5 3 1 2.5L8.5 6 6 7 5 9.5 4 7 1.5 6 4 5Z" />
+          <path d="m19 17 1 2.5 2.5.5-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1Z" />
+        </svg>
+      );
+    case "mail-open":
+      return (
+        <svg {...attrs}>
+          <path d="M21.2 8.4c.5.38.8.97.8 1.6v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V10a2 2 0 0 1 .8-1.6l8-6a2 2 0 0 1 2.4 0l8 6Z" />
+          <path d="m22 10-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 10" />
+        </svg>
+      );
+    case "inbox":
+      return (
+        <svg {...attrs}>
+          <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+          <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+        </svg>
+      );
+    case "calendar-check":
+      return (
+        <svg {...attrs}>
+          <path d="M8 2v4" />
+          <path d="M16 2v4" />
+          <rect width="18" height="18" x="3" y="4" rx="2" />
+          <path d="M3 10h18" />
+          <path d="m9 16 2 2 4-4" />
+        </svg>
+      );
+    case "search":
+      return (
+        <svg {...attrs}>
+          <circle cx="11" cy="11" r="8" />
+          <path d="m21 21-4.3-4.3" />
+        </svg>
+      );
+    case "graduation-cap":
+      return (
+        <svg {...attrs}>
+          <path d="M21.42 10.922a1 1 0 0 0-.019-1.838L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.832l8.57 3.908a2 2 0 0 0 1.66 0z" />
+          <path d="M6 12v5c0 2 2 3 6 3s6-1 6-3v-5" />
+          <path d="M21.5 12v6" />
+        </svg>
+      );
+    case "spinner":
+      return (
+        <svg {...attrs}>
+          <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
+
+function EmptyState({
+  icon,
+  title,
+  description,
+  variant = "normal",
+  className = "",
+}: {
+  icon: EmptyStateIconName;
+  title: string;
+  description?: string;
+  variant?: "normal" | "subtle" | "rail" | "dashboard";
+  className?: string;
+}) {
+  return (
+    <div className={`empty-state ${variant} ${className}`}>
+      <div className="empty-state-icon" aria-hidden="true">
+        <EmptyStateIcon name={icon} />
+      </div>
+      <strong className="empty-state-title">{title}</strong>
+      {description && <p className="empty-state-desc">{description}</p>}
+    </div>
+  );
+}
+
 function CoursesPage({
   cleData,
   data,
@@ -1538,11 +1686,23 @@ function CoursesPage({
                   ))}
                 </div>
               ) : (
-                <p className="irregular-empty">該当する授業はありません。</p>
+                <EmptyState
+                  icon="book-open"
+                  title="該当する授業はありません"
+                  description="集中講義や曜日指定のない授業がある場合、ここに表示されます。"
+                  variant="subtle"
+                />
               )}
             </div>
           </>
-        ) : <p className="empty">授業情報はまだ取得されていません。右上の更新でKOANとCLEを読み込めます。</p>}
+        ) : (
+          <EmptyState
+            icon="calendar"
+            title="授業情報がありません"
+            description="右上の更新ボタンを押すと、KOANとCLEから時間割を読み込みます。"
+            variant="normal"
+          />
+        )}
       </div>
 
       <div className="course-detail-pane">
@@ -1610,13 +1770,12 @@ function CourseTimetable({
 function CourseDefaultDetail() {
   return (
     <div className="course-default-detail" aria-label="授業未選択">
-      <div className="course-empty-state">
-        <div className="course-empty-icon" aria-hidden="true">
-          <span />
-        </div>
-        <strong>授業を選択して詳細を表示</strong>
-        <p>時間割のコマを選ぶと、課題・連絡・変更情報をここに表示します。</p>
-      </div>
+      <EmptyState
+        icon="book-open"
+        title="授業を選択して詳細を表示"
+        description="時間割のコマを選ぶと、課題・連絡・変更情報をここに表示します。"
+        variant="normal"
+      />
     </div>
   );
 }
@@ -1651,7 +1810,13 @@ function CourseDetail({
                 <b className={`course-status-label ${taskTone(task)}`}>{taskLabel(task)}</b>
                 <span>{task.title}<small>{fmtDue(task.dueAt)}まで / {task.status}</small></span>
               </a>
-            )) : <p className="subtle-empty">表示する課題はありません。</p>}
+            )) : (
+              <EmptyState
+                icon="check-circle"
+                title="提出が必要な課題はありません"
+                variant="subtle"
+              />
+            )}
           </div>
         </section>
 
@@ -1663,7 +1828,13 @@ function CourseDetail({
                 <b>{message.unreadCount ? "未読" : "連絡"}</b>
                 <span>{message.courseName}<small>{message.unreadCount ? `${message.unreadCount}件の未読` : "既読"}</small></span>
               </a>
-            )) : <p className="subtle-empty">表示する連絡はありません。</p>}
+            )) : (
+              <EmptyState
+                icon="message-square"
+                title="連絡はありません"
+                variant="subtle"
+              />
+            )}
           </div>
         </section>
 
@@ -1687,7 +1858,13 @@ function CourseDetail({
                 <span>{notice.title}<small>{[notice.period, notice.genre].filter(Boolean).join(" / ") || notice.author}</small></span>
               </button>
             ))}
-            {!course.changes.length && !course.notices.length && <p className="subtle-empty">表示する変更・掲示はありません。</p>}
+            {!course.changes.length && !course.notices.length && (
+              <EmptyState
+                icon="info"
+                title="変更や掲示はありません"
+                variant="subtle"
+              />
+            )}
           </div>
         </section>
       </div>
@@ -1776,7 +1953,12 @@ function NextActions({
       </div>
       <div className="task-list">
         {upcomingTasks.length ? upcomingTasks.map((task) => <CleTaskRow task={task} key={task.id} />) : (
-          <p className="empty">{loading ? "取得中です。" : "期限の近い課題はありません。"}</p>
+          <EmptyState
+            icon={loading ? "spinner" : "sparkles"}
+            title={loading ? "取得中です" : "直近の課題はありません"}
+            description={loading ? "CLEから課題を取得しています..." : "期限の近い未完了の課題はありません。"}
+            variant="dashboard"
+          />
         )}
         {!!expiredTasks.length && (
           <details className="expired-tasks">
@@ -1821,9 +2003,13 @@ function Grades({ data }: { data: GradeData | null }) {
   return (
     <div className="grades-page">
       {!data ? (
-        <section className="section grades-empty">
-          <h2>成績データはまだ取得されていません</h2>
-          <p>右上の「成績を取得」から KOAN の履修成績を読み込めます。</p>
+        <section className="section">
+          <EmptyState
+            icon="graduation-cap"
+            title="成績データがありません"
+            description="右上の「成績を取得」ボタンからKOANの履修成績を読み込めます。"
+            variant="normal"
+          />
         </section>
       ) : (
         <>
@@ -2148,7 +2334,13 @@ function DashboardRightRail({
               ))}
               {selectedTasks.length > 2 && <p className="rail-more">他 {selectedTasks.length - 2} 件</p>}
             </>
-          ) : <p className="rail-empty">この日の締切課題はありません。</p>}
+          ) : (
+            <EmptyState
+              icon="calendar-check"
+              title="この日の締切はありません"
+              variant="subtle"
+            />
+          )}
         </div>
       </section>
     </aside>
@@ -2273,7 +2465,14 @@ function NewActivity({
               <span>{courseDisplayName(message.courseName)}</span>
               <b>未読 {message.unreadCount}</b>
             </a>
-          )) : <p className="empty">{loading ? "取得中です。" : "未読メッセージはありません。"}</p>}
+          )) : (
+            <EmptyState
+              icon={loading ? "spinner" : "mail-open"}
+              title={loading ? "取得中です" : "未読メッセージはありません"}
+              description={loading ? "CLEからメッセージを取得しています..." : "すべてのCLEメッセージを確認済みです。"}
+              variant="dashboard"
+            />
+          )}
         </div>
       </section>
 
@@ -2286,7 +2485,14 @@ function NewActivity({
         <div className="koan-notices-list">
           {latestNotices.length ? latestNotices.map((notice) => (
             <ActivityNotice notice={notice} onOpen={onOpen} key={noticeKey(notice)} />
-          )) : <p className="empty">要確認の掲示はありません。</p>}
+          )) : (
+            <EmptyState
+              icon="inbox"
+              title="要確認の掲示はありません"
+              description="新しいお知らせや確認が必要な掲示はありません。"
+              variant="dashboard"
+            />
+          )}
         </div>
       </section>
     </>
@@ -2441,7 +2647,16 @@ function NoticeList({
     }
   };
 
-  if (!notices.length) return <p className="empty notice-empty">条件に一致する掲示はありません。</p>;
+  if (!notices.length) {
+    return (
+      <EmptyState
+        icon="search"
+        title="一致する掲示はありません"
+        description="検索キーワードやカテゴリの条件に合う掲示が見つかりませんでした。"
+        variant="normal"
+      />
+    );
+  }
   const importantNotices = notices.filter(isImportantNotice);
   const otherNotices = notices.filter((notice) => !isImportantNotice(notice));
   const showGroups = Boolean(importantNotices.length && otherNotices.length);

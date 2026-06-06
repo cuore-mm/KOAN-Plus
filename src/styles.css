@@ -949,17 +949,6 @@ h2 {
   color: var(--color-danger);
 }
 
-.grades-empty {
-  padding: 22px;
-}
-
-.grades-empty p {
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.7;
-  margin-top: 6px;
-}
-
 .grade-metrics {
   background: var(--bg-card-green);
   border: 1px solid var(--border-section-green);
@@ -1913,67 +1902,136 @@ main.page-layout .section-heading strong {
   overflow: hidden;
 }
 
-.course-empty-state {
-  align-items: center;
-  color: var(--text-secondary);
+/* Empty State Common Styles */
+.empty-state {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  justify-content: center;
-  min-height: 420px;
-  padding: 24px;
-  text-align: center;
-}
-
-.course-empty-icon {
   align-items: center;
-  border: 1px solid var(--border-primary);
-  border-radius: 18px;
-  display: flex;
-  height: 58px;
   justify-content: center;
-  margin-bottom: 16px;
+  text-align: center;
+  color: var(--text-secondary);
+  box-sizing: border-box;
+}
+
+.empty-state-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-primary);
   opacity: 0.72;
-  position: relative;
-  width: 58px;
 }
 
-.course-empty-icon::before,
-.course-empty-icon::after,
-.course-empty-icon span {
-  background: var(--text-secondary);
-  border-radius: 999px;
-  content: "";
-  display: block;
-  height: 3px;
-  opacity: 0.28;
-  position: absolute;
-  width: 24px;
-}
-
-.course-empty-icon::before {
-  top: 19px;
-}
-
-.course-empty-icon span {
-  top: 28px;
-}
-
-.course-empty-icon::after {
-  top: 37px;
-}
-
-.course-empty-state strong {
+.empty-state-title {
   color: var(--text-title);
-  font-size: 15px;
   font-weight: 800;
 }
 
-.course-empty-state p {
-  font-size: 12px;
+.empty-state-desc {
+  color: var(--text-secondary);
+  margin-top: 6px;
   line-height: 1.6;
-  margin-top: 8px;
-  max-width: 280px;
+}
+
+/* Spinner animation */
+.lucide-icon.spinner {
+  animation: empty-state-spin 1s linear infinite;
+}
+
+@keyframes empty-state-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Variant: normal (Large screen center or full card empty) */
+.empty-state.normal {
+  padding: 32px 24px;
+  min-height: 340px;
+}
+
+.empty-state.normal .empty-state-icon {
+  width: 58px;
+  height: 58px;
+  border-radius: 18px;
+  margin-bottom: 16px;
+}
+
+.empty-state.normal .empty-state-icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.empty-state.normal .empty-state-title {
+  font-size: 15px;
+}
+
+.empty-state.normal .empty-state-desc {
+  font-size: 12px;
+  max-width: 320px;
+}
+
+/* Variant: subtle (Very small space like side detailed sections) */
+.empty-state.subtle {
+  padding: 14px 0;
+  flex-direction: row;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+.empty-state.subtle .empty-state-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: none;
+  opacity: 0.6;
+}
+
+.empty-state.subtle .empty-state-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.empty-state.subtle .empty-state-title {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 700;
+}
+
+.empty-state.subtle .empty-state-desc {
+  display: none; /* subtle has no description */
+}
+
+/* Variant: dashboard (Card middle empty, e.g. Next tasks, Messages, Notices) */
+.empty-state.dashboard {
+  padding: 28px 16px;
+  min-height: 160px;
+}
+
+.empty-state.dashboard .empty-state-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  margin-bottom: 10px;
+}
+
+.empty-state.dashboard .empty-state-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.empty-state.dashboard .empty-state-title {
+  font-size: 13px;
+}
+
+.empty-state.dashboard .empty-state-desc {
+  font-size: 11px;
+  max-width: 260px;
 }
 
 .course-detail-block {
@@ -2101,12 +2159,6 @@ button.course-line-row:hover span {
 .course-link-actions .disabled {
   color: var(--text-secondary);
   opacity: 0.54;
-}
-
-.subtle-empty {
-  color: var(--text-secondary);
-  font-size: 12px;
-  padding: 9px 0;
 }
 
 .course-notice-list .activity-notice {
@@ -4562,7 +4614,6 @@ main.page-layout .settings-status.global {
 }
 
 .rail-deadline-row small,
-.rail-empty,
 .rail-more {
   color: var(--text-rail-muted);
   font-size: 10px;
@@ -4572,11 +4623,6 @@ main.page-layout .settings-status.global {
   border-top: 1px solid var(--border-rail-row);
   margin: 0;
   padding-top: 5px;
-}
-
-.rail-empty {
-  margin: 0;
-  padding: 8px 0 0;
 }
 
 .rail-schedule-row em {
