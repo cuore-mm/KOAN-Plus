@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KOAN Plus",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "A local-only academic dashboard for Osaka University KOAN.",
   "icons": {
     "16": "icon-16.png",
