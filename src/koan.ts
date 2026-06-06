@@ -1027,6 +1027,7 @@ function groupCredits(courses: CreditCourse[]): CreditGroup[] {
 
 export async function refreshGrades(
   onProgress?: (message: string) => void,
+  tabId?: number,
 ): Promise<GradeData> {
   requireCooldown(GRADES_ATTEMPT_KEY, 60 * 1000, "成績取得の再試行は1分後にできます。");
   const release = acquireLease(GRADES_LEASE_KEY, 90 * 1000, "別の画面で成績を取得中です。");
@@ -1034,7 +1035,7 @@ export async function refreshGrades(
   try {
   // KOAN stores these old Web Flow screens in a shared session. Keep them sequential.
   onProgress?.("履修成績を取得中");
-  const gradeHistory = await submitFullRangeFlow(GRADE_HISTORY_URL);
+  const gradeHistory = await submitFullRangeFlow(GRADE_HISTORY_URL, tabId);
   onProgress?.("単位修得状況を取得中");
   const creditStatus = await submitFullRangeFlow(CREDIT_STATUS_URL, gradeHistory.tabId);
   const courses = parseCreditCourses(creditStatus.doc).filter(isEarnedCredit);

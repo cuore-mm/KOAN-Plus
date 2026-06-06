@@ -52,6 +52,7 @@ import {
   refreshCleLogin,
   saveAuthSettings,
   getSavedMfaSecrets,
+  checkLoginStatus,
 } from "./auth";
 import QRCode from "qrcode";
 import ThemeToggle, { loadTheme } from "./ThemeToggle";
@@ -121,8 +122,31 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [gradesLoading, setGradesLoading] = useState(false);
   const [gradesStatus, setGradesStatus] = useState("");
   const updateLock = useRef(false);
+  const authCheckLock = useRef(false);
   const snapshotLock = useRef(false);
   const gradesLock = useRef(false);
+  const [authChecking, setAuthChecking] = useState(false);
+  const [showManualLoginModal, setShowManualLoginModal] = useState(false);
+  const [pendingAction, setPendingAction] = useState<"dashboard" | "grades" | null>(null);
+  const [refreshBlockedUntil, setRefreshBlockedUntil] = useState(0);
+  const [authSettings, setAuthSettings] = useState<AuthSettings | null>(null);
+  const [, setFreshnessClock] = useState(Date.now());
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setFreshnessClock(Date.now()), 15 * 1000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    const refreshAuthSettings = () => {
+      void loadAuthSettings()
+        .then(setAuthSettings)
+        .catch(() => setAuthSettings(null));
+    };
+    refreshAuthSettings();
+    window.addEventListener("focus", refreshAuthSettings);
+    return () => window.removeEventListener("focus", refreshAuthSettings);
+  }, []);
 
   const updateKoan = async (force = false) => {
     setLoading(true);
@@ -130,7 +154,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     try {
       if (!force && isKoanCacheFresh(data)) {
         setStatus(`キャッシュ表示中 / 更新 ${fmtTime(data.lightUpdatedAt)}`);
-        return;
+        return true;
       }
       const auth = await ensureKoanLogin();
       if (auth.loginStarted) setStatus("自動ログイン完了 / データ取得準備中");
@@ -149,8 +173,10 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         return next;
       });
       setStatus("更新しました");
+      return true;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setLoading(false);
     }
@@ -162,7 +188,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     try {
       if (!force && isCleCacheFresh(cleData)) {
         setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
-        return;
+        return true;
       }
       const auth = await ensureCleLogin();
       if (auth.loginStarted) setCleStatus("自動ログイン完了 / データ取得準備中");
@@ -184,31 +210,98 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       setCleData(next);
       saveCleCache(next);
       setCleStatus("CLE更新済み");
+      return true;
     } catch (error) {
       setCleStatus(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setCleLoading(false);
     }
   };
 
-  const runUpdate = async (force = false) => {
+  const executeUpdate = async (force = false, sequential = false) => {
     if (updateLock.current) return;
-    if (!force && isKoanCacheFresh(data) && isCleCacheFresh(cleData)) {
-      setStatus(`キャッシュ表示中 / 更新 ${fmtTime(data.lightUpdatedAt)}`);
-      setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
-      return;
-    }
     updateLock.current = true;
     try {
-      if (!await claimDashboardRefresh()) {
+      const claim = await claimDashboardRefresh();
+      setRefreshBlockedUntil(Date.now() + claim.retryAfterMs);
+      if (!claim.allowed) {
         setStatus("更新の再試行は1分後にできます。");
         setCleStatus("更新の再試行は1分後にできます。");
         return;
       }
-      await Promise.all([updateKoan(force), updateCle(force)]);
+      if (sequential) {
+        setCleStatus("KOANログイン完了後に更新します");
+        const koanUpdated = await updateKoan(force);
+        if (!koanUpdated) {
+          setCleStatus("KOANログインが完了しなかったため、CLE更新を中止しました。");
+          return;
+        }
+        await updateCle(force);
+      } else {
+        await Promise.all([updateKoan(force), updateCle(force)]);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(message);
+      setCleStatus(message);
     } finally {
       updateLock.current = false;
     }
+  };
+
+  const prepareAuthenticatedAction = async (
+    action: "dashboard" | "grades",
+  ): Promise<{ manualMode: boolean } | null> => {
+    const currentAuthSettings = await loadAuthSettings();
+    setAuthSettings(currentAuthSettings);
+    if (currentAuthSettings.configured && currentAuthSettings.enabled) {
+      return { manualMode: false };
+    }
+
+    const loginStatus = await checkLoginStatus();
+    const loggedIn = action === "dashboard"
+      ? loginStatus.koanLoggedIn && loginStatus.cleLoggedIn
+      : loginStatus.koanLoggedIn;
+    if (loggedIn) return { manualMode: true };
+
+    if (action === "dashboard") {
+      setStatus("手動ログインの確認待ち");
+      setCleStatus("手動ログインの確認待ち");
+    } else {
+      setGradesStatus("手動ログインの確認待ち");
+    }
+    setPendingAction(action);
+    setShowManualLoginModal(true);
+    return null;
+  };
+
+  const runUpdate = async (force = false) => {
+    if (authCheckLock.current || updateLock.current) return;
+    authCheckLock.current = true;
+    setAuthChecking(true);
+    setStatus("ログイン状態を確認中");
+    setCleStatus("ログイン状態を確認中");
+    let manualMode = false;
+    try {
+      const prepared = await prepareAuthenticatedAction("dashboard");
+      if (!prepared) return;
+      manualMode = prepared.manualMode;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`ログイン状態を確認できませんでした: ${message}`);
+      setCleStatus(`ログイン状態を確認できませんでした: ${message}`);
+      return;
+    } finally {
+      authCheckLock.current = false;
+      setAuthChecking(false);
+    }
+    if (!force && !manualMode && isKoanCacheFresh(data) && isCleCacheFresh(cleData)) {
+      setStatus(`キャッシュ表示中 / 更新 ${fmtTime(data.lightUpdatedAt)}`);
+      setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
+      return;
+    }
+    await executeUpdate(force || manualMode);
   };
   const update = () => runUpdate(false);
 
@@ -238,13 +331,18 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     }
   };
 
-  const updateGrades = async () => {
+  const executeGradesUpdate = async () => {
     if (gradesLock.current) return;
     gradesLock.current = true;
     setGradesLoading(true);
-    setGradesStatus("成績を取得中");
+    setGradesStatus("ログイン状態を確認中");
     try {
-      const next = await refreshGrades(setGradesStatus);
+      const auth = await ensureKoanLogin({ requireTab: true });
+      if (!auth.tabId) {
+        throw new Error("成績取得に使用するKOANタブを準備できませんでした。");
+      }
+      setGradesStatus("成績を取得中");
+      const next = await refreshGrades(setGradesStatus, auth.tabId);
       setGradesData(next);
       saveGradesCache(next);
       setGradesStatus("取得しました");
@@ -254,6 +352,25 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       setGradesLoading(false);
       gradesLock.current = false;
     }
+  };
+
+  const updateGrades = async () => {
+    if (authCheckLock.current || gradesLock.current) return;
+    authCheckLock.current = true;
+    setAuthChecking(true);
+    setGradesStatus("ログイン状態を確認中");
+    try {
+      const prepared = await prepareAuthenticatedAction("grades");
+      if (!prepared) return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setGradesStatus(`ログイン状態を確認できませんでした: ${message}`);
+      return;
+    } finally {
+      authCheckLock.current = false;
+      setAuthChecking(false);
+    }
+    await executeGradesUpdate();
   };
 
   useEffect(() => {
@@ -309,8 +426,17 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     grades: "成績",
     settings: "設定",
   }[view];
+  const showGradesError = gradesStatus && gradesStatus !== "取得しました" && gradesStatus !== "成績を取得中";
+  const hasKoanError = status && status !== "更新しました" && !status.includes("キャッシュ表示中");
+  const hasCleError = cleStatus && cleStatus !== "CLE更新済み" && !cleStatus.includes("キャッシュ表示中");
+  const showUpdateError = hasKoanError || hasCleError;
+  const cacheFresh = isKoanCacheFresh(data) && isCleCacheFresh(cleData);
+  const refreshCoolingDown = refreshBlockedUntil > Date.now();
+  const autoLoginActive = Boolean(authSettings?.configured && authSettings.enabled);
+
   const topbarState = view === "reference" ? {
     action: syncSnapshot,
+    busy: snapshotLoading,
     disabled: snapshotLoading || !snapshotExpired,
     label: snapshotLoading ? "同期中..." : snapshotExpired ? "掲示を同期" : "同期済み",
     status: snapshotLoading
@@ -318,21 +444,39 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       : `掲示同期 ${fmtTime(data.snapshotUpdatedAt)}${snapshotExpired ? " / 更新推奨" : ""}`,
   } : view === "grades" ? {
     action: updateGrades,
-    disabled: gradesLoading,
-    label: gradesLoading ? "取得中..." : "成績を取得",
-    status: gradesLoading
+    busy: gradesLoading || authChecking,
+    disabled: gradesLoading || authChecking,
+    label: gradesLoading ? "取得中..." : authChecking ? "確認中..." : "成績を取得",
+    status: gradesLoading || authChecking
       ? (gradesStatus || "成績を取得中...")
-      : `成績更新履歴 ${fmtTime(gradesData?.updatedAt ?? null)}`,
+      : showGradesError
+        ? gradesStatus
+        : `成績更新履歴 ${fmtTime(gradesData?.updatedAt ?? null)}`,
   } : {
     action: update,
-    disabled: loading || cleLoading,
-    label: loading || cleLoading ? "更新中..." : "更新",
-    status: loading || cleLoading
+    busy: loading || cleLoading || authChecking,
+    disabled: loading || cleLoading || authChecking ||
+      (autoLoginActive && (cacheFresh || refreshCoolingDown)),
+    label: loading || cleLoading
+      ? "更新中..."
+      : authChecking
+        ? "確認中..."
+      : cacheFresh && autoLoginActive
+        ? "最新"
+        : refreshCoolingDown && autoLoginActive
+          ? "待機中"
+          : "更新",
+    status: loading || cleLoading || authChecking
       ? [
           compactStatus("KOAN", status),
           compactStatus("CLE", cleStatus),
-        ].filter(Boolean).join(" / ") || "更新中..."
-      : `更新済み ${fmtTime(latestUpdatedAt)}`,
+        ].filter(Boolean).join(" / ") || (authChecking ? "ログイン状態を確認中..." : "更新中...")
+      : showUpdateError
+        ? [
+            hasKoanError ? compactStatus("KOAN", status) : "",
+            hasCleError ? compactStatus("CLE", cleStatus) : "",
+          ].filter(Boolean).join(" / ")
+        : `更新済み ${fmtTime(latestUpdatedAt)}`,
   };
 
   return (
@@ -347,7 +491,12 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         <div className="topbar-actions">
           <div className="update-group">
             <small>{topbarState.status}</small>
-            <button type="button" disabled={topbarState.disabled} onClick={topbarState.action}>
+            <button
+              className={topbarState.busy ? "is-loading" : ""}
+              type="button"
+              disabled={topbarState.disabled}
+              onClick={topbarState.action}
+            >
               {topbarState.label}
             </button>
           </div>
@@ -385,8 +534,48 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
           />
         ) : view === "grades" ? (
           <Grades data={gradesData} />
-        ) : <Settings />}
+        ) : <Settings onAuthSettingsChange={setAuthSettings} />}
       </main>
+
+      {showManualLoginModal && (
+        <div className="settings-modal-overlay">
+          <div className="settings-modal" role="dialog" aria-modal="true">
+            <h3 className="modal-title">手動でログインを行いますか</h3>
+            <p className="modal-text">
+              自動ログインが無効、またはログイン情報が設定されていないため、大阪大学の公式ログイン画面（新しいタブ）を開いて手動でログインする必要があります。
+            </p>
+            <p className="modal-text" style={{ fontSize: "0.85em", color: "var(--text-muted, #6c757d)", marginTop: "8px" }}>
+              ※ログインが完了すると、自動的にこのダッシュボードに戻り、データが取得されます。（IDやパスワードは保存されません）
+            </p>
+            <div className="modal-actions">
+              <button className="modal-btn cancel" onClick={() => {
+                setShowManualLoginModal(false);
+                if (pendingAction === "grades") {
+                  setGradesStatus("取得をキャンセルしました");
+                } else {
+                  setStatus("更新をキャンセルしました");
+                  setCleStatus("更新をキャンセルしました");
+                }
+                setPendingAction(null);
+              }} type="button">
+                キャンセル
+              </button>
+              <button className="modal-btn confirm" onClick={() => {
+                setShowManualLoginModal(false);
+                const action = pendingAction;
+                setPendingAction(null);
+                if (action === "grades") {
+                  void executeGradesUpdate();
+                } else {
+                  void executeUpdate(true, true);
+                }
+              }} type="button">
+                ログイン画面を開く
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -454,7 +643,11 @@ const EMPTY_AUTH_SETTINGS: AuthSettings = {
   idHint: "",
 };
 
-function Settings() {
+function Settings({
+  onAuthSettingsChange,
+}: {
+  onAuthSettingsChange?: (settings: AuthSettings) => void;
+}) {
   const [settings, setSettings] = useState(EMPTY_AUTH_SETTINGS);
   const [persistedSettings, setPersistedSettings] = useState(EMPTY_AUTH_SETTINGS);
   const [id, setId] = useState("");
@@ -485,6 +678,7 @@ function Settings() {
       const next = await loadAuthSettings();
       setSettings(next);
       setPersistedSettings(next);
+      onAuthSettingsChange?.(next);
       setMfaEnabled(next.mfaEnabled);
       setMfaConsent(next.mfaEnabled);
       if (next.configured) setSetupStarted(false);
@@ -610,6 +804,7 @@ function Settings() {
       const next = await task();
       setSettings(next);
       setPersistedSettings(next);
+      onAuthSettingsChange?.(next);
       setId("");
       setPassword("");
       setTotpSecret("");
@@ -1913,6 +2108,7 @@ function Dashboard({
         schedule={selectedSchedule}
         selectedDate={selectedDate}
         tasks={cleData.tasks}
+        allScheduleEmpty={data.schedule.length === 0}
       />
     </>
   );
@@ -2244,12 +2440,14 @@ function DashboardRightRail({
   schedule,
   selectedDate,
   tasks,
+  allScheduleEmpty,
 }: {
   changes: ChangeItem[];
   onSelectDate: (date: string) => void;
   schedule: ScheduleItem[];
   selectedDate: string;
   tasks: CleTask[];
+  allScheduleEmpty: boolean;
 }) {
   const today = dateKey(new Date());
   const [visibleMonth, setVisibleMonth] = useState(() => new Date());
@@ -2286,28 +2484,45 @@ function DashboardRightRail({
           </div>
         </div>
         <div className="rail-schedule-list">
-          {periods.map((period) => {
-            const item = schedule.find((scheduleItem) => periodNumber(scheduleItem.period) === period);
-            const change = item ? changeFor(item, changes) : null;
-            return (
-              <div className={`rail-schedule-row ${item ? "" : "empty-period"}`} key={period}>
-                <b>{period}</b>
-                <span>
-                  {item?.title && <span className="rail-course-title">{item.title}</span>}
-                  {item?.room && <small>{item.room}</small>}
-                  {change && <em>{change.type}</em>}
-                </span>
-              </div>
-            );
-          })}
-          {changes
-            .filter((change) => !schedule.some((item) => changeFor(item, [change])))
-            .map((item, index) => (
-              <div className="rail-change-row" key={`${item.date}-${item.period}-${index}`}>
-                <b>{item.type}</b>
-                <span>{item.period}<small>{item.course}</small></span>
-              </div>
-            ))}
+          {allScheduleEmpty ? (
+            <EmptyState
+              icon="calendar"
+              title="時間割が取得されていません"
+              description="右上の更新ボタンを押すと、時間割を読み込みます。"
+              variant="rail"
+            />
+          ) : (
+            <>
+              {periods.map((period) => {
+                const item = schedule.find((scheduleItem) => periodNumber(scheduleItem.period) === period);
+                const change = item ? changeFor(item, changes) : null;
+                return (
+                  <div className={`rail-schedule-row ${item ? "" : "empty-period"}`} key={period}>
+                    <b>{period}</b>
+                    <span>
+                      {item ? (
+                        <>
+                          <span className="rail-course-title">{item.title}</span>
+                          {item.room && <small>{item.room}</small>}
+                          {change && <em>{change.type}</em>}
+                        </>
+                      ) : (
+                        "-"
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+              {changes
+                .filter((change) => !schedule.some((item) => changeFor(item, [change])))
+                .map((item, index) => (
+                  <div className="rail-change-row" key={`${item.date}-${item.period}-${index}`}>
+                    <b>{item.type}</b>
+                    <span>{item.period}<small>{item.course}</small></span>
+                  </div>
+                ))}
+            </>
+          )}
         </div>
       </section>
       <section className="rail-section selected-deadline-panel">

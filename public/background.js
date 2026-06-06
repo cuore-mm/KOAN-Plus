@@ -17,6 +17,7 @@ let koanLoginTask;
 let cleLoginTask;
 const manualFlows = new Map();
 let pendingMfa = null;
+const PENDING_MFA_KEY = "authPendingMfa";
 const AUTO_COLLECT_TAB_IDS_KEY = "authAutoCollectTabIds";
 const STARTUP_REFRESH_CLAIMED_KEY = "startupRefreshClaimed";
 const DASHBOARD_REFRESH_ATTEMPT_KEY = "dashboardRefreshAttempt";
@@ -27,6 +28,9 @@ let dashboardRefreshClaimTask = Promise.resolve();
 chrome.tabs.onRemoved.addListener((tabId) => {
   autoCollectTabIds.delete(tabId);
   void persistAutoCollectTabIds();
+  void readPendingMfa().then((value) => {
+    if (value?.tabId === tabId) return clearPendingMfa();
+  }).catch(() => {});
 });
 
 const toBase64 = (bytes) => {
@@ -164,8 +168,8 @@ async function readAuthSettings(record) {
           : `${credentials.id.slice(0, 2)}${"*".repeat(credentials.id.length - 4)}${credentials.id.slice(-2)}`;
       }
     } catch {
-      idHint = "保存済み";
-      isConfigured = true;
+      idHint = "読み込み失敗";
+      isConfigured = false;
     }
   }
   return {
@@ -178,10 +182,13 @@ async function readAuthSettings(record) {
 }
 
 async function probeKoanLogin() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
     const response = await fetch(KOAN_PORTAL_URL, {
       credentials: "include",
       redirect: "follow",
+      signal: controller.signal,
     });
     const text = await response.text();
     const ok = response.ok &&
@@ -190,6 +197,8 @@ async function probeKoanLogin() {
     return { ok, text: ok ? text : "", url: response.url };
   } catch {
     return { ok: false, text: "", url: KOAN_PORTAL_URL };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -233,6 +242,28 @@ async function isAutoCollectTabId(tabId) {
   return autoCollectTabIds.has(tabId);
 }
 
+async function savePendingMfa(value) {
+  pendingMfa = value;
+  if (chrome.storage?.session) {
+    await chrome.storage.session.set({ [PENDING_MFA_KEY]: value });
+  }
+}
+
+async function readPendingMfa() {
+  if (pendingMfa) return pendingMfa;
+  if (!chrome.storage?.session) return null;
+  const stored = await chrome.storage.session.get(PENDING_MFA_KEY);
+  pendingMfa = stored[PENDING_MFA_KEY] || null;
+  return pendingMfa;
+}
+
+async function clearPendingMfa() {
+  pendingMfa = null;
+  if (chrome.storage?.session) {
+    await chrome.storage.session.remove(PENDING_MFA_KEY);
+  }
+}
+
 async function withTimeout(task, milliseconds) {
   let timeoutId;
   try {
@@ -245,6 +276,49 @@ async function withTimeout(task, milliseconds) {
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
+}
+
+async function tabExists(tabId) {
+  if (!tabId) return false;
+  try {
+    await chrome.tabs.get(tabId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function findKoanTab() {
+  const tabs = await chrome.tabs.query({ url: "https://koan.osaka-u.ac.jp/*" });
+  return tabs
+    .filter((candidate) => !candidate.discarded && candidate.id)
+    .sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0))[0];
+}
+
+async function waitForTabComplete(tabId, milliseconds = 15000) {
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete") return tab;
+    } catch {
+      throw new Error("KOANタブが閉じられたため、取得を中止しました。");
+    }
+    await wait(250);
+  }
+  throw new Error("KOANタブの読み込みが完了しませんでした。再読み込みして再試行してください。");
+}
+
+async function ensureKoanTab(active = false) {
+  let tab = await findKoanTab();
+  if (!tab?.id) {
+    tab = await chrome.tabs.create({ url: KOAN_PORTAL_URL, active });
+  } else if (active && !tab.active) {
+    tab = await chrome.tabs.update(tab.id, { active: true });
+  }
+  if (!tab?.id) throw new Error("KOANタブを作成できませんでした。");
+  await waitForTabComplete(tab.id);
+  return tab;
 }
 
 async function returnToDashboard(flowTabId) {
@@ -269,17 +343,24 @@ async function openLoginTab(url, record, sender, activeWhenManual = true) {
   return { manual, tab };
 }
 
-async function ensureKoanLogin(record, sender) {
+async function ensureKoanLogin(record, sender, requireTab = false) {
   const initialProbe = await probeKoanLogin();
   if (initialProbe.ok) {
+    const tab = requireTab ? await ensureKoanTab(false) : null;
     return {
       ok: true,
       loginStarted: false,
       portalHtml: initialProbe.text,
       portalUrl: initialProbe.url,
+      tabId: tab?.id,
     };
   }
-  if (koanLoginTask) return koanLoginTask;
+  if (koanLoginTask) {
+    const result = await koanLoginTask;
+    if (!requireTab || result.tabId) return result;
+    const tab = await ensureKoanTab(false);
+    return { ...result, tabId: tab.id };
+  }
 
   koanLoginTask = (async () => {
     const { manual, tab } = await openLoginTab(KOAN_PORTAL_URL, record, sender);
@@ -287,17 +368,33 @@ async function ensureKoanLogin(record, sender) {
       const deadline = Date.now() + 90 * 1000;
       while (Date.now() < deadline) {
         await wait(1000);
+        if (tab.id && !await tabExists(tab.id)) {
+          throw new Error("認証画面が閉じられたため、更新を中止しました。");
+        }
         const probe = await probeKoanLogin();
         if (probe.ok) {
           if (tab.id) {
-            if (manual) await returnToDashboard(tab.id);
-            else await chrome.tabs.remove(tab.id);
+            if (requireTab) {
+              if (manual) {
+                const flow = manualFlows.get(tab.id);
+                manualFlows.delete(tab.id);
+                if (flow?.returnTabId) {
+                  await chrome.tabs.update(flow.returnTabId, { active: true }).catch(() => {});
+                }
+              }
+              await waitForTabComplete(tab.id);
+            } else if (manual) {
+              await returnToDashboard(tab.id);
+            } else {
+              await chrome.tabs.remove(tab.id);
+            }
           }
           return {
             ok: true,
             loginStarted: true,
             portalHtml: probe.text,
             portalUrl: probe.url,
+            tabId: requireTab ? tab.id : undefined,
           };
         }
       }
@@ -352,11 +449,23 @@ async function findCleTab() {
     .sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0))[0];
 }
 
+async function findReadyCleTab() {
+  const tabs = await chrome.tabs.query({ url: `${CLE_ORIGIN}/*` });
+  const candidates = tabs
+    .filter((candidate) => !candidate.discarded && candidate.id)
+    .sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0));
+  const readiness = await Promise.all(
+    candidates.map((candidate) => cleApiReady(candidate.id)),
+  );
+  return candidates.find((candidate, index) => readiness[index]) || null;
+}
+
 async function ensureCleLogin(record, sender, force = false) {
-  let tab = await findCleTab();
-  if (!force && tab?.id && await cleApiReady(tab.id)) {
+  let tab = !force ? await findReadyCleTab() : await findCleTab();
+  if (!force && tab?.id) {
     return { ok: true, loginStarted: false, tabId: tab.id };
   }
+  if (!tab?.id) tab = await findCleTab();
   if (cleLoginTask) return cleLoginTask;
 
   cleLoginTask = (async () => {
@@ -371,6 +480,9 @@ async function ensureCleLogin(record, sender, force = false) {
       const deadline = Date.now() + 45 * 1000;
       while (Date.now() < deadline) {
         await wait(1000);
+        if (tab.id && !await tabExists(tab.id)) {
+          throw new Error("CLE認証画面が閉じられたため、更新を中止しました。");
+        }
         if (tab.id && await cleApiReady(tab.id)) {
           if (manual) {
             const flow = manualFlows.get(tab.id);
@@ -394,6 +506,14 @@ async function ensureCleLogin(record, sender, force = false) {
 }
 
 async function authResponse(message, sender) {
+  if (message.type === "auth-check-login") {
+    const [koanProbe, cleTab] = await Promise.all([
+      probeKoanLogin(),
+      findReadyCleTab(),
+    ]);
+    return { ok: true, koanLoggedIn: koanProbe.ok, cleLoggedIn: Boolean(cleTab?.id) };
+  }
+
   if (message.type === "auth-claim-startup-refresh") {
     const claim = startupRefreshClaimTask.then(async () => {
       if (!chrome.storage?.session) return true;
@@ -411,12 +531,13 @@ async function authResponse(message, sender) {
       if (!chrome.storage?.session) return true;
       const stored = await chrome.storage.session.get(DASHBOARD_REFRESH_ATTEMPT_KEY);
       const previous = Number(stored[DASHBOARD_REFRESH_ATTEMPT_KEY]) || 0;
-      if (Date.now() - previous < 60 * 1000) return false;
+      const retryAfterMs = Math.max(0, 60 * 1000 - (Date.now() - previous));
+      if (retryAfterMs > 0) return { allowed: false, retryAfterMs };
       await chrome.storage.session.set({ [DASHBOARD_REFRESH_ATTEMPT_KEY]: Date.now() });
-      return true;
+      return { allowed: true, retryAfterMs: 60 * 1000 };
     });
     dashboardRefreshClaimTask = claim.then(() => undefined, () => undefined);
-    return { ok: true, allowed: await claim };
+    return { ok: true, ...await claim };
   }
 
   const record = await readAuthRecord();
@@ -428,7 +549,11 @@ async function authResponse(message, sender) {
       throw new Error("シークレットまたは一時解除コードが指定されていません。");
     }
     decodeBase32(secret); // Validate base32 secret
-    pendingMfa = { secret, temporaryCancelCode };
+    await savePendingMfa({
+      secret,
+      temporaryCancelCode,
+      tabId: sender.tab?.id,
+    });
     return { ok: true, code: await generateTotp(secret) };
   }
 
@@ -477,7 +602,8 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-mfa-confirm-save") {
-    if (!pendingMfa) {
+    const savedPendingMfa = await readPendingMfa();
+    if (!savedPendingMfa) {
       return { ok: false, error: "仮保存されたMFA情報がありません。" };
     }
     const current = record || await readAuthRecord();
@@ -490,18 +616,19 @@ async function authResponse(message, sender) {
     const payload = await encryptCredentials({
       id: previous.id || "",
       password: previous.password || "",
-      totpSecret: pendingMfa.secret,
-      temporaryCancelCode: pendingMfa.temporaryCancelCode,
+      totpSecret: savedPendingMfa.secret,
+      temporaryCancelCode: savedPendingMfa.temporaryCancelCode,
       mfaConsent: true,
     }, key);
+    const hasSavedCredentials = Boolean(previous.id && previous.password);
     await writeAuthRecord({
-      enabled: true,
+      enabled: hasSavedCredentials ? Boolean(current?.enabled) : true,
       autoSubmit: true,
       mfaEnabled: true,
       key,
       payload,
     });
-    pendingMfa = null; // Clear pending state
+    await clearPendingMfa();
     return { ok: true };
   }
 
@@ -638,6 +765,11 @@ async function authResponse(message, sender) {
       if (!record?.payload) throw new Error("ID とパスワードを入力してください。");
     }
     const previous = record?.payload ? await decryptCredentials(record) : {};
+    const nextId = values.id || previous.id || "";
+    const nextPassword = values.password || previous.password || "";
+    if (!nextId || !nextPassword) {
+      throw new Error("ID とパスワードを入力してください。");
+    }
     const totpSecret = normalizeTotpSecret(values.totpSecret) || previous.totpSecret || "";
     const mfaConsent = Boolean(totpSecret && (values.mfaConsent || previous.mfaConsent));
     if (values.mfaEnabled && !mfaConsent) {
@@ -653,8 +785,8 @@ async function authResponse(message, sender) {
       ["encrypt", "decrypt"],
     );
     const payload = await encryptCredentials({
-      id: values.id || previous.id,
-      password: values.password || previous.password,
+      id: nextId,
+      password: nextPassword,
       totpSecret,
       temporaryCancelCode: previous.temporaryCancelCode || "",
       mfaConsent,
@@ -670,7 +802,7 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-ensure-koan") {
-    return ensureKoanLogin(record, sender);
+    return ensureKoanLogin(record, sender, Boolean(message.requireTab));
   }
 
   if (message.type === "auth-ensure-cle") {
@@ -686,9 +818,10 @@ async function authResponse(message, sender) {
     if (origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) {
       throw new Error("認証画面以外には自動ログイン状態を渡しません。");
     }
+    const settings = await readAuthSettings(record);
     return {
       ok: true,
-      enabled: Boolean(record?.enabled && record.payload),
+      enabled: Boolean(settings.enabled && settings.configured),
       autoSubmit: record?.autoSubmit !== false,
     };
   }
@@ -698,6 +831,9 @@ async function authResponse(message, sender) {
     if (origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) throw new Error("認証画面以外には認証情報を渡しません。");
     if (!record?.enabled) return { ok: true };
     const credentials = await decryptCredentials(record);
+    if (!credentials.id || !credentials.password) {
+      throw new Error("保存済みのIDまたはパスワードが不完全です。");
+    }
     return { ok: true, credentials: { id: credentials.id, password: credentials.password }, autoSubmit: true };
   }
 

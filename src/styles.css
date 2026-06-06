@@ -1513,6 +1513,14 @@ h2 {
   color: var(--color-accent);
 }
 
+.topbar-actions button:disabled {
+  cursor: not-allowed;
+}
+
+.topbar-actions button.is-loading:disabled {
+  cursor: wait;
+}
+
 .theme-toggle-container {
   position: relative;
   display: inline-block;
@@ -4870,7 +4878,9 @@ main.page-layout .settings-status.global {
 }
 
 .rail-schedule-row.empty-period span {
-  color: transparent;
+  color: var(--text-rail-muted);
+  opacity: 0.6;
+  font-weight: normal;
 }
 
 @media (max-width: 1120px) {

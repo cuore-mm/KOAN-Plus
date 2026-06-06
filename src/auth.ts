@@ -15,6 +15,7 @@ type AuthResponse = AuthSettings & {
   portalHtml?: string;
   portalUrl?: string;
   allowed?: boolean;
+  retryAfterMs?: number;
 };
 
 async function sendAuthMessage(message: unknown): Promise<AuthResponse> {
@@ -49,8 +50,11 @@ export function deleteMfaSettings() {
   return sendAuthMessage({ type: "auth-delete-mfa" });
 }
 
-export function ensureKoanLogin() {
-  return sendAuthMessage({ type: "auth-ensure-koan" });
+export function ensureKoanLogin(options?: { requireTab?: boolean }) {
+  return sendAuthMessage({
+    type: "auth-ensure-koan",
+    requireTab: Boolean(options?.requireTab),
+  });
 }
 
 export function ensureCleLogin() {
@@ -68,7 +72,10 @@ export async function claimStartupRefresh() {
 
 export async function claimDashboardRefresh() {
   const response = await sendAuthMessage({ type: "auth-claim-dashboard-refresh" });
-  return response.allowed !== false;
+  return {
+    allowed: response.allowed !== false,
+    retryAfterMs: Math.max(0, response.retryAfterMs || 0),
+  };
 }
 
 export type MfaSecrets = {
@@ -85,4 +92,18 @@ export async function getSavedMfaSecrets(): Promise<MfaSecrets> {
   const response = await chrome.runtime.sendMessage({ type: "auth-get-secrets" }) as MfaSecrets & { ok: boolean };
   if (!response.ok) throw new Error(response.error || "シークレットの取得に失敗しました。");
   return response;
+}
+
+export async function checkLoginStatus(): Promise<{ koanLoggedIn: boolean; cleLoggedIn: boolean }> {
+  if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
+    return { koanLoggedIn: false, cleLoggedIn: false };
+  }
+  const response = await chrome.runtime.sendMessage({ type: "auth-check-login" }) as {
+    ok: boolean;
+    koanLoggedIn: boolean;
+    cleLoggedIn: boolean;
+    error?: string;
+  };
+  if (!response.ok) throw new Error(response.error || "ログイン状態の確認に失敗しました。");
+  return { koanLoggedIn: response.koanLoggedIn, cleLoggedIn: response.cleLoggedIn };
 }
