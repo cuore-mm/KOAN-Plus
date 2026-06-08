@@ -4744,6 +4744,25 @@ main.page-layout .settings-status.global {
   height: 42px;
 }
 
+.rail-schedule-row.clickable-period {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  width: calc(100% + 12px);
+  padding: 0 6px;
+  margin: 0 -6px;
+  border-radius: 6px;
+}
+
+.rail-schedule-row.clickable-period:hover {
+  background: var(--bg-hover);
+}
+
+.rail-schedule-row.clickable-period:hover .rail-course-title {
+  color: var(--color-accent);
+}
+
 .rail-change-row {
   min-height: 42px;
   padding: 7px 0;

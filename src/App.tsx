@@ -116,6 +116,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [genre, setGenre] = useState("");
   const [scope, setScope] = useState("attention");
   const [view, setView] = useState<AppView>(initialView);
+  const [selectedCourseCode, setSelectedCourseCode] = useState("");
   const [gradesData, setGradesData] = useState<GradeData | null>(() =>
     loadGradesCache<GradeData>(),
   );
@@ -514,12 +515,18 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
             cleStatus={cleStatus}
             data={data}
             onOpenNotice={markNoticeRead}
+            onSelectCourse={(code) => {
+              setSelectedCourseCode(code);
+              setView("courses");
+            }}
           />
         ) : view === "courses" ? (
           <CoursesPage
             cleData={cleData}
             data={data}
             onOpenNotice={markNoticeRead}
+            selectedCode={selectedCourseCode}
+            onSelectCode={setSelectedCourseCode}
           />
         ) : view === "reference" ? (
           <ReferenceDesk
@@ -1844,18 +1851,21 @@ function CoursesPage({
   cleData,
   data,
   onOpenNotice,
+  selectedCode,
+  onSelectCode,
 }: {
   cleData: CleData;
   data: KoanData;
   onOpenNotice: (notice: Notice) => void;
+  selectedCode: string;
+  onSelectCode: (code: string) => void;
 }) {
   const courses = useMemo(() => buildCourseSummaries(data, cleData), [cleData, data]);
-  const [selectedCode, setSelectedCode] = useState("");
   useEffect(() => {
-    if (!courses.some((course) => course.code === selectedCode)) {
-      setSelectedCode("");
+    if (selectedCode && !courses.some((course) => course.code === selectedCode)) {
+      onSelectCode("");
     }
-  }, [courses, selectedCode]);
+  }, [courses, selectedCode, onSelectCode]);
   const selected = courses.find((course) => course.code === selectedCode);
   const regularCourses = courses.filter((course) => courseSlots(course.koan).some((slot) =>
     timetableDays.includes(slot.day as typeof timetableDays[number]) &&
@@ -1872,7 +1882,7 @@ function CoursesPage({
             </div>
             <CourseTimetable
               courses={regularCourses}
-              onSelect={setSelectedCode}
+              onSelect={onSelectCode}
               selectedCode={selectedCode}
             />
             <div className="irregular-courses">
@@ -1883,7 +1893,7 @@ function CoursesPage({
                     <button
                       className={course.code === selectedCode ? "active" : ""}
                       key={course.code}
-                      onClick={() => setSelectedCode(course.code)}
+                      onClick={() => onSelectCode(course.code)}
                       type="button"
                     >
                       <span>{course.koan.title}</span>
@@ -2097,12 +2107,14 @@ function Dashboard({
   cleStatus,
   data,
   onOpenNotice,
+  onSelectCourse,
 }: {
   cleData: CleData;
   cleLoading: boolean;
   cleStatus: string;
   data: KoanData;
   onOpenNotice: (notice: Notice) => void;
+  onSelectCourse: (code: string) => void;
 }) {
   const today = dateKey(new Date());
   const [selectedDate, setSelectedDate] = useState(today);
@@ -2126,6 +2138,8 @@ function Dashboard({
         selectedDate={selectedDate}
         tasks={cleData.tasks}
         allScheduleEmpty={data.schedule.length === 0}
+        courses={data.courses || []}
+        onSelectCourse={onSelectCourse}
       />
     </>
   );
@@ -2458,6 +2472,8 @@ function DashboardRightRail({
   selectedDate,
   tasks,
   allScheduleEmpty,
+  courses,
+  onSelectCourse,
 }: {
   changes: ChangeItem[];
   onSelectDate: (date: string) => void;
@@ -2465,6 +2481,8 @@ function DashboardRightRail({
   selectedDate: string;
   tasks: CleTask[];
   allScheduleEmpty: boolean;
+  courses: CourseRegistration[];
+  onSelectCourse: (code: string) => void;
 }) {
   const today = dateKey(new Date());
   const [visibleMonth, setVisibleMonth] = useState(() => new Date());
@@ -2513,6 +2531,29 @@ function DashboardRightRail({
               {periods.map((period) => {
                 const item = schedule.find((scheduleItem) => periodNumber(scheduleItem.period) === period);
                 const change = item ? changeFor(item, changes) : null;
+                const matchedCourse = item
+                  ? courses.find((course) => courseMatchesText(course, item.title))
+                  : null;
+
+                if (matchedCourse && item) {
+                  return (
+                    <button
+                      className="rail-schedule-row clickable-period"
+                      key={period}
+                      onClick={() => onSelectCourse(matchedCourse.code)}
+                      title={`${item.title}の詳細を表示`}
+                      type="button"
+                    >
+                      <b>{period}</b>
+                      <span>
+                        <span className="rail-course-title">{item.title}</span>
+                        {item.room && <small>{item.room}</small>}
+                        {change && <em>{change.type}</em>}
+                      </span>
+                    </button>
+                  );
+                }
+
                 return (
                   <div className={`rail-schedule-row ${item ? "" : "empty-period"}`} key={period}>
                     <b>{period}</b>
