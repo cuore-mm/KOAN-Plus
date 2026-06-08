@@ -252,18 +252,18 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
 
   const prepareAuthenticatedAction = async (
     action: "dashboard" | "grades",
-  ): Promise<{ manualMode: boolean } | null> => {
+  ): Promise<{ manualMode: boolean; mfaEnabled: boolean } | null> => {
     const currentAuthSettings = await loadAuthSettings();
     setAuthSettings(currentAuthSettings);
     if (currentAuthSettings.configured && currentAuthSettings.enabled) {
-      return { manualMode: false };
+      return { manualMode: false, mfaEnabled: currentAuthSettings.mfaEnabled };
     }
 
     const loginStatus = await checkLoginStatus();
     const loggedIn = action === "dashboard"
       ? loginStatus.koanLoggedIn && loginStatus.cleLoggedIn
       : loginStatus.koanLoggedIn;
-    if (loggedIn) return { manualMode: true };
+    if (loggedIn) return { manualMode: true, mfaEnabled: currentAuthSettings.mfaEnabled };
 
     if (action === "dashboard") {
       setStatus("手動ログインの確認待ち");
@@ -283,10 +283,12 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     setStatus("ログイン状態を確認中");
     setCleStatus("ログイン状態を確認中");
     let manualMode = false;
+    let sequential = false;
     try {
       const prepared = await prepareAuthenticatedAction("dashboard");
       if (!prepared) return;
       manualMode = prepared.manualMode;
+      sequential = !prepared.mfaEnabled;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatus(`ログイン状態を確認できませんでした: ${message}`);
@@ -301,7 +303,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
       return;
     }
-    await executeUpdate(force || manualMode);
+    await executeUpdate(force || manualMode, sequential);
   };
   const update = () => runUpdate(false);
 
@@ -718,10 +720,24 @@ function Settings({
   const canFinishSetup = !saving && Boolean(id.trim() && password) && (!mfaEnabled || (mfaConsent && Boolean(hasSavedMfa || totpSecret.trim())));
   const canSaveManualTotp = !saving && settings.mfaEnabled && Boolean(totpSecret.trim());
 
-  const startAutoCollect = () => {
+  const startAutoCollect = async () => {
     const chromeObj = typeof window !== "undefined" ? (window as any).chrome : undefined;
     if (chromeObj && chromeObj.tabs?.create) {
       setSaving(true);
+      try {
+        const pending = await chromeObj.runtime.sendMessage({ type: "auth-focus-pending-mfa" });
+        if (pending?.found) {
+          setSaving(false);
+          setStatus("先に前面へ移動した二段階認証を完了してください。完了後にMFA登録を開始できます。");
+          setShowMfaWizardModal(false);
+          return;
+        }
+      } catch (error) {
+        setSaving(false);
+        setStatus(error instanceof Error ? error.message : "認証待ちタブを確認できませんでした。");
+        setShowMfaWizardModal(false);
+        return;
+      }
       
       chromeObj.tabs.create({
         url: "about:blank",
@@ -785,7 +801,7 @@ function Settings({
 
   const handleStartRegister = () => {
     setMfaWizardStep("registering");
-    startAutoCollect();
+    void startAutoCollect();
   };
 
   const qrCanvasRef = (node: HTMLCanvasElement | null) => {

@@ -321,23 +321,30 @@ async function ensureKoanTab(active = false) {
   return tab;
 }
 
+async function focusTab(tabId) {
+  if (!tabId) return;
+  const tab = await chrome.tabs.update(tabId, { active: true }).catch(() => null);
+  if (Number.isInteger(tab?.windowId)) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  }
+}
+
 async function returnToDashboard(flowTabId) {
   const flow = manualFlows.get(flowTabId);
   if (!flow) return;
   manualFlows.delete(flowTabId);
-  if (flow.returnTabId) {
-    await chrome.tabs.update(flow.returnTabId, { active: true }).catch(() => {});
-  }
+  await focusTab(flow.returnTabId);
   await chrome.tabs.remove(flowTabId).catch(() => {});
 }
 
 async function openLoginTab(url, record, sender, activeWhenManual = true) {
   const manual = !record?.enabled || !record.payload;
+  const guideMfa = Boolean(record?.enabled && record.payload && !record.mfaEnabled);
   const tab = await chrome.tabs.create({
     url,
     active: manual ? activeWhenManual : false,
   });
-  if (manual && tab.id) {
+  if ((manual || guideMfa) && tab.id) {
     manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
   }
   return { manual, tab };
@@ -374,16 +381,15 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
         const probe = await probeKoanLogin();
         if (probe.ok) {
           if (tab.id) {
+            const shouldReturn = manualFlows.has(tab.id);
             if (requireTab) {
-              if (manual) {
+              if (shouldReturn) {
                 const flow = manualFlows.get(tab.id);
                 manualFlows.delete(tab.id);
-                if (flow?.returnTabId) {
-                  await chrome.tabs.update(flow.returnTabId, { active: true }).catch(() => {});
-                }
+                await focusTab(flow?.returnTabId);
               }
               await waitForTabComplete(tab.id);
-            } else if (manual) {
+            } else if (shouldReturn) {
               await returnToDashboard(tab.id);
             } else {
               await chrome.tabs.remove(tab.id);
@@ -402,7 +408,7 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
         ? "認証が完了していません。開いた認証画面でログインしてください。"
         : "KOANの自動ログインが完了しませんでした。開いた認証画面を確認してから、もう一度更新してください。");
     } finally {
-      if (manual && tab.id) manualFlows.delete(tab.id);
+      if (tab.id) manualFlows.delete(tab.id);
       koanLoginTask = undefined;
     }
   })();
@@ -460,6 +466,42 @@ async function findReadyCleTab() {
   return candidates.find((candidate, index) => readiness[index]) || null;
 }
 
+async function focusPendingMfaTab() {
+  const tabs = await chrome.tabs.query({ url: [
+    `${AUTH_ORIGIN}/*`,
+    `${MFA_ORIGIN}/*`,
+    `${CLE_ORIGIN}/*`,
+  ] });
+  for (const tab of tabs) {
+    if (!tab.id || tab.discarded) continue;
+    try {
+      const [execution] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const text = `${document.title} ${document.body?.innerText || ""}`;
+          const hasOtpInput = [...document.querySelectorAll("input")].some((input) => {
+            const hint = [input.id, input.name, input.autocomplete, input.placeholder].join(" ");
+            return input instanceof HTMLInputElement &&
+              !["hidden", "checkbox", "submit", "button"].includes(input.type) &&
+              (/otp|one-time|auth.?code|certification|secondaryAuthToken/i.test(hint) || input.maxLength === 6);
+          });
+          return hasOtpInput && /認証コード|ワンタイムパスワード|OTP|MFA認証|Type the Code/i.test(text);
+        },
+      });
+      if (execution?.result === true) {
+        await chrome.tabs.update(tab.id, { active: true });
+        if (Number.isInteger(tab.windowId)) {
+          await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+        }
+        return { found: true, tabId: tab.id };
+      }
+    } catch {
+      // Ignore tabs that are navigating or cannot be inspected.
+    }
+  }
+  return { found: false };
+}
+
 async function ensureCleLogin(record, sender, force = false) {
   let tab = !force ? await findReadyCleTab() : await findCleTab();
   if (!force && tab?.id) {
@@ -470,10 +512,11 @@ async function ensureCleLogin(record, sender, force = false) {
 
   cleLoginTask = (async () => {
     const manual = !record?.enabled || !record.payload;
+    const guideMfa = Boolean(record?.enabled && record.payload && !record.mfaEnabled);
     if (!tab?.id) {
       ({ tab } = await openLoginTab(CLE_HOME_URL, record, sender));
     } else {
-      if (manual) manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
+      if (manual || guideMfa) manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
       await chrome.tabs.update(tab.id, { url: CLE_HOME_URL, active: manual });
     }
     try {
@@ -484,12 +527,10 @@ async function ensureCleLogin(record, sender, force = false) {
           throw new Error("CLE認証画面が閉じられたため、更新を中止しました。");
         }
         if (tab.id && await cleApiReady(tab.id)) {
-          if (manual) {
+          if (manualFlows.has(tab.id)) {
             const flow = manualFlows.get(tab.id);
             manualFlows.delete(tab.id);
-            if (flow?.returnTabId) {
-              await chrome.tabs.update(flow.returnTabId, { active: true }).catch(() => {});
-            }
+            await focusTab(flow?.returnTabId);
           }
           return { ok: true, loginStarted: true, tabId: tab.id };
         }
@@ -498,7 +539,7 @@ async function ensureCleLogin(record, sender, force = false) {
         ? "CLEの認証が完了していません。開いた認証画面でログインしてください。"
         : "CLEの自動再認証が完了しませんでした。CLEタブを確認してください。");
     } finally {
-      if (manual && tab?.id) manualFlows.delete(tab.id);
+      if (tab?.id) manualFlows.delete(tab.id);
       cleLoginTask = undefined;
     }
   })();
@@ -663,6 +704,10 @@ async function authResponse(message, sender) {
   if (message.type === "auth-mfa-check-auto-tab") {
     const isAuto = Boolean(sender.tab && await isAutoCollectTabId(sender.tab.id));
     return { ok: true, isAutoCollect: isAuto };
+  }
+
+  if (message.type === "auth-focus-pending-mfa") {
+    return { ok: true, ...await focusPendingMfaTab() };
   }
 
   if (message.type === "auth-close-tab") {
@@ -862,7 +907,16 @@ async function authResponse(message, sender) {
   if (message.type === "auth-totp") {
     const origin = new URL(sender.url || "").origin;
     if (origin !== MFA_ORIGIN && origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) throw new Error("MFA 認証画面以外には認証コードを渡しません。");
-    if (!record?.enabled || !record.mfaEnabled) return { ok: true };
+    if (!record?.enabled) return { ok: true };
+    if (!record.mfaEnabled) {
+      if (sender.tab?.id) {
+        await chrome.tabs.update(sender.tab.id, { active: true }).catch(() => {});
+        if (Number.isInteger(sender.tab.windowId)) {
+          await chrome.windows.update(sender.tab.windowId, { focused: true }).catch(() => {});
+        }
+      }
+      return { ok: true, mfaRequired: true };
+    }
     const credentials = await decryptCredentials(record);
     if (!credentials.mfaConsent || !credentials.totpSecret) return { ok: true };
     return { ok: true, code: await generateTotp(credentials.totpSecret), autoSubmit: true };
