@@ -748,7 +748,7 @@ function Settings({
       
       chromeObj.tabs.create({
         url: "about:blank",
-        active: true
+        active: false
       }, (tab: any) => {
         if (!tab || !tab.id) {
           setSaving(false);
@@ -768,7 +768,6 @@ function Settings({
             setShowMfaWizardModal(false);
             return;
           }
-          chromeObj.windows?.update?.(tab.windowId, { focused: true });
           chromeObj.tabs.update(tab.id, {
             url: "https://auth-mfa.auth.osaka-u.ac.jp/AttributeRegistSite/MfaInfoServlet#auto-collect"
           });
