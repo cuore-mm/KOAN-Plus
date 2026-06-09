@@ -21,13 +21,19 @@ const SNAPSHOT_MAX_DURATION_MS = 3 * 60 * 1000;
 const NOTICE_RESOLVE_MAX_DURATION_MS = 60 * 1000;
 const LIGHT_LEASE_KEY = "koan-plus-light-refresh-lease-v1";
 const LIGHT_ATTEMPT_KEY = "koan-plus-light-refresh-attempt-v1";
+const LIGHT_FAILURE_KEY = "koan-plus-light-refresh-failure-v1";
 const SNAPSHOT_LEASE_KEY = "koan-plus-snapshot-lease-v1";
 const SNAPSHOT_ATTEMPT_KEY = "koan-plus-snapshot-attempt-v1";
 const SNAPSHOT_COMPLETED_KEY = "koan-plus-snapshot-completed-v1";
+const SNAPSHOT_FAILURE_KEY = "koan-plus-snapshot-failure-v1";
 const NOTICE_RESOLVE_LEASE_KEY = "koan-plus-notice-resolve-lease-v1";
 const NOTICE_RESOLVE_ATTEMPT_KEY = "koan-plus-notice-resolve-attempt-v1";
+const NOTICE_RESOLVE_FAILURE_KEY = "koan-plus-notice-resolve-failure-v1";
+const NOTICE_URL_CACHE_KEY = "koan-plus-notice-url-cache-v1";
 const GRADES_LEASE_KEY = "koan-plus-grades-lease-v1";
 const GRADES_ATTEMPT_KEY = "koan-plus-grades-attempt-v1";
+const NOTICE_URL_TTL_MS = 6 * 60 * 60 * 1000;
+const NOTICE_URL_FAILURE_TTL_MS = 10 * 60 * 1000;
 
 export const GENRES = [
   "授業",
@@ -81,6 +87,7 @@ export type KoanData = {
   coursesUpdatedAt: string | null;
   changesUpdatedAt: string | null;
   noticesUpdatedAt: string | null;
+  snapshotGenreSyncAt?: Record<string, string>;
 };
 export type GradeHistoryItem = {
   code: string;
@@ -123,6 +130,8 @@ export type GradeData = {
 const normalize = (value: unknown) => String(value || "").replace(/\s+/g, " ").trim();
 const pause = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
+const htmlRequests = new Map<string, Promise<{ doc: Document; url: string }>>();
+const noticeResolveRequests = new Map<string, Promise<string | null>>();
 
 
 function parseDateKey(value: string) {
@@ -144,35 +153,121 @@ function requireKoanUrl(url: string) {
 
 async function fetchHtml(url: string, options?: RequestInit) {
   requireKoanUrl(url);
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const method = options?.method || "GET";
+  const key = method === "GET" ? url : "";
+  const existing = key ? htmlRequests.get(key) : undefined;
+  if (existing) return existing;
+  const request = (async () => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        credentials: "include",
+        redirect: "follow",
+        ...options,
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`KOANの取得に失敗しました (${response.status})。`);
+      }
+      return {
+        doc: new DOMParser().parseFromString(await response.text(), "text/html"),
+        url: response.url,
+      };
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("KOANの応答が15秒以内に返りませんでした。");
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  })();
+  if (key) htmlRequests.set(key, request);
   try {
-    const response = await fetch(url, {
-      credentials: "include",
-      redirect: "follow",
-      ...options,
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`KOANの取得に失敗しました (${response.status})。`);
-    }
-    return {
-      doc: new DOMParser().parseFromString(await response.text(), "text/html"),
-      url: response.url,
-    };
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("KOANの応答が15秒以内に返りませんでした。");
-    }
-    throw error;
+    return await request;
   } finally {
-    window.clearTimeout(timeout);
+    if (key && htmlRequests.get(key) === request) htmlRequests.delete(key);
   }
 }
 
 function readTimestamp(key: string) {
   const value = Number.parseInt(localStorage.getItem(key) || "", 10);
   return Number.isFinite(value) ? value : 0;
+}
+
+type FailureState = {
+  count: number;
+  nextRetryAt: number;
+};
+
+export type SnapshotAvailability = {
+  blockedUntil: number;
+  reason: "completed" | "retry" | "backoff" | "syncing" | "resolving" | null;
+};
+
+function readFailureState(key: string): FailureState {
+  try {
+    const state = JSON.parse(localStorage.getItem(key) || "{}") as Partial<FailureState>;
+    return {
+      count: Number.isFinite(state.count) ? Number(state.count) : 0,
+      nextRetryAt: Number.isFinite(state.nextRetryAt) ? Number(state.nextRetryAt) : 0,
+    };
+  } catch {
+    return { count: 0, nextRetryAt: 0 };
+  }
+}
+
+function requireRetryAvailable(key: string, label: string) {
+  const retryAt = readFailureState(key).nextRetryAt;
+  if (retryAt <= Date.now()) return;
+  const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
+  throw new Error(`${label}は失敗後の待機中です。${seconds}秒後に再試行できます。`);
+}
+
+function recordFailure(key: string) {
+  const previous = readFailureState(key);
+  const count = previous.count + 1;
+  const delay = Math.min(60 * 60 * 1000, 60 * 1000 * (2 ** Math.min(count - 1, 6)));
+  localStorage.setItem(key, JSON.stringify({
+    count,
+    nextRetryAt: Date.now() + delay,
+  }));
+}
+
+export function getSnapshotAvailability(): SnapshotAvailability {
+  const now = Date.now();
+  const snapshotLeaseUntil = readTimestamp(SNAPSHOT_LEASE_KEY);
+  if (snapshotLeaseUntil > now) {
+    return { blockedUntil: snapshotLeaseUntil, reason: "syncing" };
+  }
+  const noticeResolveLeaseUntil = readTimestamp(NOTICE_RESOLVE_LEASE_KEY);
+  if (noticeResolveLeaseUntil > now) {
+    return { blockedUntil: noticeResolveLeaseUntil, reason: "resolving" };
+  }
+  const candidates: Array<{
+    blockedUntil: number;
+    reason: SnapshotAvailability["reason"];
+  }> = [
+    {
+      blockedUntil: readTimestamp(SNAPSHOT_COMPLETED_KEY) + SNAPSHOT_TTL_MS,
+      reason: "completed",
+    },
+    {
+      blockedUntil: readTimestamp(SNAPSHOT_ATTEMPT_KEY) + 10 * 60 * 1000,
+      reason: "retry",
+    },
+    {
+      blockedUntil: readFailureState(SNAPSHOT_FAILURE_KEY).nextRetryAt,
+      reason: "backoff",
+    },
+  ];
+  return candidates
+    .filter((candidate) => candidate.blockedUntil > now)
+    .sort((left, right) => right.blockedUntil - left.blockedUntil)[0] || {
+      blockedUntil: 0,
+      reason: null,
+    };
 }
 
 function timestampValue(value: string | null | undefined) {
@@ -655,6 +750,7 @@ export async function refreshLight(
   },
 ) {
   const force = Boolean(options?.force);
+  requireRetryAvailable(LIGHT_FAILURE_KEY, "KOAN通常更新");
   if (!force) {
     requireCooldown(LIGHT_ATTEMPT_KEY, 60 * 1000, "通常更新の再試行は1分後にできます。");
   }
@@ -797,7 +893,7 @@ export async function refreshLight(
       changesResult.updatedAt,
       boardResult.updatedAt,
     ]);
-    return {
+    const result = {
       schedule: schedule.length ? schedule : parseSchedule(portal.doc),
       courses: coursesResult.courses,
       changes: changesResult.changes,
@@ -809,15 +905,24 @@ export async function refreshLight(
       changesUpdatedAt: changesResult.updatedAt,
       noticesUpdatedAt: boardResult.updatedAt,
     };
+    localStorage.removeItem(LIGHT_FAILURE_KEY);
+    return result;
+  } catch (error) {
+    recordFailure(LIGHT_FAILURE_KEY);
+    throw error;
   } finally {
     options?.onProgress?.("");
     release();
   }
 }
 
-async function fetchGenre(genre: string, deadline: number) {
+async function fetchGenre(
+  root: { doc: Document; url: string },
+  genre: string,
+  deadline: number,
+  knownKeys: Set<string>,
+) {
   requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
-  const root = await fetchHtml(BOARD_URL);
   const link = [...root.doc.querySelectorAll("a")].find(
     (item) => normalize(item.textContent) === genre,
   );
@@ -828,7 +933,11 @@ async function fetchGenre(genre: string, deadline: number) {
   const notices: Notice[] = [];
   const visited = new Set<string>();
   for (let index = 0; index < MAX_BOARD_PAGES_PER_GENRE; index += 1) {
-    notices.push(...parseNotices(page.doc, page.url));
+    const pageNotices = parseNotices(page.doc, page.url);
+    notices.push(...pageNotices);
+    if (knownKeys.size && pageNotices.some((notice) => knownKeys.has(noticeKey(notice)))) {
+      break;
+    }
     const next = [...page.doc.querySelectorAll("a")].find(
       (item) => normalize(item.textContent) === "次へ >>",
     );
@@ -843,7 +952,11 @@ async function fetchGenre(genre: string, deadline: number) {
   return notices;
 }
 
-export async function refreshSnapshot(onProgress?: (value: string) => void) {
+export async function refreshSnapshot(
+  previous: KoanData,
+  onProgress?: (value: string) => void,
+) {
+  requireRetryAvailable(SNAPSHOT_FAILURE_KEY, "掲示同期");
   requireCooldown(SNAPSHOT_COMPLETED_KEY, SNAPSHOT_TTL_MS, "掲示同期は6時間に1回までです。");
   requireCooldown(SNAPSHOT_ATTEMPT_KEY, 10 * 60 * 1000, "掲示同期の再試行は10分後にできます。");
   requireNoActiveLease(NOTICE_RESOLVE_LEASE_KEY, "掲示を検索中です。完了後に同期してください。");
@@ -852,65 +965,157 @@ export async function refreshSnapshot(onProgress?: (value: string) => void) {
   try {
     const notices: Notice[] = [];
     const deadline = Date.now() + SNAPSHOT_MAX_DURATION_MS;
+    const root = await fetchHtml(BOARD_URL);
+    requireLogin(root.doc);
+    const syncAt = new Date().toISOString();
+    const snapshotGenreSyncAt = { ...(previous.snapshotGenreSyncAt || {}) };
     for (const [index, genre] of GENRES.entries()) {
       onProgress?.(`${index + 1}/${GENRES.length} ${genre}`);
-      notices.push(...(await fetchGenre(genre, deadline)));
+      const knownKeys = new Set(
+        previous.notices
+          .filter((notice) => notice.genre === genre)
+          .map(noticeKey),
+      );
+      notices.push(...(await fetchGenre(root, genre, deadline, knownKeys)));
+      snapshotGenreSyncAt[genre] = syncAt;
       await pause(BOARD_REQUEST_GAP_MS);
       requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
     }
     localStorage.setItem(SNAPSHOT_COMPLETED_KEY, String(Date.now()));
     onProgress?.("");
-    return {
+    const result = {
       notices: mergeNotices(notices),
-      snapshotUpdatedAt: new Date().toISOString(),
+      snapshotUpdatedAt: syncAt,
+      snapshotGenreSyncAt,
     };
+    localStorage.removeItem(SNAPSHOT_FAILURE_KEY);
+    return result;
+  } catch (error) {
+    recordFailure(SNAPSHOT_FAILURE_KEY);
+    throw error;
   } finally {
     release();
   }
 }
 
-export async function resolveNoticeUrl(notice: Notice): Promise<string | null> {
-  requireNoActiveLease(SNAPSHOT_LEASE_KEY, "掲示同期中です。完了後に掲示を開いてください。");
-  requireCooldown(NOTICE_RESOLVE_ATTEMPT_KEY, 10 * 1000, "掲示を開く操作は10秒後に再試行できます。");
-  const release = acquireLease(NOTICE_RESOLVE_LEASE_KEY, NOTICE_RESOLVE_MAX_DURATION_MS + REQUEST_TIMEOUT_MS, "別の掲示を検索中です。");
-  localStorage.setItem(NOTICE_RESOLVE_ATTEMPT_KEY, String(Date.now()));
+type NoticeUrlCacheEntry = {
+  url: string | null;
+  expiresAt: number;
+};
+
+function readNoticeUrlCache() {
   try {
-  const deadline = Date.now() + NOTICE_RESOLVE_MAX_DURATION_MS;
-  const target = noticeKey(notice);
-  const root = await fetchHtml(BOARD_URL);
-  const unreadMatch = parseNotices(root.doc, root.url, true).find(
-    (candidate) => noticeKey(candidate) === target,
-  );
-  if (unreadMatch) return unreadMatch.href;
+    return JSON.parse(localStorage.getItem(NOTICE_URL_CACHE_KEY) || "{}") as Record<
+      string,
+      NoticeUrlCacheEntry
+    >;
+  } catch {
+    return {};
+  }
+}
 
-  const genreLink = [...root.doc.querySelectorAll("a")].find(
-    (item) => normalize(item.textContent) === notice.genre,
-  );
-  if (!genreLink) return null;
+function cacheNoticeUrl(key: string, url: string | null) {
+  const cache = readNoticeUrlCache();
+  const now = Date.now();
+  for (const [cachedKey, entry] of Object.entries(cache)) {
+    if (!entry || entry.expiresAt <= now) delete cache[cachedKey];
+  }
+  cache[key] = {
+    url,
+    expiresAt: now + (url ? NOTICE_URL_TTL_MS : NOTICE_URL_FAILURE_TTL_MS),
+  };
+  localStorage.setItem(NOTICE_URL_CACHE_KEY, JSON.stringify(cache));
+}
 
-  let page = await fetchHtml(
-    new URL(genreLink.getAttribute("href") || "", root.url).href,
-  );
-  const visited = new Set<string>();
-  for (let index = 0; index < MAX_BOARD_PAGES_PER_GENRE; index += 1) {
-    const match = parseNotices(page.doc, page.url).find(
+async function findNoticeUrl(
+  notice: Notice,
+  snapshotNotices: Notice[],
+): Promise<string | null> {
+  requireRetryAvailable(NOTICE_RESOLVE_FAILURE_KEY, "掲示の検索");
+  requireNoActiveLease(SNAPSHOT_LEASE_KEY, "掲示同期中です。完了後に掲示を開いてください。");
+  const release = acquireLease(NOTICE_RESOLVE_LEASE_KEY, NOTICE_RESOLVE_MAX_DURATION_MS + REQUEST_TIMEOUT_MS, "別の掲示を検索中です。");
+  try {
+    const deadline = Date.now() + NOTICE_RESOLVE_MAX_DURATION_MS;
+    const target = noticeKey(notice);
+    localStorage.setItem(`${NOTICE_RESOLVE_ATTEMPT_KEY}:${target}`, String(Date.now()));
+    const snapshotMatch = snapshotNotices.find(
+      (candidate) => noticeKey(candidate) === target && candidate.live && candidate.href,
+    );
+    if (snapshotMatch) {
+      localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+      return snapshotMatch.href;
+    }
+
+    const root = await fetchHtml(BOARD_URL);
+    const unreadMatch = parseNotices(root.doc, root.url, true).find(
       (candidate) => noticeKey(candidate) === target,
     );
-    if (match) return match.href;
-    const next = [...page.doc.querySelectorAll("a")].find(
-      (item) => normalize(item.textContent) === "次へ >>",
+    if (unreadMatch) {
+      localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+      return unreadMatch.href;
+    }
+
+    const genreLink = [...root.doc.querySelectorAll("a")].find(
+      (item) => normalize(item.textContent) === notice.genre,
     );
-    if (!next || index === MAX_BOARD_PAGES_PER_GENRE - 1) break;
-    const nextUrl = new URL(next.getAttribute("href") || "", page.url).href;
-    if (visited.has(nextUrl)) break;
-    visited.add(nextUrl);
-    await pause(BOARD_REQUEST_GAP_MS);
-    requireTimeBudget(deadline, "掲示の検索は1分で中断しました。掲示板から直接開いてください。");
-    page = await fetchHtml(nextUrl);
-  }
-  return null;
+    if (!genreLink) {
+      localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+      return null;
+    }
+
+    let page = await fetchHtml(
+      new URL(genreLink.getAttribute("href") || "", root.url).href,
+    );
+    const visited = new Set<string>();
+    for (let index = 0; index < MAX_BOARD_PAGES_PER_GENRE; index += 1) {
+      const match = parseNotices(page.doc, page.url).find(
+        (candidate) => noticeKey(candidate) === target,
+      );
+      if (match) {
+        localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+        return match.href;
+      }
+      const next = [...page.doc.querySelectorAll("a")].find(
+        (item) => normalize(item.textContent) === "次へ >>",
+      );
+      if (!next || index === MAX_BOARD_PAGES_PER_GENRE - 1) break;
+      const nextUrl = new URL(next.getAttribute("href") || "", page.url).href;
+      if (visited.has(nextUrl)) break;
+      visited.add(nextUrl);
+      await pause(BOARD_REQUEST_GAP_MS);
+      requireTimeBudget(deadline, "掲示の検索は1分で中断しました。掲示板から直接開いてください。");
+      page = await fetchHtml(nextUrl);
+    }
+    localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+    return null;
+  } catch (error) {
+    recordFailure(NOTICE_RESOLVE_FAILURE_KEY);
+    throw error;
   } finally {
     release();
+  }
+}
+
+export async function resolveNoticeUrl(
+  notice: Notice,
+  snapshotNotices: Notice[] = [],
+): Promise<string | null> {
+  const key = noticeKey(notice);
+  const cached = readNoticeUrlCache()[key];
+  if (cached && cached.expiresAt > Date.now()) return cached.url;
+  const existing = noticeResolveRequests.get(key);
+  if (existing) return existing;
+  requireCooldown(`${NOTICE_RESOLVE_ATTEMPT_KEY}:${key}`, 10 * 1000, "この掲示を開く操作は10秒後に再試行できます。");
+  const request = findNoticeUrl(notice, snapshotNotices)
+    .then((url) => {
+      cacheNoticeUrl(key, url);
+      return url;
+    });
+  noticeResolveRequests.set(key, request);
+  try {
+    return await request;
+  } finally {
+    if (noticeResolveRequests.get(key) === request) noticeResolveRequests.delete(key);
   }
 }
 

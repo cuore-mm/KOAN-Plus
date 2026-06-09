@@ -20,6 +20,7 @@ const EXTENSION_ONLY_AUTH_TYPES = new Set([
   "auth-settings",
   "auth-get-secrets",
   "auth-focus-pending-mfa",
+  "auth-mfa-registration-result",
   "auth-delete",
   "auth-delete-mfa",
   "auth-save",
@@ -35,6 +36,7 @@ const manualFlows = new Map();
 let pendingMfa = null;
 const PENDING_MFA_KEY = "authPendingMfa";
 const AUTO_COLLECT_TAB_IDS_KEY = "authAutoCollectTabIds";
+const MFA_AUTO_FLOW_KEY_PREFIX = "authMfaAutoFlow:";
 const STARTUP_REFRESH_CLAIMED_KEY = "startupRefreshClaimed";
 const DASHBOARD_REFRESH_ATTEMPT_KEY = "dashboardRefreshAttempt";
 const autoCollectTabIds = new Set();
@@ -44,6 +46,15 @@ let dashboardRefreshClaimTask = Promise.resolve();
 chrome.tabs.onRemoved.addListener((tabId) => {
   autoCollectTabIds.delete(tabId);
   void persistAutoCollectTabIds();
+  void readMfaAutoFlow(tabId).then((flow) => {
+    if (flow && flow.status !== "saved") {
+      return writeMfaAutoFlow(tabId, {
+        status: "cancelled",
+        error: "MFA登録が完了する前に画面が閉じられました。",
+        completedAt: Date.now(),
+      });
+    }
+  }).catch(() => {});
   void readPendingMfa().then((value) => {
     if (value?.tabId === tabId) return clearPendingMfa();
   }).catch(() => {});
@@ -301,6 +312,48 @@ async function removeAutoCollectTabId(tabId) {
 async function isAutoCollectTabId(tabId) {
   await restoreAutoCollectTabIds();
   return autoCollectTabIds.has(tabId);
+}
+
+function mfaAutoFlowKey(tabId) {
+  return `${MFA_AUTO_FLOW_KEY_PREFIX}${tabId}`;
+}
+
+async function readMfaAutoFlow(tabId) {
+  if (!chrome.storage?.session) return null;
+  const key = mfaAutoFlowKey(tabId);
+  const stored = await chrome.storage.session.get(key);
+  return stored[key] || null;
+}
+
+async function writeMfaAutoFlow(tabId, value) {
+  if (!chrome.storage?.session) return;
+  await chrome.storage.session.set({ [mfaAutoFlowKey(tabId)]: value });
+}
+
+async function beginMfaAutoFlow(tabId) {
+  const current = await readMfaAutoFlow(tabId);
+  if (current?.status === "saved") return;
+  await writeMfaAutoFlow(tabId, {
+    status: "pending",
+    startedAt: current?.startedAt || Date.now(),
+  });
+}
+
+async function consumeMfaAutoFlow(tabId) {
+  const key = mfaAutoFlowKey(tabId);
+  let flow = await readMfaAutoFlow(tabId);
+  if (flow?.status === "pending" && !await tabExists(tabId)) {
+    flow = {
+      ...flow,
+      status: "cancelled",
+      error: "MFA登録が完了する前に画面が閉じられました。",
+      completedAt: Date.now(),
+    };
+  }
+  if (flow?.status === "saved" || flow?.status === "cancelled") {
+    await chrome.storage.session.remove(key);
+  }
+  return flow;
 }
 
 async function savePendingMfa(value) {
@@ -681,17 +734,17 @@ async function authResponse(message, sender) {
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: sender.tab.id },
       world: "MAIN",
-      func: () => {
+      func: (forceFallback) => {
         const viewIdInput = document.querySelector('input[name="viewId"]');
         const isDisplayPage = viewIdInput?.value === "MfaInfoDisplay.jsp" ||
           document.body.innerText.includes("MFA情報表示");
         if (!isDisplayPage) {
-          return { clicked: false, method: "not-display-page" };
+          return { started: false, method: "not-display-page" };
         }
 
-        if (typeof globalThis.execSrvStatus === "function") {
+        if (!forceFallback && typeof globalThis.execSrvStatus === "function") {
           globalThis.execSrvStatus("register");
-          return { clicked: true, method: "execSrvStatus" };
+          return { started: true, method: "execSrvStatus" };
         }
 
         const button = [...document.querySelectorAll('input[type="button"], input[type="submit"], button')].find((candidate) =>
@@ -700,7 +753,7 @@ async function authResponse(message, sender) {
         );
         if (button instanceof HTMLElement) {
           button.click();
-          return { clicked: true, method: "button-click-main" };
+          return { started: true, method: "button-click-main" };
         }
 
         const form = document.forms.namedItem("cmdForm") || document.querySelector("form");
@@ -708,13 +761,14 @@ async function authResponse(message, sender) {
         if (form instanceof HTMLFormElement && methodName instanceof HTMLInputElement) {
           methodName.value = "register";
           HTMLFormElement.prototype.submit.call(form);
-          return { clicked: true, method: "form-submit-fallback" };
+          return { started: true, method: "form-submit-fallback" };
         }
 
-        return { clicked: false, method: "no-target" };
+        return { started: false, method: "no-target" };
       },
+      args: [message.forceFallback === true],
     });
-    return { ok: true, ...(execution?.result || { clicked: false }) };
+    return { ok: true, ...(execution?.result || { started: false }) };
   }
 
   if (message.type === "auth-mfa-confirm-save") {
@@ -766,6 +820,10 @@ async function authResponse(message, sender) {
       payload,
     });
     await clearPendingMfa();
+    await writeMfaAutoFlow(sender.tab.id, {
+      status: "saved",
+      completedAt: Date.now(),
+    });
     return { ok: true };
   }
 
@@ -796,6 +854,7 @@ async function authResponse(message, sender) {
     const tabId = requestedTabId || sender.tab?.id;
     if (tabId) {
       await addAutoCollectTabId(tabId);
+      await beginMfaAutoFlow(tabId);
     }
     return { ok: true };
   }
@@ -810,6 +869,19 @@ async function authResponse(message, sender) {
 
   if (message.type === "auth-focus-pending-mfa") {
     return { ok: true, ...await focusPendingMfaTab() };
+  }
+
+  if (message.type === "auth-mfa-registration-result") {
+    const tabId = Number(message.tabId);
+    if (!Number.isInteger(tabId)) {
+      throw new Error("MFA登録タブを特定できませんでした。");
+    }
+    const flow = await consumeMfaAutoFlow(tabId);
+    return {
+      ok: true,
+      status: flow?.status || "cancelled",
+      error: flow?.error || "",
+    };
   }
 
   if (message.type === "auth-close-tab") {
@@ -995,17 +1067,26 @@ async function authResponse(message, sender) {
       func: () => {
         if (typeof globalThis.LoginSubmit === "function") {
           globalThis.LoginSubmit("ログイン");
-          return true;
+          return { started: true, method: "LoginSubmit" };
         }
         const submit = document.querySelector('input[name="cmdForm.Submit"]');
         if (submit instanceof HTMLInputElement) {
           submit.click();
-          return true;
+          return { started: true, method: "button-click" };
         }
-        return false;
+        const form = document.forms.namedItem("cmdForm") || document.querySelector("form");
+        if (form instanceof HTMLFormElement) {
+          if (typeof form.requestSubmit === "function") {
+            form.requestSubmit();
+          } else {
+            HTMLFormElement.prototype.submit.call(form);
+          }
+          return { started: true, method: "form-submit" };
+        }
+        return { started: false, method: "no-target" };
       },
     });
-    return { ok: true, submitted: execution?.result === true };
+    return { ok: true, ...(execution?.result || { started: false, method: "no-result" }) };
   }
 
   if (message.type === "auth-totp") {

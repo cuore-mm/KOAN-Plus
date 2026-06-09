@@ -79,17 +79,24 @@ actions.
   a short interval, the current schedule uses a medium interval, future
   schedule pages use a longer interval, and course registration mappings are
   refreshed daily.
-- CLE refreshes reuse cached data by category. Message summaries refresh more
-  often than assignment lists, course mappings refresh much less often, and
-  assignment status enrichment has its own longer interval because it costs
+- CLE refreshes reuse cached data by category. Message summaries normally use a
+  15-minute cache, assignment lists 10 minutes, and course mappings 24 hours.
+  Assignment status enrichment uses status-aware intervals because it costs
   additional per-assignment requests.
 - CLE assignment status enrichment prioritizes nearby unfinished assignments.
   Graded items are not rechecked; submitted and expired items use longer
   intervals.
-- Bulletin snapshot sync runs only when the user presses **掲示を同期**. It
-  follows pagination with delays and stores list metadata only.
+- CLE announcements are fetched progressively for currently enrolled courses.
+  The selected and recently used courses are prioritized, with at most four
+  courses fetched per refresh and a separate two-hour cache per course.
+- Bulletin snapshot sync runs only when the user presses **掲示を同期**. The
+  first run builds the snapshot; later runs stop paging per genre when a
+  previously known bulletin is reached.
 - Bulletin bodies are not prefetched because opening a detail page may change
   unread state.
+- Expired cached data remains visible while refreshes run. Identical in-flight
+  URL requests are shared, and repeated failures use per-target exponential
+  backoff.
 - Grade data is fetched only when the user opens the grade tab and presses
   **成績を取得**.
 

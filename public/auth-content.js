@@ -13,6 +13,79 @@
 
   const visibleText = (element) => (element.textContent || element.value || "").replace(/\s+/g, " ").trim();
 
+  const proceedMfaRegistration = (proceedBtn) => {
+    let transitionObserved = false;
+    const markTransition = () => {
+      transitionObserved = true;
+    };
+    const form = proceedBtn.form || proceedBtn.closest("form");
+    form?.addEventListener("submit", markTransition, { once: true });
+    window.addEventListener("pagehide", markTransition, { once: true });
+
+    chrome.runtime.sendMessage({ type: "auth-mfa-click-proceed" }).then((response) => {
+      if ((!response?.ok || !response.started) && !transitionObserved) {
+        proceedBtn.click();
+      }
+    }).catch(() => {
+      if (!transitionObserved) proceedBtn.click();
+    });
+
+    window.setTimeout(() => {
+      if (transitionObserved || !document.contains(proceedBtn)) return;
+      proceedBtn.click();
+    }, 500);
+
+    window.setTimeout(() => {
+      if (transitionObserved || !document.contains(proceedBtn)) return;
+      chrome.runtime.sendMessage({
+        type: "auth-mfa-click-proceed",
+        forceFallback: true,
+      }).catch(() => {});
+    }, 1200);
+  };
+
+  const credentialsMatch = (idInput, passwordInput, credentials) => {
+    const currentId = idInput.value.trim();
+    const currentPassword = passwordInput.value;
+    const idMatches = !currentId || currentId === credentials.id;
+    const passwordMatches = !currentPassword || currentPassword === credentials.password;
+    return idMatches && passwordMatches;
+  };
+
+  const submitIdpLogin = (loginSubmit) => {
+    const form = loginSubmit.form || loginSubmit.closest("form");
+    let submissionObserved = false;
+    const markSubmitted = () => {
+      submissionObserved = true;
+    };
+    form?.addEventListener("submit", markSubmitted, { once: true });
+    window.addEventListener("pagehide", markSubmitted, { once: true });
+
+    chrome.runtime.sendMessage({ type: "auth-submit-idp" }).then((submitResponse) => {
+      if ((!submitResponse?.ok || !submitResponse.started) && !submissionObserved) {
+        loginSubmit.click();
+      }
+    }).catch(() => {
+      if (!submissionObserved) loginSubmit.click();
+    });
+
+    window.setTimeout(() => {
+      if (submissionObserved || !document.contains(loginSubmit)) return;
+      loginSubmit.click();
+    }, 500);
+
+    window.setTimeout(() => {
+      if (submissionObserved ||
+          !document.contains(loginSubmit) ||
+          !(form instanceof HTMLFormElement)) return;
+      if (typeof form.requestSubmit === "function") {
+        form.requestSubmit(loginSubmit);
+      } else {
+        loginSubmit.click();
+      }
+    }, 1200);
+  };
+
   const findOtpInput = () => {
     const explicit = document.getElementById("OTP_CODE") ||
       document.querySelector('input[name="OTP_CODE"]') ||
@@ -72,9 +145,10 @@
         clePasswordInput instanceof HTMLInputElement &&
         cleLoginSubmit instanceof HTMLElement) {
       chrome.runtime.sendMessage({ type: "auth-credentials" }).then((response) => {
-        if (!response?.ok || !response.credentials || cleIdInput.value || clePasswordInput.value) return;
-        setValue(cleIdInput, response.credentials.id);
-        setValue(clePasswordInput, response.credentials.password);
+        if (!response?.ok || !response.credentials) return;
+        if (!credentialsMatch(cleIdInput, clePasswordInput, response.credentials)) return;
+        if (!cleIdInput.value) setValue(cleIdInput, response.credentials.id);
+        if (!clePasswordInput.value) setValue(clePasswordInput, response.credentials.password);
         if (response.autoSubmit) cleLoginSubmit.click();
       });
       return;
@@ -88,14 +162,11 @@
       passwordInput instanceof HTMLInputElement &&
       loginSubmit instanceof HTMLInputElement) {
     chrome.runtime.sendMessage({ type: "auth-credentials" }).then((response) => {
-      if (!response?.ok || !response.credentials || idInput.value || passwordInput.value) return;
-      setValue(idInput, response.credentials.id);
-      setValue(passwordInput, response.credentials.password);
-      if (response.autoSubmit) {
-        chrome.runtime.sendMessage({ type: "auth-submit-idp" }).then((submitResponse) => {
-          if (!submitResponse?.ok || !submitResponse.submitted) loginSubmit.click();
-        });
-      }
+      if (!response?.ok || !response.credentials) return;
+      if (!credentialsMatch(idInput, passwordInput, response.credentials)) return;
+      if (!idInput.value) setValue(idInput, response.credentials.id);
+      if (!passwordInput.value) setValue(passwordInput, response.credentials.password);
+      if (response.autoSubmit) submitIdpLogin(loginSubmit);
     });
     return;
   }
@@ -117,13 +188,17 @@
   }
 
   if (location.origin === "https://auth-mfa.auth.osaka-u.ac.jp") {
+    let autoCollectRegistration = Promise.resolve();
     if (location.hash === "#auto-collect") {
       sessionStorage.setItem("koan-plus-mfa-auto-collect", "true");
-      chrome.runtime.sendMessage({ type: "auth-mfa-register-auto-tab" });
+      autoCollectRegistration = chrome.runtime.sendMessage({ type: "auth-mfa-register-auto-tab" })
+        .catch(() => undefined);
       history.replaceState(null, document.title, location.pathname + location.search);
     }
 
-    chrome.runtime.sendMessage({ type: "auth-mfa-check-auto-tab" }).then((response) => {
+    autoCollectRegistration.then(() =>
+      chrome.runtime.sendMessage({ type: "auth-mfa-check-auto-tab" })
+    ).then((response) => {
       const isAutoCollect = response?.isAutoCollect === true ||
         sessionStorage.getItem("koan-plus-mfa-auto-collect") === "true";
 
@@ -156,9 +231,7 @@
           btn.value?.includes("MFA登録に進む") || btn.textContent?.includes("MFA登録に進む")
         );
         if (proceedBtn instanceof HTMLElement) {
-          chrome.runtime.sendMessage({ type: "auth-mfa-click-proceed" }).then((clickRes) => {
-            if (!clickRes?.clicked) proceedBtn.click();
-          });
+          proceedMfaRegistration(proceedBtn);
           return;
         }
       }
@@ -218,7 +291,7 @@
           }
         });
       }
-    });
+    }).catch(() => {});
   }
 
   function showMfaNotification(code) {
