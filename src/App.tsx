@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import DOMPurify from "dompurify";
 import {
   BOARD_URL,
   GENRES,
@@ -630,7 +631,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
             </div>
             <div
               className="announcement-modal-body markdown-body"
-              dangerouslySetInnerHTML={{ __html: selectedAnnouncement.body }}
+              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(selectedAnnouncement.body) }}
               style={{
                 maxHeight: "50vh",
                 overflowY: "auto",
