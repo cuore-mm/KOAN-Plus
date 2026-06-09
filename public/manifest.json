@@ -35,7 +35,11 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.cle.osaka-u.ac.jp/*",
+        "https://www.cle.osaka-u.ac.jp/",
+        "https://www.cle.osaka-u.ac.jp/ultra",
+        "https://www.cle.osaka-u.ac.jp/ultra/",
+        "https://www.cle.osaka-u.ac.jp/webapps/login",
+        "https://www.cle.osaka-u.ac.jp/webapps/login/*",
         "https://ou-idp.auth.osaka-u.ac.jp/idp/*",
         "https://auth-mfa.auth.osaka-u.ac.jp/*"
       ],

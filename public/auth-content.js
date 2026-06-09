@@ -2,6 +2,7 @@
   if (window.top !== window || window.__koanPlusAuthStarted) return;
   window.__koanPlusAuthStarted = true;
   const CLE_ORIGIN = "https://www.cle.osaka-u.ac.jp";
+  const MFA_PENDING_TRANSACTION_KEY = "koan-plus-mfa-pending-transaction";
 
   const setValue = (input, value) => {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -128,17 +129,20 @@
 
       const isSuccessPage = document.body.innerText.includes("MFA登録\t：\t登録済") ||
         document.body.innerText.includes("MFA登録 ： 登録済");
-      const isPendingRegister = sessionStorage.getItem("koan-plus-mfa-pending-register") === "true";
+      const pendingTransactionId = sessionStorage.getItem(MFA_PENDING_TRANSACTION_KEY);
 
-      if (isSuccessPage && isPendingRegister) {
-        chrome.runtime.sendMessage({ type: "auth-mfa-confirm-save" }).then((confirmRes) => {
+      if (isSuccessPage && pendingTransactionId) {
+        chrome.runtime.sendMessage({
+          type: "auth-mfa-confirm-save",
+          transactionId: pendingTransactionId,
+        }).then((confirmRes) => {
           if (confirmRes?.ok && isAutoCollect) {
-            sessionStorage.removeItem("koan-plus-mfa-pending-register");
+            sessionStorage.removeItem(MFA_PENDING_TRANSACTION_KEY);
             setTimeout(() => {
               chrome.runtime.sendMessage({ type: "auth-close-tab" });
             }, 1000);
           }
-          sessionStorage.removeItem("koan-plus-mfa-pending-register");
+          if (confirmRes?.ok) sessionStorage.removeItem(MFA_PENDING_TRANSACTION_KEY);
         });
         return;
       }
@@ -181,7 +185,7 @@
           secret,
           temporaryCancelCode: cancelCode,
         }).then((saveRes) => {
-          if (!saveRes?.ok || !saveRes.code) return;
+          if (!saveRes?.ok || !saveRes.code || !saveRes.transactionId) return;
 
           const totpInput = document.querySelector('input[name="totpCode"]');
           const cancelInput = document.querySelector('input[name="temporaryCancelCode"]');
@@ -202,14 +206,14 @@
           if (isAutoCollect) {
             if (confirmBtn instanceof HTMLElement) confirmBtn.click();
             if (registerBtn instanceof HTMLElement) {
-              sessionStorage.setItem("koan-plus-mfa-pending-register", "true");
+              sessionStorage.setItem(MFA_PENDING_TRANSACTION_KEY, saveRes.transactionId);
               setTimeout(() => {
                 registerBtn.click();
               }, 1200);
             }
           } else if (registerBtn) {
             registerBtn.addEventListener("click", () => {
-              sessionStorage.setItem("koan-plus-mfa-pending-register", "true");
+              sessionStorage.setItem(MFA_PENDING_TRANSACTION_KEY, saveRes.transactionId);
             });
           }
         });

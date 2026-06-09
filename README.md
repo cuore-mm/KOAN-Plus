@@ -92,6 +92,14 @@ npm run dev
 npm run build
 ```
 
+配布用ZIPの生成:
+```sh
+npm run zip
+```
+
+`koan-plus.zip` は、生成直前にビルドした `dist/` の内容だけから作成され、
+Git では管理されません。
+
 ビルド結果のプレビュー:
 ```sh
 npm run preview

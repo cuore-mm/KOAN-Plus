@@ -11,6 +11,22 @@ const KOAN_PORTAL_URL = "https://koan.osaka-u.ac.jp/campusweb/campusportal.do?pa
 const CLE_ORIGIN = "https://www.cle.osaka-u.ac.jp";
 const CLE_HOME_URL = `${CLE_ORIGIN}/ultra`;
 const CLE_PROBE_URL = `${CLE_ORIGIN}/learn/api/v1/messages/summary?offset=0&limit=1`;
+const MFA_REGISTRATION_PATH = "/AttributeRegistSite/MfaInfoServlet";
+const MFA_PENDING_TTL_MS = 10 * 60 * 1000;
+const EXTENSION_ONLY_AUTH_TYPES = new Set([
+  "auth-check-login",
+  "auth-claim-startup-refresh",
+  "auth-claim-dashboard-refresh",
+  "auth-settings",
+  "auth-get-secrets",
+  "auth-focus-pending-mfa",
+  "auth-delete",
+  "auth-delete-mfa",
+  "auth-save",
+  "auth-ensure-koan",
+  "auth-ensure-cle",
+  "auth-refresh-cle",
+]);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 let koanLoginTask;
@@ -43,6 +59,51 @@ const fromBase64 = (value) => {
   const binary = atob(value);
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 };
+
+function senderUrl(sender) {
+  try {
+    return new URL(sender.url || sender.origin || "");
+  } catch {
+    return null;
+  }
+}
+
+function isExtensionPageSender(sender) {
+  const url = senderUrl(sender);
+  return sender.id === chrome.runtime.id &&
+    url?.protocol === "chrome-extension:" &&
+    url.host === chrome.runtime.id;
+}
+
+function isIdpSender(sender) {
+  const url = senderUrl(sender);
+  return url?.origin === AUTH_ORIGIN && url.pathname.startsWith("/idp/");
+}
+
+function isMfaSender(sender) {
+  return senderUrl(sender)?.origin === MFA_ORIGIN;
+}
+
+function isMfaRegistrationSender(sender) {
+  const url = senderUrl(sender);
+  return url?.origin === MFA_ORIGIN && url.pathname === MFA_REGISTRATION_PATH;
+}
+
+function isCleLoginSender(sender) {
+  const url = senderUrl(sender);
+  if (url?.origin !== CLE_ORIGIN) return false;
+  return url.pathname === "/" ||
+    url.pathname === "/ultra" ||
+    url.pathname === "/ultra/" ||
+    url.pathname === "/webapps/login" ||
+    url.pathname.startsWith("/webapps/login/");
+}
+
+function requireExtensionPageSender(sender) {
+  if (!isExtensionPageSender(sender)) {
+    throw new Error("この操作はKOAN Plusの画面からのみ実行できます。");
+  }
+}
 
 async function openAuthDb() {
   return new Promise((resolve, reject) => {
@@ -250,10 +311,14 @@ async function savePendingMfa(value) {
 }
 
 async function readPendingMfa() {
-  if (pendingMfa) return pendingMfa;
-  if (!chrome.storage?.session) return null;
-  const stored = await chrome.storage.session.get(PENDING_MFA_KEY);
-  pendingMfa = stored[PENDING_MFA_KEY] || null;
+  if (!pendingMfa && chrome.storage?.session) {
+    const stored = await chrome.storage.session.get(PENDING_MFA_KEY);
+    pendingMfa = stored[PENDING_MFA_KEY] || null;
+  }
+  if (pendingMfa && Date.now() - Number(pendingMfa.createdAt || 0) > MFA_PENDING_TTL_MS) {
+    pendingMfa = null;
+    if (chrome.storage?.session) await chrome.storage.session.remove(PENDING_MFA_KEY);
+  }
   return pendingMfa;
 }
 
@@ -547,6 +612,10 @@ async function ensureCleLogin(record, sender, force = false) {
 }
 
 async function authResponse(message, sender) {
+  if (EXTENSION_ONLY_AUTH_TYPES.has(message.type)) {
+    requireExtensionPageSender(sender);
+  }
+
   if (message.type === "auth-check-login") {
     const [koanProbe, cleTab] = await Promise.all([
       probeKoanLogin(),
@@ -585,21 +654,27 @@ async function authResponse(message, sender) {
   if (message.type === "auth-settings") return { ok: true, ...await readAuthSettings(record) };
 
   if (message.type === "auth-mfa-pending-save") {
+    if (!isMfaRegistrationSender(sender) || !Number.isInteger(sender.tab?.id)) {
+      throw new Error("MFA登録画面以外からは登録情報を仮保存できません。");
+    }
     const { secret, temporaryCancelCode } = message;
     if (!secret || !temporaryCancelCode) {
       throw new Error("シークレットまたは一時解除コードが指定されていません。");
     }
     decodeBase32(secret); // Validate base32 secret
+    const transactionId = crypto.randomUUID();
     await savePendingMfa({
       secret,
       temporaryCancelCode,
-      tabId: sender.tab?.id,
+      tabId: sender.tab.id,
+      transactionId,
+      createdAt: Date.now(),
     });
-    return { ok: true, code: await generateTotp(secret) };
+    return { ok: true, code: await generateTotp(secret), transactionId };
   }
 
   if (message.type === "auth-mfa-click-proceed") {
-    if (new URL(sender.url || "").origin !== MFA_ORIGIN) {
+    if (!isMfaRegistrationSender(sender)) {
       throw new Error("MFA情報画面以外では遷移操作を実行しません。");
     }
     if (!sender.tab?.id) throw new Error("MFA情報画面のタブを特定できませんでした。");
@@ -643,9 +718,30 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-mfa-confirm-save") {
+    if (!isMfaRegistrationSender(sender) || !Number.isInteger(sender.tab?.id)) {
+      throw new Error("MFA登録画面以外からは登録を確定できません。");
+    }
     const savedPendingMfa = await readPendingMfa();
     if (!savedPendingMfa) {
       return { ok: false, error: "仮保存されたMFA情報がありません。" };
+    }
+    if (
+      savedPendingMfa.tabId !== sender.tab.id ||
+      !message.transactionId ||
+      message.transactionId !== savedPendingMfa.transactionId
+    ) {
+      throw new Error("MFA登録を開始したタブと確認要求が一致しません。");
+    }
+    const [execution] = await chrome.scripting.executeScript({
+      target: { tabId: sender.tab.id },
+      func: () => {
+        const text = document.body?.innerText || "";
+        return text.includes("MFA登録\t：\t登録済") ||
+          text.includes("MFA登録 ： 登録済");
+      },
+    });
+    if (execution?.result !== true) {
+      throw new Error("MFA登録の完了画面を確認できませんでした。");
     }
     const current = record || await readAuthRecord();
     const previous = current?.payload ? await decryptCredentials(current) : {};
@@ -674,9 +770,6 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-get-secrets") {
-    if (sender.id !== chrome.runtime.id) {
-      throw new Error("この操作は拡張機能の内部からのみ許可されています。");
-    }
     if (!record?.payload) {
       return { ok: true, configured: false };
     }
@@ -694,7 +787,13 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-mfa-register-auto-tab") {
-    const tabId = message.tabId || (sender.tab && sender.tab.id);
+    const requestedTabId = Number.isInteger(message.tabId) ? message.tabId : null;
+    if (requestedTabId) {
+      requireExtensionPageSender(sender);
+    } else if (!isMfaRegistrationSender(sender)) {
+      throw new Error("MFA登録画面以外からは自動取得タブを登録できません。");
+    }
+    const tabId = requestedTabId || sender.tab?.id;
     if (tabId) {
       await addAutoCollectTabId(tabId);
     }
@@ -702,6 +801,9 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-mfa-check-auto-tab") {
+    if (!isMfaRegistrationSender(sender)) {
+      throw new Error("MFA登録画面以外からは自動取得状態を確認できません。");
+    }
     const isAuto = Boolean(sender.tab && await isAutoCollectTabId(sender.tab.id));
     return { ok: true, isAutoCollect: isAuto };
   }
@@ -711,7 +813,9 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-close-tab") {
-    if (sender.tab?.id) {
+    if (isMfaRegistrationSender(sender) &&
+        sender.tab?.id &&
+        await isAutoCollectTabId(sender.tab.id)) {
       await removeAutoCollectTabId(sender.tab.id);
       await chrome.tabs.remove(sender.tab.id);
       return { ok: true };
@@ -859,8 +963,7 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-auto-login-state") {
-    const origin = new URL(sender.url || "").origin;
-    if (origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) {
+    if (!isIdpSender(sender) && !isCleLoginSender(sender)) {
       throw new Error("認証画面以外には自動ログイン状態を渡しません。");
     }
     const settings = await readAuthSettings(record);
@@ -872,8 +975,9 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-credentials") {
-    const origin = new URL(sender.url || "").origin;
-    if (origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) throw new Error("認証画面以外には認証情報を渡しません。");
+    if (!isIdpSender(sender) && !isCleLoginSender(sender)) {
+      throw new Error("認証画面以外には認証情報を渡しません。");
+    }
     if (!record?.enabled) return { ok: true };
     const credentials = await decryptCredentials(record);
     if (!credentials.id || !credentials.password) {
@@ -883,7 +987,7 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-submit-idp") {
-    if (new URL(sender.url || "").origin !== AUTH_ORIGIN) throw new Error("認証基盤以外ではログイン送信を実行しません。");
+    if (!isIdpSender(sender)) throw new Error("認証基盤以外ではログイン送信を実行しません。");
     if (!sender.tab?.id) throw new Error("認証基盤のタブを特定できませんでした。");
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: sender.tab.id },
@@ -905,8 +1009,9 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-totp") {
-    const origin = new URL(sender.url || "").origin;
-    if (origin !== MFA_ORIGIN && origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) throw new Error("MFA 認証画面以外には認証コードを渡しません。");
+    if (!isMfaSender(sender) && !isIdpSender(sender)) {
+      throw new Error("MFA認証画面以外には認証コードを渡しません。");
+    }
     if (!record?.enabled) return { ok: true };
     if (!record.mfaEnabled) {
       if (sender.tab?.id) {
@@ -950,6 +1055,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!target) return;
 
   (async () => {
+    requireExtensionPageSender(sender);
     const requestUrl = new URL(message.request?.url);
     const method = message.request?.options?.method || "GET";
     if (requestUrl.origin !== target.origin) {
