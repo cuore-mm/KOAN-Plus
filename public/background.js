@@ -11,6 +11,23 @@ const KOAN_PORTAL_URL = "https://koan.osaka-u.ac.jp/campusweb/campusportal.do?pa
 const CLE_ORIGIN = "https://www.cle.osaka-u.ac.jp";
 const CLE_HOME_URL = `${CLE_ORIGIN}/ultra`;
 const CLE_PROBE_URL = `${CLE_ORIGIN}/learn/api/v1/messages/summary?offset=0&limit=1`;
+const MFA_REGISTRATION_PATH = "/AttributeRegistSite/MfaInfoServlet";
+const MFA_PENDING_TTL_MS = 10 * 60 * 1000;
+const EXTENSION_ONLY_AUTH_TYPES = new Set([
+  "auth-check-login",
+  "auth-claim-startup-refresh",
+  "auth-claim-dashboard-refresh",
+  "auth-settings",
+  "auth-get-secrets",
+  "auth-focus-pending-mfa",
+  "auth-mfa-registration-result",
+  "auth-delete",
+  "auth-delete-mfa",
+  "auth-save",
+  "auth-ensure-koan",
+  "auth-ensure-cle",
+  "auth-refresh-cle",
+]);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 let koanLoginTask;
@@ -19,6 +36,7 @@ const manualFlows = new Map();
 let pendingMfa = null;
 const PENDING_MFA_KEY = "authPendingMfa";
 const AUTO_COLLECT_TAB_IDS_KEY = "authAutoCollectTabIds";
+const MFA_AUTO_FLOW_KEY_PREFIX = "authMfaAutoFlow:";
 const STARTUP_REFRESH_CLAIMED_KEY = "startupRefreshClaimed";
 const DASHBOARD_REFRESH_ATTEMPT_KEY = "dashboardRefreshAttempt";
 const autoCollectTabIds = new Set();
@@ -28,6 +46,15 @@ let dashboardRefreshClaimTask = Promise.resolve();
 chrome.tabs.onRemoved.addListener((tabId) => {
   autoCollectTabIds.delete(tabId);
   void persistAutoCollectTabIds();
+  void readMfaAutoFlow(tabId).then((flow) => {
+    if (flow && flow.status !== "saved") {
+      return writeMfaAutoFlow(tabId, {
+        status: "cancelled",
+        error: "MFA登録が完了する前に画面が閉じられました。",
+        completedAt: Date.now(),
+      });
+    }
+  }).catch(() => {});
   void readPendingMfa().then((value) => {
     if (value?.tabId === tabId) return clearPendingMfa();
   }).catch(() => {});
@@ -43,6 +70,51 @@ const fromBase64 = (value) => {
   const binary = atob(value);
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 };
+
+function senderUrl(sender) {
+  try {
+    return new URL(sender.url || sender.origin || "");
+  } catch {
+    return null;
+  }
+}
+
+function isExtensionPageSender(sender) {
+  const url = senderUrl(sender);
+  return sender.id === chrome.runtime.id &&
+    url?.protocol === "chrome-extension:" &&
+    url.host === chrome.runtime.id;
+}
+
+function isIdpSender(sender) {
+  const url = senderUrl(sender);
+  return url?.origin === AUTH_ORIGIN && url.pathname.startsWith("/idp/");
+}
+
+function isMfaSender(sender) {
+  return senderUrl(sender)?.origin === MFA_ORIGIN;
+}
+
+function isMfaRegistrationSender(sender) {
+  const url = senderUrl(sender);
+  return url?.origin === MFA_ORIGIN && url.pathname === MFA_REGISTRATION_PATH;
+}
+
+function isCleLoginSender(sender) {
+  const url = senderUrl(sender);
+  if (url?.origin !== CLE_ORIGIN) return false;
+  return url.pathname === "/" ||
+    url.pathname === "/ultra" ||
+    url.pathname === "/ultra/" ||
+    url.pathname === "/webapps/login" ||
+    url.pathname.startsWith("/webapps/login/");
+}
+
+function requireExtensionPageSender(sender) {
+  if (!isExtensionPageSender(sender)) {
+    throw new Error("この操作はKOAN Plusの画面からのみ実行できます。");
+  }
+}
 
 async function openAuthDb() {
   return new Promise((resolve, reject) => {
@@ -242,6 +314,48 @@ async function isAutoCollectTabId(tabId) {
   return autoCollectTabIds.has(tabId);
 }
 
+function mfaAutoFlowKey(tabId) {
+  return `${MFA_AUTO_FLOW_KEY_PREFIX}${tabId}`;
+}
+
+async function readMfaAutoFlow(tabId) {
+  if (!chrome.storage?.session) return null;
+  const key = mfaAutoFlowKey(tabId);
+  const stored = await chrome.storage.session.get(key);
+  return stored[key] || null;
+}
+
+async function writeMfaAutoFlow(tabId, value) {
+  if (!chrome.storage?.session) return;
+  await chrome.storage.session.set({ [mfaAutoFlowKey(tabId)]: value });
+}
+
+async function beginMfaAutoFlow(tabId) {
+  const current = await readMfaAutoFlow(tabId);
+  if (current?.status === "saved") return;
+  await writeMfaAutoFlow(tabId, {
+    status: "pending",
+    startedAt: current?.startedAt || Date.now(),
+  });
+}
+
+async function consumeMfaAutoFlow(tabId) {
+  const key = mfaAutoFlowKey(tabId);
+  let flow = await readMfaAutoFlow(tabId);
+  if (flow?.status === "pending" && !await tabExists(tabId)) {
+    flow = {
+      ...flow,
+      status: "cancelled",
+      error: "MFA登録が完了する前に画面が閉じられました。",
+      completedAt: Date.now(),
+    };
+  }
+  if (flow?.status === "saved" || flow?.status === "cancelled") {
+    await chrome.storage.session.remove(key);
+  }
+  return flow;
+}
+
 async function savePendingMfa(value) {
   pendingMfa = value;
   if (chrome.storage?.session) {
@@ -250,10 +364,14 @@ async function savePendingMfa(value) {
 }
 
 async function readPendingMfa() {
-  if (pendingMfa) return pendingMfa;
-  if (!chrome.storage?.session) return null;
-  const stored = await chrome.storage.session.get(PENDING_MFA_KEY);
-  pendingMfa = stored[PENDING_MFA_KEY] || null;
+  if (!pendingMfa && chrome.storage?.session) {
+    const stored = await chrome.storage.session.get(PENDING_MFA_KEY);
+    pendingMfa = stored[PENDING_MFA_KEY] || null;
+  }
+  if (pendingMfa && Date.now() - Number(pendingMfa.createdAt || 0) > MFA_PENDING_TTL_MS) {
+    pendingMfa = null;
+    if (chrome.storage?.session) await chrome.storage.session.remove(PENDING_MFA_KEY);
+  }
   return pendingMfa;
 }
 
@@ -321,23 +439,30 @@ async function ensureKoanTab(active = false) {
   return tab;
 }
 
+async function focusTab(tabId) {
+  if (!tabId) return;
+  const tab = await chrome.tabs.update(tabId, { active: true }).catch(() => null);
+  if (Number.isInteger(tab?.windowId)) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  }
+}
+
 async function returnToDashboard(flowTabId) {
   const flow = manualFlows.get(flowTabId);
   if (!flow) return;
   manualFlows.delete(flowTabId);
-  if (flow.returnTabId) {
-    await chrome.tabs.update(flow.returnTabId, { active: true }).catch(() => {});
-  }
+  await focusTab(flow.returnTabId);
   await chrome.tabs.remove(flowTabId).catch(() => {});
 }
 
 async function openLoginTab(url, record, sender, activeWhenManual = true) {
   const manual = !record?.enabled || !record.payload;
+  const guideMfa = Boolean(record?.enabled && record.payload && !record.mfaEnabled);
   const tab = await chrome.tabs.create({
     url,
     active: manual ? activeWhenManual : false,
   });
-  if (manual && tab.id) {
+  if ((manual || guideMfa) && tab.id) {
     manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
   }
   return { manual, tab };
@@ -374,16 +499,15 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
         const probe = await probeKoanLogin();
         if (probe.ok) {
           if (tab.id) {
+            const shouldReturn = manualFlows.has(tab.id);
             if (requireTab) {
-              if (manual) {
+              if (shouldReturn) {
                 const flow = manualFlows.get(tab.id);
                 manualFlows.delete(tab.id);
-                if (flow?.returnTabId) {
-                  await chrome.tabs.update(flow.returnTabId, { active: true }).catch(() => {});
-                }
+                await focusTab(flow?.returnTabId);
               }
               await waitForTabComplete(tab.id);
-            } else if (manual) {
+            } else if (shouldReturn) {
               await returnToDashboard(tab.id);
             } else {
               await chrome.tabs.remove(tab.id);
@@ -402,7 +526,7 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
         ? "認証が完了していません。開いた認証画面でログインしてください。"
         : "KOANの自動ログインが完了しませんでした。開いた認証画面を確認してから、もう一度更新してください。");
     } finally {
-      if (manual && tab.id) manualFlows.delete(tab.id);
+      if (tab.id) manualFlows.delete(tab.id);
       koanLoginTask = undefined;
     }
   })();
@@ -460,6 +584,42 @@ async function findReadyCleTab() {
   return candidates.find((candidate, index) => readiness[index]) || null;
 }
 
+async function focusPendingMfaTab() {
+  const tabs = await chrome.tabs.query({ url: [
+    `${AUTH_ORIGIN}/*`,
+    `${MFA_ORIGIN}/*`,
+    `${CLE_ORIGIN}/*`,
+  ] });
+  for (const tab of tabs) {
+    if (!tab.id || tab.discarded) continue;
+    try {
+      const [execution] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const text = `${document.title} ${document.body?.innerText || ""}`;
+          const hasOtpInput = [...document.querySelectorAll("input")].some((input) => {
+            const hint = [input.id, input.name, input.autocomplete, input.placeholder].join(" ");
+            return input instanceof HTMLInputElement &&
+              !["hidden", "checkbox", "submit", "button"].includes(input.type) &&
+              (/otp|one-time|auth.?code|certification|secondaryAuthToken/i.test(hint) || input.maxLength === 6);
+          });
+          return hasOtpInput && /認証コード|ワンタイムパスワード|OTP|MFA認証|Type the Code/i.test(text);
+        },
+      });
+      if (execution?.result === true) {
+        await chrome.tabs.update(tab.id, { active: true });
+        if (Number.isInteger(tab.windowId)) {
+          await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+        }
+        return { found: true, tabId: tab.id };
+      }
+    } catch {
+      // Ignore tabs that are navigating or cannot be inspected.
+    }
+  }
+  return { found: false };
+}
+
 async function ensureCleLogin(record, sender, force = false) {
   let tab = !force ? await findReadyCleTab() : await findCleTab();
   if (!force && tab?.id) {
@@ -470,10 +630,11 @@ async function ensureCleLogin(record, sender, force = false) {
 
   cleLoginTask = (async () => {
     const manual = !record?.enabled || !record.payload;
+    const guideMfa = Boolean(record?.enabled && record.payload && !record.mfaEnabled);
     if (!tab?.id) {
       ({ tab } = await openLoginTab(CLE_HOME_URL, record, sender));
     } else {
-      if (manual) manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
+      if (manual || guideMfa) manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
       await chrome.tabs.update(tab.id, { url: CLE_HOME_URL, active: manual });
     }
     try {
@@ -484,12 +645,10 @@ async function ensureCleLogin(record, sender, force = false) {
           throw new Error("CLE認証画面が閉じられたため、更新を中止しました。");
         }
         if (tab.id && await cleApiReady(tab.id)) {
-          if (manual) {
+          if (manualFlows.has(tab.id)) {
             const flow = manualFlows.get(tab.id);
             manualFlows.delete(tab.id);
-            if (flow?.returnTabId) {
-              await chrome.tabs.update(flow.returnTabId, { active: true }).catch(() => {});
-            }
+            await focusTab(flow?.returnTabId);
           }
           return { ok: true, loginStarted: true, tabId: tab.id };
         }
@@ -498,7 +657,7 @@ async function ensureCleLogin(record, sender, force = false) {
         ? "CLEの認証が完了していません。開いた認証画面でログインしてください。"
         : "CLEの自動再認証が完了しませんでした。CLEタブを確認してください。");
     } finally {
-      if (manual && tab?.id) manualFlows.delete(tab.id);
+      if (tab?.id) manualFlows.delete(tab.id);
       cleLoginTask = undefined;
     }
   })();
@@ -506,6 +665,10 @@ async function ensureCleLogin(record, sender, force = false) {
 }
 
 async function authResponse(message, sender) {
+  if (EXTENSION_ONLY_AUTH_TYPES.has(message.type)) {
+    requireExtensionPageSender(sender);
+  }
+
   if (message.type === "auth-check-login") {
     const [koanProbe, cleTab] = await Promise.all([
       probeKoanLogin(),
@@ -544,38 +707,44 @@ async function authResponse(message, sender) {
   if (message.type === "auth-settings") return { ok: true, ...await readAuthSettings(record) };
 
   if (message.type === "auth-mfa-pending-save") {
+    if (!isMfaRegistrationSender(sender) || !Number.isInteger(sender.tab?.id)) {
+      throw new Error("MFA登録画面以外からは登録情報を仮保存できません。");
+    }
     const { secret, temporaryCancelCode } = message;
     if (!secret || !temporaryCancelCode) {
       throw new Error("シークレットまたは一時解除コードが指定されていません。");
     }
     decodeBase32(secret); // Validate base32 secret
+    const transactionId = crypto.randomUUID();
     await savePendingMfa({
       secret,
       temporaryCancelCode,
-      tabId: sender.tab?.id,
+      tabId: sender.tab.id,
+      transactionId,
+      createdAt: Date.now(),
     });
-    return { ok: true, code: await generateTotp(secret) };
+    return { ok: true, code: await generateTotp(secret), transactionId };
   }
 
   if (message.type === "auth-mfa-click-proceed") {
-    if (new URL(sender.url || "").origin !== MFA_ORIGIN) {
+    if (!isMfaRegistrationSender(sender)) {
       throw new Error("MFA情報画面以外では遷移操作を実行しません。");
     }
     if (!sender.tab?.id) throw new Error("MFA情報画面のタブを特定できませんでした。");
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: sender.tab.id },
       world: "MAIN",
-      func: () => {
+      func: (forceFallback) => {
         const viewIdInput = document.querySelector('input[name="viewId"]');
         const isDisplayPage = viewIdInput?.value === "MfaInfoDisplay.jsp" ||
           document.body.innerText.includes("MFA情報表示");
         if (!isDisplayPage) {
-          return { clicked: false, method: "not-display-page" };
+          return { started: false, method: "not-display-page" };
         }
 
-        if (typeof globalThis.execSrvStatus === "function") {
+        if (!forceFallback && typeof globalThis.execSrvStatus === "function") {
           globalThis.execSrvStatus("register");
-          return { clicked: true, method: "execSrvStatus" };
+          return { started: true, method: "execSrvStatus" };
         }
 
         const button = [...document.querySelectorAll('input[type="button"], input[type="submit"], button')].find((candidate) =>
@@ -584,7 +753,7 @@ async function authResponse(message, sender) {
         );
         if (button instanceof HTMLElement) {
           button.click();
-          return { clicked: true, method: "button-click-main" };
+          return { started: true, method: "button-click-main" };
         }
 
         const form = document.forms.namedItem("cmdForm") || document.querySelector("form");
@@ -592,19 +761,41 @@ async function authResponse(message, sender) {
         if (form instanceof HTMLFormElement && methodName instanceof HTMLInputElement) {
           methodName.value = "register";
           HTMLFormElement.prototype.submit.call(form);
-          return { clicked: true, method: "form-submit-fallback" };
+          return { started: true, method: "form-submit-fallback" };
         }
 
-        return { clicked: false, method: "no-target" };
+        return { started: false, method: "no-target" };
       },
+      args: [message.forceFallback === true],
     });
-    return { ok: true, ...(execution?.result || { clicked: false }) };
+    return { ok: true, ...(execution?.result || { started: false }) };
   }
 
   if (message.type === "auth-mfa-confirm-save") {
+    if (!isMfaRegistrationSender(sender) || !Number.isInteger(sender.tab?.id)) {
+      throw new Error("MFA登録画面以外からは登録を確定できません。");
+    }
     const savedPendingMfa = await readPendingMfa();
     if (!savedPendingMfa) {
       return { ok: false, error: "仮保存されたMFA情報がありません。" };
+    }
+    if (
+      savedPendingMfa.tabId !== sender.tab.id ||
+      !message.transactionId ||
+      message.transactionId !== savedPendingMfa.transactionId
+    ) {
+      throw new Error("MFA登録を開始したタブと確認要求が一致しません。");
+    }
+    const [execution] = await chrome.scripting.executeScript({
+      target: { tabId: sender.tab.id },
+      func: () => {
+        const text = document.body?.innerText || "";
+        return text.includes("MFA登録\t：\t登録済") ||
+          text.includes("MFA登録 ： 登録済");
+      },
+    });
+    if (execution?.result !== true) {
+      throw new Error("MFA登録の完了画面を確認できませんでした。");
     }
     const current = record || await readAuthRecord();
     const previous = current?.payload ? await decryptCredentials(current) : {};
@@ -629,13 +820,14 @@ async function authResponse(message, sender) {
       payload,
     });
     await clearPendingMfa();
+    await writeMfaAutoFlow(sender.tab.id, {
+      status: "saved",
+      completedAt: Date.now(),
+    });
     return { ok: true };
   }
 
   if (message.type === "auth-get-secrets") {
-    if (sender.id !== chrome.runtime.id) {
-      throw new Error("この操作は拡張機能の内部からのみ許可されています。");
-    }
     if (!record?.payload) {
       return { ok: true, configured: false };
     }
@@ -653,20 +845,49 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-mfa-register-auto-tab") {
-    const tabId = message.tabId || (sender.tab && sender.tab.id);
+    const requestedTabId = Number.isInteger(message.tabId) ? message.tabId : null;
+    if (requestedTabId) {
+      requireExtensionPageSender(sender);
+    } else if (!isMfaRegistrationSender(sender)) {
+      throw new Error("MFA登録画面以外からは自動取得タブを登録できません。");
+    }
+    const tabId = requestedTabId || sender.tab?.id;
     if (tabId) {
       await addAutoCollectTabId(tabId);
+      await beginMfaAutoFlow(tabId);
     }
     return { ok: true };
   }
 
   if (message.type === "auth-mfa-check-auto-tab") {
+    if (!isMfaRegistrationSender(sender)) {
+      throw new Error("MFA登録画面以外からは自動取得状態を確認できません。");
+    }
     const isAuto = Boolean(sender.tab && await isAutoCollectTabId(sender.tab.id));
     return { ok: true, isAutoCollect: isAuto };
   }
 
+  if (message.type === "auth-focus-pending-mfa") {
+    return { ok: true, ...await focusPendingMfaTab() };
+  }
+
+  if (message.type === "auth-mfa-registration-result") {
+    const tabId = Number(message.tabId);
+    if (!Number.isInteger(tabId)) {
+      throw new Error("MFA登録タブを特定できませんでした。");
+    }
+    const flow = await consumeMfaAutoFlow(tabId);
+    return {
+      ok: true,
+      status: flow?.status || "cancelled",
+      error: flow?.error || "",
+    };
+  }
+
   if (message.type === "auth-close-tab") {
-    if (sender.tab?.id) {
+    if (isMfaRegistrationSender(sender) &&
+        sender.tab?.id &&
+        await isAutoCollectTabId(sender.tab.id)) {
       await removeAutoCollectTabId(sender.tab.id);
       await chrome.tabs.remove(sender.tab.id);
       return { ok: true };
@@ -814,8 +1035,7 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-auto-login-state") {
-    const origin = new URL(sender.url || "").origin;
-    if (origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) {
+    if (!isIdpSender(sender) && !isCleLoginSender(sender)) {
       throw new Error("認証画面以外には自動ログイン状態を渡しません。");
     }
     const settings = await readAuthSettings(record);
@@ -827,8 +1047,9 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-credentials") {
-    const origin = new URL(sender.url || "").origin;
-    if (origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) throw new Error("認証画面以外には認証情報を渡しません。");
+    if (!isIdpSender(sender) && !isCleLoginSender(sender)) {
+      throw new Error("認証画面以外には認証情報を渡しません。");
+    }
     if (!record?.enabled) return { ok: true };
     const credentials = await decryptCredentials(record);
     if (!credentials.id || !credentials.password) {
@@ -838,7 +1059,7 @@ async function authResponse(message, sender) {
   }
 
   if (message.type === "auth-submit-idp") {
-    if (new URL(sender.url || "").origin !== AUTH_ORIGIN) throw new Error("認証基盤以外ではログイン送信を実行しません。");
+    if (!isIdpSender(sender)) throw new Error("認証基盤以外ではログイン送信を実行しません。");
     if (!sender.tab?.id) throw new Error("認証基盤のタブを特定できませんでした。");
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: sender.tab.id },
@@ -846,23 +1067,42 @@ async function authResponse(message, sender) {
       func: () => {
         if (typeof globalThis.LoginSubmit === "function") {
           globalThis.LoginSubmit("ログイン");
-          return true;
+          return { started: true, method: "LoginSubmit" };
         }
         const submit = document.querySelector('input[name="cmdForm.Submit"]');
         if (submit instanceof HTMLInputElement) {
           submit.click();
-          return true;
+          return { started: true, method: "button-click" };
         }
-        return false;
+        const form = document.forms.namedItem("cmdForm") || document.querySelector("form");
+        if (form instanceof HTMLFormElement) {
+          if (typeof form.requestSubmit === "function") {
+            form.requestSubmit();
+          } else {
+            HTMLFormElement.prototype.submit.call(form);
+          }
+          return { started: true, method: "form-submit" };
+        }
+        return { started: false, method: "no-target" };
       },
     });
-    return { ok: true, submitted: execution?.result === true };
+    return { ok: true, ...(execution?.result || { started: false, method: "no-result" }) };
   }
 
   if (message.type === "auth-totp") {
-    const origin = new URL(sender.url || "").origin;
-    if (origin !== MFA_ORIGIN && origin !== AUTH_ORIGIN && origin !== CLE_ORIGIN) throw new Error("MFA 認証画面以外には認証コードを渡しません。");
-    if (!record?.enabled || !record.mfaEnabled) return { ok: true };
+    if (!isMfaSender(sender) && !isIdpSender(sender)) {
+      throw new Error("MFA認証画面以外には認証コードを渡しません。");
+    }
+    if (!record?.enabled) return { ok: true };
+    if (!record.mfaEnabled) {
+      if (sender.tab?.id) {
+        await chrome.tabs.update(sender.tab.id, { active: true }).catch(() => {});
+        if (Number.isInteger(sender.tab.windowId)) {
+          await chrome.windows.update(sender.tab.windowId, { focused: true }).catch(() => {});
+        }
+      }
+      return { ok: true, mfaRequired: true };
+    }
     const credentials = await decryptCredentials(record);
     if (!credentials.mfaConsent || !credentials.totpSecret) return { ok: true };
     return { ok: true, code: await generateTotp(credentials.totpSecret), autoSubmit: true };
@@ -896,6 +1136,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!target) return;
 
   (async () => {
+    requireExtensionPageSender(sender);
     const requestUrl = new URL(message.request?.url);
     const method = message.request?.options?.method || "GET";
     if (requestUrl.origin !== target.origin) {

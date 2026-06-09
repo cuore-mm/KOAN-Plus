@@ -5,12 +5,16 @@ const MAX_MESSAGE_PAGES = 8;
 const MESSAGE_PAGE_SIZE = 100;
 const TASK_STATUS_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_STATUS_REQUESTS = 12;
+const MAX_ANNOUNCEMENT_COURSES_PER_REFRESH = 4;
 const CLE_LEASE_KEY = "koan-plus-cle-refresh-lease-v1";
 const CLE_ATTEMPT_KEY = "koan-plus-cle-refresh-attempt-v1";
+const CLE_FAILURE_KEY = "koan-plus-cle-refresh-failure-v1";
 export const CLE_TASKS_TTL_MS = 10 * 60 * 1000;
-export const CLE_MESSAGES_TTL_MS = 5 * 60 * 1000;
+export const CLE_MESSAGES_TTL_MS = 15 * 60 * 1000;
+export const CLE_MESSAGES_FOCUSED_TTL_MS = 5 * 60 * 1000;
 export const CLE_COURSES_TTL_MS = 24 * 60 * 60 * 1000;
 export const CLE_TASK_STATUSES_TTL_MS = 30 * 60 * 1000;
+export const CLE_ANNOUNCEMENTS_TTL_MS = 2 * 60 * 60 * 1000;
 
 export const CLE_MESSAGES_URL = `${CLE_ORIGIN}/ultra/messages`;
 export const CLE_CALENDAR_URL = `${CLE_ORIGIN}/ultra/calendar`;
@@ -46,16 +50,35 @@ export type CleCourse = {
   name: string;
 };
 
+export type CleAnnouncement = {
+  id: string;
+  courseId: string;
+  courseName: string;
+  title: string;
+  body: string;
+  created: string;
+};
+
+export type CleAnnouncementCourseCache = {
+  announcements: CleAnnouncement[];
+  updatedAt: string | null;
+  failureCount?: number;
+  nextRetryAt?: number;
+};
+
 export type CleData = {
   courses: CleCourse[];
   tasks: CleTask[];
   messages: CleMessageCourse[];
   unreadMessages: number;
+  announcements?: CleAnnouncement[];
   updatedAt: string | null;
   tasksUpdatedAt: string | null;
   messagesUpdatedAt: string | null;
   coursesUpdatedAt: string | null;
   taskStatusesUpdatedAt: string | null;
+  announcementsUpdatedAt?: string | null;
+  announcementCourses?: Record<string, CleAnnouncementCourseCache>;
 };
 
 export const EMPTY_CLE_DATA: CleData = {
@@ -63,11 +86,14 @@ export const EMPTY_CLE_DATA: CleData = {
   tasks: [],
   messages: [],
   unreadMessages: 0,
+  announcements: [],
   updatedAt: null,
   tasksUpdatedAt: null,
   messagesUpdatedAt: null,
   coursesUpdatedAt: null,
   taskStatusesUpdatedAt: null,
+  announcementsUpdatedAt: null,
+  announcementCourses: {},
 };
 
 type CleTabResponse = {
@@ -83,6 +109,14 @@ type CleTabMessage = {
 };
 
 type JsonRecord = Record<string, unknown>;
+type CleRefreshOptions = {
+  activeCourseCodes?: string[];
+  priorityCourseCode?: string;
+  messagesFocused?: boolean;
+  bypassBackoff?: boolean;
+};
+
+const jsonRequests = new Map<string, Promise<unknown>>();
 
 function readTimestamp(key: string) {
   const value = Number.parseInt(localStorage.getItem(key) || "", 10);
@@ -101,9 +135,9 @@ function isFresh(value: string | null | undefined, ttl: number) {
 
 function clePartUpdatedAt(previous: CleData | null | undefined, key: keyof Pick<
   CleData,
-  "coursesUpdatedAt" | "tasksUpdatedAt" | "messagesUpdatedAt" | "taskStatusesUpdatedAt"
+  "coursesUpdatedAt" | "tasksUpdatedAt" | "messagesUpdatedAt" | "taskStatusesUpdatedAt" | "announcementsUpdatedAt"
 >) {
-  return previous?.[key] || previous?.updatedAt || null;
+  return (previous?.[key] as string | null) || previous?.updatedAt || null;
 }
 
 function latestTimestamp(values: Array<string | null | undefined>) {
@@ -118,6 +152,40 @@ export function isCleCacheFresh(data: CleData) {
     isFresh(clePartUpdatedAt(data, "messagesUpdatedAt"), CLE_MESSAGES_TTL_MS) &&
     isFresh(clePartUpdatedAt(data, "taskStatusesUpdatedAt"), CLE_TASK_STATUSES_TTL_MS)
   );
+}
+
+type FailureState = {
+  count: number;
+  nextRetryAt: number;
+};
+
+function readFailureState(key: string): FailureState {
+  try {
+    const state = JSON.parse(localStorage.getItem(key) || "{}") as Partial<FailureState>;
+    return {
+      count: Number.isFinite(state.count) ? Number(state.count) : 0,
+      nextRetryAt: Number.isFinite(state.nextRetryAt) ? Number(state.nextRetryAt) : 0,
+    };
+  } catch {
+    return { count: 0, nextRetryAt: 0 };
+  }
+}
+
+function requireRetryAvailable(key: string, label: string) {
+  const retryAt = readFailureState(key).nextRetryAt;
+  if (retryAt <= Date.now()) return;
+  const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
+  throw new Error(`${label}は失敗後の待機中です。${seconds}秒後に再試行できます。`);
+}
+
+function recordFailure(key: string) {
+  const previous = readFailureState(key);
+  const count = previous.count + 1;
+  const delay = Math.min(60 * 60 * 1000, 60 * 1000 * (2 ** Math.min(count - 1, 6)));
+  localStorage.setItem(key, JSON.stringify({
+    count,
+    nextRetryAt: Date.now() + delay,
+  }));
 }
 
 function acquireLease() {
@@ -183,24 +251,35 @@ async function fetchJson(url: string, tabId?: number) {
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
     throw new Error("CLE取得はChrome拡張機能から実行してください。");
   }
-  const result = await withTimeout(
-    chrome.runtime.sendMessage({
-      type: "cle-fetch",
-      request: { url, options: { method: "GET" } },
-      tabId,
-    }) as Promise<CleTabMessage>,
-    REQUEST_TIMEOUT_MS,
-  );
-  if (!result.ok || !result.response) {
-    throw new Error(result.error || "CLEタブから応答を取得できませんでした。");
-  }
-  if (!result.response.ok) {
-    throw new Error(`CLEの取得に失敗しました (${result.response.status})。`);
-  }
+  const key = `${tabId || "auto"}:${url}`;
+  const existing = jsonRequests.get(key);
+  if (existing) return existing;
+  const request = (async () => {
+    const result = await withTimeout(
+      chrome.runtime.sendMessage({
+        type: "cle-fetch",
+        request: { url, options: { method: "GET" } },
+        tabId,
+      }) as Promise<CleTabMessage>,
+      REQUEST_TIMEOUT_MS,
+    );
+    if (!result.ok || !result.response) {
+      throw new Error(result.error || "CLEタブから応答を取得できませんでした。");
+    }
+    if (!result.response.ok) {
+      throw new Error(`CLEの取得に失敗しました (${result.response.status})。`);
+    }
+    try {
+      return JSON.parse(result.response.text) as unknown;
+    } catch {
+      throw new Error("CLEからJSON以外の応答が返りました。ログイン状態を確認してください。");
+    }
+  })();
+  jsonRequests.set(key, request);
   try {
-    return JSON.parse(result.response.text) as unknown;
-  } catch {
-    throw new Error("CLEからJSON以外の応答が返りました。ログイン状態を確認してください。");
+    return await request;
+  } finally {
+    if (jsonRequests.get(key) === request) jsonRequests.delete(key);
   }
 }
 
@@ -287,8 +366,13 @@ function taskStatusTtl(task: CleTask) {
 function taskStatusPriority(task: CleTask) {
   const dueAt = new Date(task.dueAt).getTime();
   const distance = dueAt - Date.now();
-  if (distance >= 0) return distance;
-  return TASK_STATUS_WINDOW_MS + Math.abs(distance);
+  const unresolved = !["提出済み", "採点済み", "期限切れ"].includes(task.status);
+  if (unresolved && distance >= 0 && distance <= 24 * 60 * 60 * 1000) {
+    return distance;
+  }
+  if (unresolved && distance >= 0) return 24 * 60 * 60 * 1000 + distance;
+  if (task.status === "提出済み") return 2 * TASK_STATUS_WINDOW_MS + Math.abs(distance);
+  return 3 * TASK_STATUS_WINDOW_MS + Math.abs(distance);
 }
 
 async function refreshTaskStatuses(tasks: CleTask[], tabId?: number, force = false) {
@@ -361,12 +445,101 @@ async function fetchCourses(tabId?: number) {
     .sort((left, right) => left.displayId.localeCompare(right.displayId));
 }
 
+async function fetchAnnouncements(course: CleCourse, tabId?: number): Promise<CleAnnouncement[]> {
+  const response = await fetchJson(
+    `${API_ORIGIN}/public/v1/courses/${encodeURIComponent(course.courseId)}/announcements`,
+    tabId,
+  );
+  return results(response).map((item): CleAnnouncement => ({
+    id: asString(item.id),
+    courseId: asString(item.courseId) || course.courseId,
+    courseName: course.name,
+    title: asString(item.title),
+    body: asString(item.body),
+    created: asString(item.created),
+  }));
+}
+
+async function refreshAnnouncements(
+  courses: CleCourse[],
+  previous: Record<string, CleAnnouncementCourseCache>,
+  recentCourseIds: Set<string>,
+  priorityCourseCode: string,
+  tabId?: number,
+) {
+  const limit = 3;
+  const cache = { ...previous };
+  const now = Date.now();
+  const candidates = courses
+    .filter((course) => {
+      const entry = cache[course.courseId];
+      if (entry?.nextRetryAt && entry.nextRetryAt > now) return false;
+      return !isFresh(entry?.updatedAt, CLE_ANNOUNCEMENTS_TTL_MS);
+    })
+    .sort((left, right) => {
+      const leftPriority = left.timetableCode === priorityCourseCode
+        ? 0
+        : recentCourseIds.has(left.courseId) ? 1 : 2;
+      const rightPriority = right.timetableCode === priorityCourseCode
+        ? 0
+        : recentCourseIds.has(right.courseId) ? 1 : 2;
+      return leftPriority - rightPriority || left.displayId.localeCompare(right.displayId);
+    })
+    .slice(0, MAX_ANNOUNCEMENT_COURSES_PER_REFRESH);
+  let index = 0;
+
+  async function worker() {
+    while (index < candidates.length) {
+      const course = candidates[index++];
+      if (!course) break;
+      try {
+        const announcements = await fetchAnnouncements(course, tabId);
+        cache[course.courseId] = {
+          announcements,
+          updatedAt: new Date().toISOString(),
+          failureCount: 0,
+          nextRetryAt: 0,
+        };
+      } catch {
+        const old = cache[course.courseId];
+        const failureCount = (old?.failureCount || 0) + 1;
+        const delay = Math.min(
+          60 * 60 * 1000,
+          60 * 1000 * (2 ** Math.min(failureCount - 1, 6)),
+        );
+        cache[course.courseId] = {
+          announcements: old?.announcements || [],
+          updatedAt: old?.updatedAt || null,
+          failureCount,
+          nextRetryAt: Date.now() + delay,
+        };
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, candidates.length) }, worker);
+  await Promise.all(workers);
+  const activeIds = new Set(courses.map((course) => course.courseId));
+  for (const courseId of Object.keys(cache)) {
+    if (!activeIds.has(courseId)) delete cache[courseId];
+  }
+  const announcements = courses
+    .flatMap((course) => cache[course.courseId]?.announcements || [])
+    .sort((left, right) => right.created.localeCompare(left.created));
+  const updatedAt = latestTimestamp(
+    courses.map((course) => cache[course.courseId]?.updatedAt),
+  );
+  return { announcements, cache, updatedAt };
+}
+
 export async function refreshCle(
   previous?: CleData | null,
   tabId?: number,
   onProgress?: (value: string) => void,
   force = false,
+  options: CleRefreshOptions = {},
 ): Promise<CleData> {
+  if (!options.bypassBackoff) requireRetryAvailable(CLE_FAILURE_KEY, "CLE更新");
   if (!force) {
     requireCooldown(CLE_ATTEMPT_KEY, 60 * 1000, "CLE更新の再試行は1分後にできます。");
   }
@@ -384,8 +557,11 @@ export async function refreshCle(
       isFresh(clePartUpdatedAt(previous, "coursesUpdatedAt"), CLE_COURSES_TTL_MS);
     const tasksFresh = !force &&
       isFresh(clePartUpdatedAt(previous, "tasksUpdatedAt"), CLE_TASKS_TTL_MS);
+    const messagesTtl = options.messagesFocused
+      ? CLE_MESSAGES_FOCUSED_TTL_MS
+      : CLE_MESSAGES_TTL_MS;
     const messagesFresh = !force &&
-      isFresh(clePartUpdatedAt(previous, "messagesUpdatedAt"), CLE_MESSAGES_TTL_MS);
+      isFresh(clePartUpdatedAt(previous, "messagesUpdatedAt"), messagesTtl);
     const taskStatusesFresh = !force &&
       isFresh(clePartUpdatedAt(previous, "taskStatusesUpdatedAt"), CLE_TASK_STATUSES_TTL_MS);
     const [taskList, messages, coursesResult] = await Promise.all([
@@ -439,22 +615,53 @@ export async function refreshCle(
       taskStatusesUpdatedAt = now;
       markDone("状態");
     }
-    onProgress?.("取得結果を整理中");
+
     const courses = coursesResult.courses;
     const coursesUpdatedAt = coursesResult.updatedAt;
+
+    const recentCourseIds = new Set([
+      ...tasks.map((task) => task.courseId),
+      ...messages.map((message) => message.courseId),
+    ]);
+    const activeCodes = new Set(options.activeCourseCodes || []);
+    const announcementCourses = courses.filter((course) =>
+      activeCodes.size
+        ? activeCodes.has(course.timetableCode)
+        : recentCourseIds.has(course.courseId),
+    );
+    onProgress?.("連絡事項を取得中");
+    const announcementResult = await refreshAnnouncements(
+      announcementCourses,
+      previous?.announcementCourses || {},
+      recentCourseIds,
+      options.priorityCourseCode || "",
+      tabId,
+    );
+    const announcements = announcementResult.announcements;
+    const announcementsUpdatedAt = announcementResult.updatedAt;
+    markDone("連絡事項");
+
+    onProgress?.("取得結果を整理中");
     const tasksUpdatedAt = tasksFresh ? clePartUpdatedAt(previous, "tasksUpdatedAt") : now;
     const messagesUpdatedAt = messagesFresh ? clePartUpdatedAt(previous, "messagesUpdatedAt") : now;
+    localStorage.removeItem(CLE_FAILURE_KEY);
     return {
       courses,
       tasks,
       messages,
       unreadMessages: messages.reduce((sum, item) => sum + item.unreadCount, 0),
-      updatedAt: latestTimestamp([coursesUpdatedAt, tasksUpdatedAt, messagesUpdatedAt, taskStatusesUpdatedAt]),
+      announcements,
+      updatedAt: latestTimestamp([coursesUpdatedAt, tasksUpdatedAt, messagesUpdatedAt, taskStatusesUpdatedAt, announcementsUpdatedAt]),
       coursesUpdatedAt,
       tasksUpdatedAt,
       messagesUpdatedAt,
       taskStatusesUpdatedAt,
+      announcementsUpdatedAt,
+      announcementCourses: announcementResult.cache,
     };
+  } catch (error) {
+    recordFailure(CLE_FAILURE_KEY);
+    throw error;
   } finally {
     onProgress?.("");
     release();

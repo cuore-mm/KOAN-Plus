@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import DOMPurify from "dompurify";
 import {
   BOARD_URL,
   GENRES,
@@ -11,6 +12,7 @@ import {
   type Notice,
   type ScheduleItem,
   attentionScore,
+  getSnapshotAvailability,
   isKoanCacheFresh,
   mergeNotices,
   noticeKey,
@@ -26,6 +28,7 @@ import {
   type CleData,
   type CleCourse,
   type CleTask,
+  type CleAnnouncement,
   cleMessageUrl,
   cleCourseUrl,
   cleTaskUrl,
@@ -109,6 +112,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   }));
   const [cleLoading, setCleLoading] = useState(false);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [snapshotStatus, setSnapshotStatus] = useState("");
   const [status, setStatus] = useState("");
   const [cleStatus, setCleStatus] = useState("");
   const [progress, setProgress] = useState("");
@@ -116,6 +120,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [genre, setGenre] = useState("");
   const [scope, setScope] = useState("attention");
   const [view, setView] = useState<AppView>(initialView);
+  const [selectedCourseCode, setSelectedCourseCode] = useState("");
   const [gradesData, setGradesData] = useState<GradeData | null>(() =>
     loadGradesCache<GradeData>(),
   );
@@ -130,7 +135,8 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [pendingAction, setPendingAction] = useState<"dashboard" | "grades" | null>(null);
   const [refreshBlockedUntil, setRefreshBlockedUntil] = useState(0);
   const [authSettings, setAuthSettings] = useState<AuthSettings | null>(null);
-  const [, setFreshnessClock] = useState(Date.now());
+  const [freshnessClock, setFreshnessClock] = useState(Date.now());
+  const [selectedAnnouncement, setSelectedAnnouncement] = useState<CleAnnouncement | null>(null);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => setFreshnessClock(Date.now()), 15 * 1000);
@@ -197,15 +203,22 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       try {
         next = await refreshCle(cleData, auth.tabId, (value) => {
           if (value) setCleStatus(value);
-        }, force);
+        }, force, {
+          activeCourseCodes: data.courses.map((course) => course.code),
+          priorityCourseCode: selectedCourseCode,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (/別の画面|1分後/.test(message)) throw error;
+        if (/別の画面|1分後|待機中|再試行できます/.test(message)) throw error;
         setCleStatus("セッションを再認証中");
         const refreshedAuth = await refreshCleLogin();
         next = await refreshCle(cleData, refreshedAuth.tabId, (value) => {
           if (value) setCleStatus(value);
-        }, force);
+        }, force, {
+          activeCourseCodes: data.courses.map((course) => course.code),
+          priorityCourseCode: selectedCourseCode,
+          bypassBackoff: true,
+        });
       }
       setCleData(next);
       saveCleCache(next);
@@ -252,18 +265,18 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
 
   const prepareAuthenticatedAction = async (
     action: "dashboard" | "grades",
-  ): Promise<{ manualMode: boolean } | null> => {
+  ): Promise<{ manualMode: boolean; mfaEnabled: boolean } | null> => {
     const currentAuthSettings = await loadAuthSettings();
     setAuthSettings(currentAuthSettings);
     if (currentAuthSettings.configured && currentAuthSettings.enabled) {
-      return { manualMode: false };
+      return { manualMode: false, mfaEnabled: currentAuthSettings.mfaEnabled };
     }
 
     const loginStatus = await checkLoginStatus();
     const loggedIn = action === "dashboard"
       ? loginStatus.koanLoggedIn && loginStatus.cleLoggedIn
       : loginStatus.koanLoggedIn;
-    if (loggedIn) return { manualMode: true };
+    if (loggedIn) return { manualMode: true, mfaEnabled: currentAuthSettings.mfaEnabled };
 
     if (action === "dashboard") {
       setStatus("手動ログインの確認待ち");
@@ -283,10 +296,12 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     setStatus("ログイン状態を確認中");
     setCleStatus("ログイン状態を確認中");
     let manualMode = false;
+    let sequential = false;
     try {
       const prepared = await prepareAuthenticatedAction("dashboard");
       if (!prepared) return;
       manualMode = prepared.manualMode;
+      sequential = !prepared.mfaEnabled;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatus(`ログイン状態を確認できませんでした: ${message}`);
@@ -301,7 +316,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
       return;
     }
-    await executeUpdate(force || manualMode);
+    await executeUpdate(force, sequential);
   };
   const update = () => runUpdate(false);
 
@@ -309,9 +324,9 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     if (snapshotLock.current) return;
     snapshotLock.current = true;
     setSnapshotLoading(true);
-    setStatus("掲示スナップショットを同期中");
+    setSnapshotStatus("掲示スナップショットを同期中");
     try {
-      const snapshot = await refreshSnapshot(setProgress);
+      const snapshot = await refreshSnapshot(data, setProgress);
       setData((current) => {
         const next = {
           ...current,
@@ -321,9 +336,9 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         saveCache(next);
         return next;
       });
-      setStatus("掲示スナップショットを同期しました");
+      setSnapshotStatus("掲示スナップショットを同期しました");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setSnapshotStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setProgress("");
       setSnapshotLoading(false);
@@ -380,7 +395,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         return claimStartupRefresh();
       })
       .then((shouldRefresh) => {
-        if (shouldRefresh === true) return runUpdate(true);
+        if (shouldRefresh === true) return runUpdate(false);
       })
       .catch(() => {});
   }, []);
@@ -403,6 +418,20 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   }, [data.notices, genre, query, scope]);
 
   const snapshotExpired = isExpired(data.snapshotUpdatedAt, SNAPSHOT_TTL_MS);
+  const snapshotAvailability = getSnapshotAvailability();
+  const snapshotNow = Math.max(freshnessClock, Date.now());
+  const snapshotBlocked = snapshotAvailability.blockedUntil > snapshotNow;
+  const snapshotWaitMinutes = Math.max(
+    1,
+    Math.ceil((snapshotAvailability.blockedUntil - snapshotNow) / (60 * 1000)),
+  );
+  const snapshotBlockedStatus = snapshotAvailability.reason === "syncing"
+    ? "別の画面で掲示を同期中です"
+    : snapshotAvailability.reason === "resolving"
+      ? "掲示を検索中です"
+      : snapshotAvailability.reason === "completed"
+        ? `掲示同期 ${fmtTime(data.snapshotUpdatedAt)}`
+        : `掲示同期の再試行まで約${snapshotWaitMinutes}分`;
   const markNoticeRead = (openedNotice: Notice) => {
     const openedKey = noticeKey(openedNotice);
     setData((current) => {
@@ -437,11 +466,19 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const topbarState = view === "reference" ? {
     action: syncSnapshot,
     busy: snapshotLoading,
-    disabled: snapshotLoading || !snapshotExpired,
-    label: snapshotLoading ? "同期中..." : snapshotExpired ? "掲示を同期" : "同期済み",
+    disabled: snapshotLoading || !snapshotExpired || snapshotBlocked,
+    label: snapshotLoading
+      ? "同期中..."
+      : !snapshotExpired || snapshotAvailability.reason === "completed"
+        ? "同期済み"
+        : snapshotBlocked
+          ? "待機中"
+          : "掲示を同期",
     status: snapshotLoading
       ? (progress || "掲示同期中...")
-      : `掲示同期 ${fmtTime(data.snapshotUpdatedAt)}${snapshotExpired ? " / 更新推奨" : ""}`,
+      : snapshotBlocked
+        ? snapshotBlockedStatus
+        : snapshotStatus || `掲示同期 ${fmtTime(data.snapshotUpdatedAt)} / 更新推奨`,
   } : view === "grades" ? {
     action: updateGrades,
     busy: gradesLoading || authChecking,
@@ -512,12 +549,20 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
             cleStatus={cleStatus}
             data={data}
             onOpenNotice={markNoticeRead}
+            onSelectCourse={(code) => {
+              setSelectedCourseCode(code);
+              setView("courses");
+            }}
+            onOpenAnnouncement={setSelectedAnnouncement}
           />
         ) : view === "courses" ? (
           <CoursesPage
             cleData={cleData}
             data={data}
             onOpenNotice={markNoticeRead}
+            selectedCode={selectedCourseCode}
+            onSelectCode={setSelectedCourseCode}
+            onOpenAnnouncement={setSelectedAnnouncement}
           />
         ) : view === "reference" ? (
           <ReferenceDesk
@@ -567,10 +612,42 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
                 if (action === "grades") {
                   void executeGradesUpdate();
                 } else {
-                  void executeUpdate(true, true);
+                  void executeUpdate(false, true);
                 }
               }} type="button">
                 ログイン画面を開く
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedAnnouncement && (
+        <div className="settings-modal-overlay" onClick={() => setSelectedAnnouncement(null)}>
+          <div className="settings-modal announcement-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "640px", width: "90%" }}>
+            <h3 className="modal-title" style={{ fontSize: "17px", fontWeight: "bold", marginBottom: "4px", lineHeight: "1.4", overflowWrap: "break-word" }}>{selectedAnnouncement.title}</h3>
+            <div style={{ fontSize: "12px", color: "var(--text-muted, #6c757d)", marginBottom: "16px" }}>
+              {courseDisplayName(selectedAnnouncement.courseName)} / {fmtDue(selectedAnnouncement.created)}
+            </div>
+            <div
+              className="announcement-modal-body markdown-body"
+              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(selectedAnnouncement.body) }}
+              style={{
+                maxHeight: "50vh",
+                overflowY: "auto",
+                padding: "16px",
+                background: "var(--bg-subtle, #f8f9fa)",
+                borderRadius: "6px",
+                border: "1px solid var(--border-primary, #dee2e6)",
+                fontSize: "14px",
+                lineHeight: "1.6",
+                textAlign: "left",
+                overflowWrap: "break-word",
+              }}
+            />
+            <div className="modal-actions" style={{ marginTop: "20px" }}>
+              <button className="modal-btn cancel" onClick={() => setSelectedAnnouncement(null)} type="button">
+                閉じる
               </button>
             </div>
           </div>
@@ -685,18 +762,21 @@ function Settings({
       try {
         const secrets = await getSavedMfaSecrets();
         if (secrets.configured && secrets.totpSecret) {
-          setSavedSecrets({
+          const nextSecrets = {
             totpSecret: secrets.totpSecret,
             temporaryCancelCode: secrets.temporaryCancelCode || "",
-          });
-          return;
+          };
+          setSavedSecrets(nextSecrets);
+          return nextSecrets;
         }
       } catch (e) {
         console.error("Failed to load saved MFA secrets:", e);
       }
       setSavedSecrets(null);
+      return null;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
+      return null;
     }
   };
 
@@ -718,14 +798,28 @@ function Settings({
   const canFinishSetup = !saving && Boolean(id.trim() && password) && (!mfaEnabled || (mfaConsent && Boolean(hasSavedMfa || totpSecret.trim())));
   const canSaveManualTotp = !saving && settings.mfaEnabled && Boolean(totpSecret.trim());
 
-  const startAutoCollect = () => {
+  const startAutoCollect = async () => {
     const chromeObj = typeof window !== "undefined" ? (window as any).chrome : undefined;
     if (chromeObj && chromeObj.tabs?.create) {
       setSaving(true);
+      try {
+        const pending = await chromeObj.runtime.sendMessage({ type: "auth-focus-pending-mfa" });
+        if (pending?.found) {
+          setSaving(false);
+          setStatus("先に前面へ移動した二段階認証を完了してください。完了後にMFA登録を開始できます。");
+          setShowMfaWizardModal(false);
+          return;
+        }
+      } catch (error) {
+        setSaving(false);
+        setStatus(error instanceof Error ? error.message : "認証待ちタブを確認できませんでした。");
+        setShowMfaWizardModal(false);
+        return;
+      }
       
       chromeObj.tabs.create({
         url: "about:blank",
-        active: false // 非アクティブ（バックグラウンド）で開く
+        active: false
       }, (tab: any) => {
         if (!tab || !tab.id) {
           setSaving(false);
@@ -733,22 +827,6 @@ function Settings({
           setShowMfaWizardModal(false);
           return;
         }
-
-        // バックグラウンドに自動取得対象タブとして登録
-        chromeObj.runtime.sendMessage({
-          type: "auth-mfa-register-auto-tab",
-          tabId: tab.id
-        }, (response: any) => {
-          if (!response?.ok) {
-            setSaving(false);
-            setStatus(response?.error || "自動取得タブの登録に失敗しました。");
-            setShowMfaWizardModal(false);
-            return;
-          }
-          chromeObj.tabs.update(tab.id, {
-            url: "https://auth-mfa.auth.osaka-u.ac.jp/AttributeRegistSite/MfaInfoServlet#auto-collect"
-          });
-        });
 
         // 12秒のセーフティタイマー（ログイン要求やエラー等で進まない場合に前面に出す）
         const timeoutId = setTimeout(() => {
@@ -764,18 +842,49 @@ function Settings({
             chromeObj.tabs.onRemoved.removeListener(listener);
             clearTimeout(timeoutId);
             
-            void reloadSettings().then(() => {
+            void chromeObj.runtime.sendMessage({
+              type: "auth-mfa-registration-result",
+              tabId,
+            }).then(async (result: any) => {
+              const secrets = await reloadSettings();
               setSaving(false);
-              setStatus("二段階認証の登録を保存しました。今後はこの端末で6桁コードを生成できます。");
-              setMfaWizardStep("qr");
-            }).catch((e) => {
-              setSaving(false);
-              setStatus(`自動取得後の読み込みに失敗しました: ${e.message}`);
+              if (result?.status === "saved" && secrets?.totpSecret) {
+                setStatus("二段階認証の登録を保存しました。今後はこの端末で6桁コードを生成できます。");
+                setMfaWizardStep("qr");
+                return;
+              }
+              setMfaWizardStep("consent");
               setShowMfaWizardModal(false);
+              setStatus(result?.error || "MFA登録を完了できませんでした。登録画面を閉じずに、もう一度実行してください。");
+            }).catch((e: Error) => {
+              setSaving(false);
+              setMfaWizardStep("consent");
+              setShowMfaWizardModal(false);
+              setStatus(`MFA登録の完了状態を確認できませんでした: ${e.message}`);
             });
           }
         };
         chromeObj.tabs.onRemoved.addListener(listener);
+
+        // バックグラウンドに自動取得対象タブとして登録
+        chromeObj.runtime.sendMessage({
+          type: "auth-mfa-register-auto-tab",
+          tabId: tab.id
+        }, (response: any) => {
+          if (!response?.ok) {
+            chromeObj.tabs.onRemoved.removeListener(listener);
+            clearTimeout(timeoutId);
+            chromeObj.tabs.remove(tab.id).catch(() => {});
+            setSaving(false);
+            setMfaWizardStep("consent");
+            setStatus(response?.error || "自動取得タブの登録に失敗しました。");
+            setShowMfaWizardModal(false);
+            return;
+          }
+          chromeObj.tabs.update(tab.id, {
+            url: "https://auth-mfa.auth.osaka-u.ac.jp/AttributeRegistSite/MfaInfoServlet#auto-collect"
+          });
+        });
       });
     } else {
       setStatus("自動取得は拡張機能のポップアップまたはオプション画面から実行してください。");
@@ -785,7 +894,7 @@ function Settings({
 
   const handleStartRegister = () => {
     setMfaWizardStep("registering");
-    startAutoCollect();
+    void startAutoCollect();
   };
 
   const qrCanvasRef = (node: HTMLCanvasElement | null) => {
@@ -1339,7 +1448,7 @@ function Settings({
       )}
 
       {/* MFA Wizard Modal */}
-      {showMfaWizardModal && (
+      {showMfaWizardModal && (mfaWizardStep !== "qr" || Boolean(savedSecrets?.totpSecret)) && (
         <div className="settings-modal-overlay mfa-wizard-overlay">
           <div className="settings-modal mfa-wizard-modal" role="dialog" aria-modal="true">
             <div className="mfa-wizard-viewport">
@@ -1583,6 +1692,7 @@ type CourseSummary = {
   cleCourse?: CleCourse;
   tasks: CleTask[];
   messages: CleData["messages"];
+  announcements: CleAnnouncement[];
   notices: Notice[];
   changes: ChangeItem[];
   schedules: ScheduleItem[];
@@ -1613,6 +1723,10 @@ function buildCourseSummaries(data: KoanData, cleData: CleData): CourseSummary[]
       const code = cleCodeByCourseId.get(message.courseId) || timetableCodeFromCleDisplay(message.courseName);
       return code ? code === course.code : courseMatchesText(course, message.courseName);
     });
+    const announcements = (cleData.announcements || []).filter((ann) => {
+      const code = cleCodeByCourseId.get(ann.courseId) || timetableCodeFromCleDisplay(ann.courseName);
+      return code ? code === course.code : courseMatchesText(course, ann.courseName);
+    });
     const schedules = data.schedule.filter((item) => courseMatchesText(course, item.title));
     const changes = data.changes.filter((item) => courseMatchesText(course, item.course));
     const notices = data.notices
@@ -1623,8 +1737,23 @@ function buildCourseSummaries(data: KoanData, cleData: CleData): CourseSummary[]
       code: course.code,
       koan: course,
       cleCourse,
-      tasks: tasks.sort((left, right) => left.dueAt.localeCompare(right.dueAt)),
+      tasks: tasks.sort((left, right) => {
+        const getTaskPriority = (task: CleTask) => {
+          const isDone = ["提出済み", "採点済み"].includes(task.status);
+          if (isDone) return 3;
+          const isOverdue = task.status === "期限切れ" || new Date(task.dueAt).getTime() < Date.now();
+          if (isOverdue) return 2;
+          return 1;
+        };
+        const leftPriority = getTaskPriority(left);
+        const rightPriority = getTaskPriority(right);
+        if (leftPriority !== rightPriority) {
+          return leftPriority - rightPriority;
+        }
+        return left.dueAt.localeCompare(right.dueAt);
+      }),
       messages,
+      announcements: announcements.sort((left, right) => right.created.localeCompare(left.created)),
       notices,
       changes,
       schedules,
@@ -1827,18 +1956,23 @@ function CoursesPage({
   cleData,
   data,
   onOpenNotice,
+  selectedCode,
+  onSelectCode,
+  onOpenAnnouncement,
 }: {
   cleData: CleData;
   data: KoanData;
   onOpenNotice: (notice: Notice) => void;
+  selectedCode: string;
+  onSelectCode: (code: string) => void;
+  onOpenAnnouncement: (ann: CleAnnouncement) => void;
 }) {
   const courses = useMemo(() => buildCourseSummaries(data, cleData), [cleData, data]);
-  const [selectedCode, setSelectedCode] = useState("");
   useEffect(() => {
-    if (!courses.some((course) => course.code === selectedCode)) {
-      setSelectedCode("");
+    if (selectedCode && !courses.some((course) => course.code === selectedCode)) {
+      onSelectCode("");
     }
-  }, [courses, selectedCode]);
+  }, [courses, selectedCode, onSelectCode]);
   const selected = courses.find((course) => course.code === selectedCode);
   const regularCourses = courses.filter((course) => courseSlots(course.koan).some((slot) =>
     timetableDays.includes(slot.day as typeof timetableDays[number]) &&
@@ -1855,7 +1989,7 @@ function CoursesPage({
             </div>
             <CourseTimetable
               courses={regularCourses}
-              onSelect={setSelectedCode}
+              onSelect={onSelectCode}
               selectedCode={selectedCode}
             />
             <div className="irregular-courses">
@@ -1866,7 +2000,7 @@ function CoursesPage({
                     <button
                       className={course.code === selectedCode ? "active" : ""}
                       key={course.code}
-                      onClick={() => setSelectedCode(course.code)}
+                      onClick={() => onSelectCode(course.code)}
                       type="button"
                     >
                       <span>{course.koan.title}</span>
@@ -1896,7 +2030,7 @@ function CoursesPage({
 
       <div className="course-detail-pane">
         {selected ? (
-          <CourseDetail course={selected} onOpenNotice={onOpenNotice} />
+          <CourseDetail course={selected} onOpenNotice={onOpenNotice} onOpenAnnouncement={onOpenAnnouncement} />
         ) : (
           <CourseDefaultDetail />
         )}
@@ -1972,9 +2106,11 @@ function CourseDefaultDetail() {
 function CourseDetail({
   course,
   onOpenNotice,
+  onOpenAnnouncement,
 }: {
   course: CourseSummary;
   onOpenNotice: (notice: Notice) => void;
+  onOpenAnnouncement: (ann: CleAnnouncement) => void;
 }) {
   const teacherRoom = courseTeacherRoom(course.koan.teacherAndRoom);
   return (
@@ -2012,12 +2148,31 @@ function CourseDetail({
         <section className="course-detail-block course-messages-block">
           <h3>連絡</h3>
           <div className="course-line-list">
-            {course.messages.length ? course.messages.map((message) => (
-              <a className="course-line-row" href={cleMessageUrl(message.courseId)} key={message.courseId} target="_blank">
-                <b>{message.unreadCount ? "未読" : "連絡"}</b>
-                <span>{message.courseName}<small>{message.unreadCount ? `${message.unreadCount}件の未読` : "既読"}</small></span>
-              </a>
-            )) : (
+            {course.announcements.length || course.messages.length ? (
+              <>
+                {course.announcements.map((ann) => (
+                  <button
+                    className="course-line-row announcement-row-btn"
+                    key={ann.id}
+                    onClick={() => onOpenAnnouncement(ann)}
+                    type="button"
+                    style={{ background: "transparent", border: "none", cursor: "pointer", width: "100%", textAlign: "left", padding: "7px 0" }}
+                  >
+                    <b className="course-status-label neutral">連絡事項</b>
+                    <span>
+                      {ann.title}
+                      <small>{fmtDue(ann.created)}</small>
+                    </span>
+                  </button>
+                ))}
+                {course.messages.map((message) => (
+                  <a className="course-line-row" href={cleMessageUrl(message.courseId)} key={message.courseId} target="_blank">
+                    <b>{message.unreadCount ? "未読" : "連絡"}</b>
+                    <span>{message.courseName}<small>{message.unreadCount ? `${message.unreadCount}件の未読` : "既読"}</small></span>
+                  </a>
+                ))}
+              </>
+            ) : (
               <EmptyState
                 icon="message-square"
                 title="連絡はありません"
@@ -2080,12 +2235,16 @@ function Dashboard({
   cleStatus,
   data,
   onOpenNotice,
+  onSelectCourse,
+  onOpenAnnouncement,
 }: {
   cleData: CleData;
   cleLoading: boolean;
   cleStatus: string;
   data: KoanData;
   onOpenNotice: (notice: Notice) => void;
+  onSelectCourse: (code: string) => void;
+  onOpenAnnouncement: (ann: CleAnnouncement) => void;
 }) {
   const today = dateKey(new Date());
   const [selectedDate, setSelectedDate] = useState(today);
@@ -2098,8 +2257,10 @@ function Dashboard({
         <NewActivity
           loading={cleLoading}
           messages={cleData.messages}
+          announcements={cleData.announcements}
           notices={data.notices}
           onOpen={onOpenNotice}
+          onOpenAnnouncement={onOpenAnnouncement}
         />
       </section>
       <DashboardRightRail
@@ -2109,6 +2270,8 @@ function Dashboard({
         selectedDate={selectedDate}
         tasks={cleData.tasks}
         allScheduleEmpty={data.schedule.length === 0}
+        courses={data.courses || []}
+        onSelectCourse={onSelectCourse}
       />
     </>
   );
@@ -2441,6 +2604,8 @@ function DashboardRightRail({
   selectedDate,
   tasks,
   allScheduleEmpty,
+  courses,
+  onSelectCourse,
 }: {
   changes: ChangeItem[];
   onSelectDate: (date: string) => void;
@@ -2448,6 +2613,8 @@ function DashboardRightRail({
   selectedDate: string;
   tasks: CleTask[];
   allScheduleEmpty: boolean;
+  courses: CourseRegistration[];
+  onSelectCourse: (code: string) => void;
 }) {
   const today = dateKey(new Date());
   const [visibleMonth, setVisibleMonth] = useState(() => new Date());
@@ -2496,6 +2663,29 @@ function DashboardRightRail({
               {periods.map((period) => {
                 const item = schedule.find((scheduleItem) => periodNumber(scheduleItem.period) === period);
                 const change = item ? changeFor(item, changes) : null;
+                const matchedCourse = item
+                  ? courses.find((course) => courseMatchesText(course, item.title))
+                  : null;
+
+                if (matchedCourse && item) {
+                  return (
+                    <button
+                      className="rail-schedule-row clickable-period"
+                      key={period}
+                      onClick={() => onSelectCourse(matchedCourse.code)}
+                      title={`${item.title}の詳細を表示`}
+                      type="button"
+                    >
+                      <b>{period}</b>
+                      <span>
+                        <span className="rail-course-title">{item.title}</span>
+                        {item.room && <small>{item.room}</small>}
+                        {change && <em>{change.type}</em>}
+                      </span>
+                    </button>
+                  );
+                }
+
                 return (
                   <div className={`rail-schedule-row ${item ? "" : "empty-period"}`} key={period}>
                     <b>{period}</b>
@@ -2644,13 +2834,17 @@ function changeFor(schedule: ScheduleItem, changes: ChangeItem[]) {
 function NewActivity({
   loading,
   messages,
+  announcements = [],
   notices,
   onOpen,
+  onOpenAnnouncement,
 }: {
   loading: boolean;
   messages: CleData["messages"];
+  announcements?: CleAnnouncement[];
   notices: Notice[];
   onOpen: (notice: Notice) => void;
+  onOpenAnnouncement: (ann: CleAnnouncement) => void;
 }) {
   const latestNotices = notices
     .filter((notice) => notice.unread || notice.isNew || attentionScore(notice) >= 20)
@@ -2659,6 +2853,12 @@ function NewActivity({
       return recency || attentionScore(right) - attentionScore(left);
     })
     .slice(0, 5);
+
+  const recentAnnouncements = announcements.filter((ann) => {
+    const createdTime = new Date(ann.created).getTime();
+    return Date.now() - createdTime < 7 * 24 * 60 * 60 * 1000;
+  });
+
   return (
     <>
       <section className="section cle-messages-section">
@@ -2669,12 +2869,36 @@ function NewActivity({
           <a className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</a>
         </div>
         <div className="cle-messages-list">
-          {messages.length ? messages.map((message) => (
-            <a className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
-              <span>{courseDisplayName(message.courseName)}</span>
-              <b>未読 {message.unreadCount}</b>
-            </a>
-          )) : (
+          {recentAnnouncements.length || messages.length ? (
+            <>
+              {recentAnnouncements.map((ann) => (
+                <button
+                  className="cle-message-row announcement-row-btn"
+                  key={ann.id}
+                  onClick={() => onOpenAnnouncement(ann)}
+                  type="button"
+                  style={{ background: "transparent", border: "none", cursor: "pointer", width: "100%", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                >
+                  <span style={{ flex: 1, marginRight: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <span style={{ fontSize: "0.8em", color: "var(--text-muted, #6c757d)", fontWeight: "bold" }}>
+                      [連絡] {courseDisplayName(ann.courseName)}
+                    </span>
+                    <br />
+                    <span style={{ fontSize: "0.95em" }}>{ann.title}</span>
+                  </span>
+                  <b className="announcement-date-tag" style={{ fontSize: "0.85em", color: "var(--text-muted, #6c757d)", flexShrink: 0 }}>
+                    {dueLabel(ann.created)}
+                  </b>
+                </button>
+              ))}
+              {messages.map((message) => (
+                <a className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
+                  <span>{courseDisplayName(message.courseName)}</span>
+                  <b>未読 {message.unreadCount}</b>
+                </a>
+              ))}
+            </>
+          ) : (
             <EmptyState
               icon={loading ? "spinner" : "mail-open"}
               title={loading ? "取得中です" : "未読メッセージはありません"}
@@ -2693,7 +2917,12 @@ function NewActivity({
         </div>
         <div className="koan-notices-list">
           {latestNotices.length ? latestNotices.map((notice) => (
-            <ActivityNotice notice={notice} onOpen={onOpen} key={noticeKey(notice)} />
+            <ActivityNotice
+              notice={notice}
+              snapshotNotices={notices}
+              onOpen={onOpen}
+              key={noticeKey(notice)}
+            />
           )) : (
             <EmptyState
               icon="inbox"
@@ -2710,9 +2939,11 @@ function NewActivity({
 
 function ActivityNotice({
   notice,
+  snapshotNotices,
   onOpen,
 }: {
   notice: Notice;
+  snapshotNotices: Notice[];
   onOpen: (notice: Notice) => void;
 }) {
   const [opening, setOpening] = useState(false);
@@ -2721,7 +2952,7 @@ function ActivityNotice({
     onOpen(notice);
     setOpening(true);
     try {
-      const url = await resolveNoticeUrl(notice);
+      const url = await resolveNoticeUrl(notice, snapshotNotices);
       if (detailWindow) detailWindow.location.href = url || BOARD_URL;
     } catch {
       if (detailWindow) detailWindow.location.href = BOARD_URL;
@@ -2826,16 +3057,18 @@ function ReferenceDesk({
       </section>
 
       <section className="notice-list-section" aria-label="掲示一覧">
-        <NoticeList notices={notices} onOpen={onOpen} />
+        <NoticeList allNotices={allNotices} notices={notices} onOpen={onOpen} />
       </section>
     </div>
   );
 }
 
 function NoticeList({
+  allNotices,
   notices,
   onOpen,
 }: {
+  allNotices: Notice[];
   notices: Notice[];
   onOpen: (notice: Notice) => void;
 }) {
@@ -2847,7 +3080,7 @@ function NoticeList({
     onOpen(notice);
     setOpening(key);
     try {
-      const url = await resolveNoticeUrl(notice);
+      const url = await resolveNoticeUrl(notice, allNotices);
       if (detailWindow) detailWindow.location.href = url || BOARD_URL;
     } catch {
       if (detailWindow) detailWindow.location.href = BOARD_URL;
