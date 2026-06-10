@@ -48,6 +48,7 @@ export type CleCourse = {
   displayId: string;
   timetableCode: string;
   name: string;
+  available?: boolean;
 };
 
 export type CleAnnouncement = {
@@ -146,6 +147,9 @@ function latestTimestamp(values: Array<string | null | undefined>) {
 }
 
 export function isCleCacheFresh(data: CleData) {
+  if (data.courses?.length && !data.courses.some((c) => "available" in c)) {
+    return false;
+  }
   return (
     isFresh(clePartUpdatedAt(data, "coursesUpdatedAt"), CLE_COURSES_TTL_MS) &&
     isFresh(clePartUpdatedAt(data, "tasksUpdatedAt"), CLE_TASKS_TTL_MS) &&
@@ -227,6 +231,26 @@ function results(value: unknown) {
 
 function courseCodeFromDisplayId(value: string) {
   return value.match(/^\d{4}-\d{2}-(\d{6})-/)?.[1] || "";
+}
+
+function cleanCourseName(value: string) {
+  const withoutCode = value.replace(/^[^:]+:\s*\d+\s*/, "");
+  const japanese = withoutCode.split(/\s*\/\s*/)[0];
+  return japanese
+    .replace(/^【取消】/, "")
+    .replace(/\s*【[^】]*】/g, "")
+    .replace(/[ 　]+/g, "")
+    .toLowerCase();
+}
+
+function courseNamesMatch(left: string, right: string) {
+  const l = cleanCourseName(left);
+  const r = cleanCourseName(right);
+  return Boolean(l && r && (l.includes(r) || r.includes(l)));
+}
+
+function isYes(value: unknown) {
+  return value === true || String(value).toLowerCase() === "yes" || String(value) === "1";
 }
 
 async function withTimeout<T>(task: Promise<T>, milliseconds: number) {
@@ -434,11 +458,15 @@ async function fetchCourses(tabId?: number) {
         asString(course.courseId) ||
         asString(course.externalId) ||
         asString(item.courseId);
+      const itemAvailability = asRecord(item.availability).available;
+      const courseAvailability = course.availability ? asRecord(course.availability).available : undefined;
+      const isAvailable = isYes(itemAvailability) && (courseAvailability === undefined || isYes(courseAvailability));
       return {
         courseId,
         displayId,
         timetableCode: courseCodeFromDisplayId(displayId),
         name: asString(course.name) || asString(item.name) || displayId,
+        available: isAvailable,
       };
     })
     .filter((course) => course.courseId && course.timetableCode)
@@ -624,9 +652,29 @@ export async function refreshCle(
       ...messages.map((message) => message.courseId),
     ]);
     const activeCodes = new Set(options.activeCourseCodes || []);
+    const resolvedActiveIds = new Set<string>();
+    if (activeCodes.size) {
+      for (const code of activeCodes) {
+        const match = courses.find((c) => c.timetableCode === code);
+        if (match) {
+          if (match.available !== false) {
+            resolvedActiveIds.add(match.courseId);
+          } else {
+            const parentMatch = courses.find(
+              (c) => c.available !== false && courseNamesMatch(match.name, c.name)
+            );
+            if (parentMatch) {
+              resolvedActiveIds.add(parentMatch.courseId);
+            } else {
+              resolvedActiveIds.add(match.courseId);
+            }
+          }
+        }
+      }
+    }
     const announcementCourses = courses.filter((course) =>
       activeCodes.size
-        ? activeCodes.has(course.timetableCode)
+        ? resolvedActiveIds.has(course.courseId)
         : recentCourseIds.has(course.courseId),
     );
     onProgress?.("連絡事項を取得中");

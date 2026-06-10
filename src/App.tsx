@@ -1714,16 +1714,32 @@ function buildCourseSummaries(data: KoanData, cleData: CleData): CourseSummary[]
     cleCodeByCourseId.set(course.courseId, code);
   }
   return (data.courses || []).filter((course) => !/【取消】|取消/.test(course.title)).map((course) => {
-    const cleCourse = cleByCode.get(course.code);
+    let cleCourse = cleByCode.get(course.code);
+    if (cleCourse) {
+      const hasAvailableAlternative = (cleData.courses || []).find(
+        (c) => c.courseId !== cleCourse!.courseId && c.available === true && courseMatchesText(course, c.name)
+      );
+      if (hasAvailableAlternative && cleCourse.available !== true) {
+        cleCourse = hasAvailableAlternative;
+      }
+    } else {
+      const alternative = (cleData.courses || []).find(
+        (c) => c.available !== false && courseMatchesText(course, c.name)
+      );
+      if (alternative) cleCourse = alternative;
+    }
     const tasks = cleData.tasks.filter((task) => {
+      if (cleCourse && task.courseId === cleCourse.courseId) return true;
       const code = cleCodeByCourseId.get(task.courseId) || timetableCodeFromCleDisplay(task.courseName);
       return code ? code === course.code : courseMatchesText(course, task.courseName);
     });
     const messages = cleData.messages.filter((message) => {
+      if (cleCourse && message.courseId === cleCourse.courseId) return true;
       const code = cleCodeByCourseId.get(message.courseId) || timetableCodeFromCleDisplay(message.courseName);
       return code ? code === course.code : courseMatchesText(course, message.courseName);
     });
     const announcements = (cleData.announcements || []).filter((ann) => {
+      if (cleCourse && ann.courseId === cleCourse.courseId) return true;
       const code = cleCodeByCourseId.get(ann.courseId) || timetableCodeFromCleDisplay(ann.courseName);
       return code ? code === course.code : courseMatchesText(course, ann.courseName);
     });

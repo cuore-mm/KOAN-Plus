@@ -1,6 +1,6 @@
 const CACHE_KEY = "koan-plus-cache-v2";
 const GRADES_CACHE_KEY = "koan-plus-grades-v1";
-const CLE_CACHE_KEY = "koan-plus-cle-v1";
+const CLE_CACHE_KEY = "koan-plus-cle-v2";
 const ONBOARDING_KEY = "koan-plus-onboarding-v1";
 
 export const TERMS_VERSION = "2026-06-06";
