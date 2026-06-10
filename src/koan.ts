@@ -966,7 +966,9 @@ export async function refreshSnapshot(
     const notices: Notice[] = [];
     const deadline = Date.now() + SNAPSHOT_MAX_DURATION_MS;
     const root = await fetchHtml(BOARD_URL);
-    requireLogin(root.doc);
+    if (new URL(root.url).origin !== "https://koan.osaka-u.ac.jp") {
+      throw new Error("KOANにログインしてから更新してください。");
+    }
     const syncAt = new Date().toISOString();
     const snapshotGenreSyncAt = { ...(previous.snapshotGenreSyncAt || {}) };
     for (const [index, genre] of GENRES.entries()) {
