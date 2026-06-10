@@ -23,6 +23,7 @@ pnpm-debug.log*
 Thumbs.db
 .idea/
 .vscode/
+.VSCodeCounter/
 
 # Temporary assets and scratch files at the root level
 /*.png
