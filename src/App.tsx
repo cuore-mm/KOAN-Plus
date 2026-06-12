@@ -29,9 +29,14 @@ import {
   type CleCourse,
   type CleTask,
   type CleAnnouncement,
+  type CleMaterial,
+  type CleMaterialList,
   cleMessageUrl,
   cleCourseUrl,
   cleTaskUrl,
+  downloadCourseMaterial,
+  downloadCourseMaterialBatch,
+  fetchCourseMaterials,
   isCleCacheFresh,
   refreshCle,
 } from "./cle";
@@ -90,6 +95,33 @@ const isExpired = (value: string | null, ttl: number) =>
 
 const compactStatus = (label: string, value: string) => value ? `${label}: ${value}` : "";
 
+function safeDownloadName(value: string) {
+  return value
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "")
+    .trim();
+}
+
+function uniqueDownloadPath(path: string, usedPaths: Set<string>) {
+  if (!usedPaths.has(path)) return path;
+  const slashIndex = path.lastIndexOf("/");
+  const directory = slashIndex >= 0 ? path.slice(0, slashIndex + 1) : "";
+  const fileName = slashIndex >= 0 ? path.slice(slashIndex + 1) : path;
+  const dotIndex = fileName.lastIndexOf(".");
+  const stem = dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+  const extension = dotIndex > 0 ? fileName.slice(dotIndex) : "";
+  let suffix = 2;
+  while (usedPaths.has(`${directory}${stem} (${suffix})${extension}`)) suffix += 1;
+  return `${directory}${stem} (${suffix})${extension}`;
+}
+
+function formatFileSize(bytes: number) {
+  if (!bytes) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
 type AppView = "dashboard" | "courses" | "reference" | "grades" | "settings";
 
 function App({ initialView = "dashboard" }: { initialView?: AppView }) {
@@ -137,6 +169,12 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [authSettings, setAuthSettings] = useState<AuthSettings | null>(null);
   const [freshnessClock, setFreshnessClock] = useState(Date.now());
   const [selectedAnnouncement, setSelectedAnnouncement] = useState<CleAnnouncement | null>(null);
+  const [materialCourse, setMaterialCourse] = useState<CourseSummary | null>(null);
+  const [materialList, setMaterialList] = useState<CleMaterialList | null>(null);
+  const [materialLoading, setMaterialLoading] = useState(false);
+  const [materialError, setMaterialError] = useState("");
+  const [materialDownloadingId, setMaterialDownloadingId] = useState("");
+  const [materialBatchProgress, setMaterialBatchProgress] = useState("");
 
   useEffect(() => {
     const intervalId = window.setInterval(() => setFreshnessClock(Date.now()), 15 * 1000);
@@ -229,6 +267,75 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       return false;
     } finally {
       setCleLoading(false);
+    }
+  };
+
+  const openMaterials = async (course: CourseSummary) => {
+    if (!course.cleCourse) return;
+    setMaterialCourse(course);
+    setMaterialList(null);
+    setMaterialError("");
+    setMaterialBatchProgress("");
+    setMaterialLoading(true);
+    try {
+      const auth = await ensureCleLogin();
+      const result = await fetchCourseMaterials(course.cleCourse.courseId, auth.tabId);
+      setMaterialList(result);
+    } catch (error) {
+      setMaterialError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMaterialLoading(false);
+    }
+  };
+
+  const closeMaterials = () => {
+    if (materialDownloadingId || materialBatchProgress) return;
+    setMaterialCourse(null);
+    setMaterialList(null);
+    setMaterialError("");
+  };
+
+  const downloadMaterial = async (material: CleMaterial) => {
+    setMaterialError("");
+    setMaterialDownloadingId(material.id);
+    try {
+      await downloadCourseMaterial(material);
+    } catch (error) {
+      setMaterialError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMaterialDownloadingId("");
+    }
+  };
+
+  const downloadAllMaterials = async () => {
+    if (!materialCourse || !materialList?.materials.length) return;
+    setMaterialError("");
+    setMaterialBatchProgress(`${materialList.materials.length}件を保存中…`);
+    try {
+      const usedPaths = new Set<string>();
+      const courseFolder = safeDownloadName(materialCourse.koan.title) || "CLE資料";
+      const entries = materialList.materials.map((material, index) => {
+        const basePath = [courseFolder, ...material.folderPath, material.fileName]
+          .map(safeDownloadName)
+          .filter(Boolean)
+          .join("/") || `material-${index + 1}`;
+        const path = uniqueDownloadPath(basePath, usedPaths);
+        usedPaths.add(path);
+        return { material, filePath: path };
+      });
+      const result = await downloadCourseMaterialBatch(entries);
+      if (result.failed.length) {
+        setMaterialError(
+          `${result.failed.length}件のダウンロードに失敗しました: ${result.failed
+            .slice(0, 3)
+            .map((failure) => failure.fileName.split("/").pop())
+            .join("、")}${result.failed.length > 3 ? " ほか" : ""}`,
+        );
+      }
+    } catch (error) {
+      setMaterialError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMaterialBatchProgress("");
     }
   };
 
@@ -563,6 +670,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
             selectedCode={selectedCourseCode}
             onSelectCode={setSelectedCourseCode}
             onOpenAnnouncement={setSelectedAnnouncement}
+            onOpenMaterials={openMaterials}
           />
         ) : view === "reference" ? (
           <ReferenceDesk
@@ -650,6 +758,107 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
                 閉じる
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {materialCourse && (
+        <div className="settings-modal-overlay" onClick={closeMaterials}>
+          <div
+            className="settings-modal materials-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="materials-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="materials-modal-header">
+              <div>
+                <h3 className="modal-title" id="materials-modal-title">資料</h3>
+                <p>{materialCourse.koan.title}</p>
+              </div>
+              <button
+                aria-label="資料一覧を閉じる"
+                className="materials-close"
+                disabled={Boolean(materialDownloadingId || materialBatchProgress)}
+                onClick={closeMaterials}
+                type="button"
+              >
+                閉じる
+              </button>
+            </header>
+
+            <div className="materials-modal-body">
+              {materialLoading ? (
+                <EmptyState
+                  icon="spinner"
+                  title="CLEから資料を読み込んでいます"
+                  description="この授業の資料だけを取得しています。"
+                  variant="normal"
+                />
+              ) : materialError && !materialList ? (
+                <EmptyState
+                  icon="info"
+                  title="資料を読み込めませんでした"
+                  description={materialError}
+                  variant="normal"
+                />
+              ) : materialList?.materials.length ? (
+                <div className="materials-list">
+                  {materialList.materials.map((material) => (
+                    <div className="material-row" key={material.id}>
+                      <div className="material-info">
+                        <strong>{material.title}</strong>
+                        <span>{material.fileName}</span>
+                        <small>
+                          {[
+                            material.folderPath.join(" / "),
+                            material.addedAt ? `追加 ${fmtTime(material.addedAt)}` : "",
+                            formatFileSize(material.size),
+                          ].filter(Boolean).join(" / ")}
+                        </small>
+                      </div>
+                      <button
+                        disabled={Boolean(materialDownloadingId || materialBatchProgress)}
+                        onClick={() => void downloadMaterial(material)}
+                        type="button"
+                      >
+                        {materialDownloadingId === material.id ? "取得中..." : "ダウンロード"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState
+                  icon="book-open"
+                  title="ダウンロードできる資料はありません"
+                  description="CLE上にファイル形式の資料が追加されると、ここに表示されます。"
+                  variant="normal"
+                />
+              )}
+            </div>
+
+            {materialError && materialList && (
+              <p className="materials-error" role="alert">{materialError}</p>
+            )}
+            <footer className="materials-modal-footer">
+              <small>
+                {materialList
+                  ? `${materialList.materials.length}件 / 取得 ${fmtTime(materialList.updatedAt)}`
+                  : "授業を開いた時だけCLEへアクセスします"}
+              </small>
+              <button
+                className="modal-btn primary"
+                disabled={
+                  materialLoading ||
+                  !materialList?.materials.length ||
+                  Boolean(materialDownloadingId || materialBatchProgress)
+                }
+                onClick={() => void downloadAllMaterials()}
+                type="button"
+              >
+                {materialBatchProgress ? `一括取得中 ${materialBatchProgress}` : "すべてダウンロード"}
+              </button>
+            </footer>
           </div>
         </div>
       )}
@@ -1975,6 +2184,7 @@ function CoursesPage({
   selectedCode,
   onSelectCode,
   onOpenAnnouncement,
+  onOpenMaterials,
 }: {
   cleData: CleData;
   data: KoanData;
@@ -1982,6 +2192,7 @@ function CoursesPage({
   selectedCode: string;
   onSelectCode: (code: string) => void;
   onOpenAnnouncement: (ann: CleAnnouncement) => void;
+  onOpenMaterials: (course: CourseSummary) => void;
 }) {
   const courses = useMemo(() => buildCourseSummaries(data, cleData), [cleData, data]);
   useEffect(() => {
@@ -2046,7 +2257,12 @@ function CoursesPage({
 
       <div className="course-detail-pane">
         {selected ? (
-          <CourseDetail course={selected} onOpenNotice={onOpenNotice} onOpenAnnouncement={onOpenAnnouncement} />
+          <CourseDetail
+            course={selected}
+            onOpenNotice={onOpenNotice}
+            onOpenAnnouncement={onOpenAnnouncement}
+            onOpenMaterials={onOpenMaterials}
+          />
         ) : (
           <CourseDefaultDetail />
         )}
@@ -2123,10 +2339,12 @@ function CourseDetail({
   course,
   onOpenNotice,
   onOpenAnnouncement,
+  onOpenMaterials,
 }: {
   course: CourseSummary;
   onOpenNotice: (notice: Notice) => void;
   onOpenAnnouncement: (ann: CleAnnouncement) => void;
+  onOpenMaterials: (course: CourseSummary) => void;
 }) {
   const teacherRoom = courseTeacherRoom(course.koan.teacherAndRoom);
   return (
@@ -2239,6 +2457,11 @@ function CourseDetail({
           <a href={cleCourseUrl(course.cleCourse.courseId)} target="_blank">CLE</a>
         ) : (
           <span className="disabled">CLE</span>
+        )}
+        {course.cleCourse ? (
+          <button onClick={() => onOpenMaterials(course)} type="button">資料</button>
+        ) : (
+          <span className="disabled">資料</span>
         )}
       </div>
     </div>

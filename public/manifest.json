@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KOAN Plus",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "icons": {
     "16": "icon-16.png",
     "32": "icon-32.png",
@@ -23,7 +23,9 @@
   "permissions": [
     "scripting",
     "storage",
-    "tabs"
+    "tabs",
+    "downloads",
+    "downloads.ui"
   ],
   "host_permissions": [
     "https://koan.osaka-u.ac.jp/*",

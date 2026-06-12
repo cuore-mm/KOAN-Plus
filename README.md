@@ -38,7 +38,7 @@ KOAN Plus は開発者が運営するバックエンド、アクセス解析、�
 
 サイドバーの「お問い合わせ」は Google Forms を開きます。リンクを開くと、拡張機能のバージョンとブラウザの User-Agent がフォームの事前入力値として Google に送信されます。フォームへ入力して送信した内容も Google によって処理されます。
 
-要求する Chrome 権限は `scripting`、`storage`、`tabs` と、上記4ドメインへのホスト権限です。利用条件は [TERMS.md](./TERMS.md)、詳細なデータ項目、保存期間、削除方法は [PRIVACY.md](./PRIVACY.md)、脆弱性の報告方法は [SECURITY.md](./SECURITY.md) を参照してください。
+要求する Chrome 権限は `scripting`、`storage`、`tabs`、`downloads`（CLE資料の保存）、`downloads.ui`（一括保存中のダウンロード表示の一時非表示）と、上記4ドメインへのホスト権限です。利用条件は [TERMS.md](./TERMS.md)、詳細なデータ項目、保存期間、削除方法は [PRIVACY.md](./PRIVACY.md)、脆弱性の報告方法は [SECURITY.md](./SECURITY.md) を参照してください。
 
 ## 通信・リクエスト方針
 

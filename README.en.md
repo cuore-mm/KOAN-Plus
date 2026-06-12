@@ -58,8 +58,10 @@ The **Contact** link opens Google Forms. Opening it sends the extension version
 and browser User-Agent to Google as prefilled query parameters. Information
 entered and submitted through the form is also processed by Google.
 
-The extension requests the `scripting`, `storage`, and `tabs` permissions plus
-host access to the four Osaka University domains listed in the manifest. See
+The extension requests the `scripting`, `storage`, `tabs`, `downloads` (saving
+CLE course materials), and `downloads.ui` (temporarily hiding the download
+bubble during batch saves) permissions plus host access to the four Osaka
+University domains listed in the manifest. See
 [PRIVACY.md](./PRIVACY.md) for data categories, retention, and deletion, and
 [SECURITY.md](./SECURITY.md) for vulnerability reporting.
 

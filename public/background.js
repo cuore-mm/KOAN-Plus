@@ -427,6 +427,140 @@ async function waitForTabComplete(tabId, milliseconds = 15000) {
   throw new Error("KOANタブの読み込みが完了しませんでした。再読み込みして再試行してください。");
 }
 
+async function waitForTabUrlIncludes(tabId, fragment, milliseconds = 15000) {
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete" && tab.url?.includes(fragment)) return tab;
+    } catch {
+      throw new Error("CLEタブが閉じられたため、資料取得を中止しました。");
+    }
+    await wait(250);
+  }
+  throw new Error("CLE資料ページの読み込みが完了しませんでした。");
+}
+
+function sanitizeDownloadPath(value) {
+  return String(value || "")
+    .split("/")
+    .map((part) => part.replace(/[<>:"\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/g, "").trim())
+    .filter((part) => part && part !== "." && part !== "..")
+    .join("/");
+}
+
+async function startCleDownload(rawUrl, rawFileName) {
+  const url = new URL(rawUrl);
+  if (url.origin !== CLE_ORIGIN) {
+    throw new Error("CLE以外からのダウンロードは許可されていません。");
+  }
+  const fileName = sanitizeDownloadPath(rawFileName);
+  if (!fileName) throw new Error("ダウンロードするファイル名が不正です。");
+  return chrome.downloads.download({
+    url: url.toString(),
+    filename: fileName,
+    conflictAction: "uniquify",
+    saveAs: false,
+  });
+}
+
+async function waitForDownloadsToSettle(downloadIds, milliseconds = 10 * 60 * 1000) {
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    const states = await Promise.all(downloadIds.map(
+      (id) => chrome.downloads.search({ id }).then((items) => items[0]?.state).catch(() => "interrupted"),
+    ));
+    if (!states.includes("in_progress")) return;
+    await wait(500);
+  }
+}
+
+async function extractCleDocumentFiles(tabId) {
+  const [execution] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      const files = [];
+      const seen = new Set();
+      const addFile = (url, fileName) => {
+        const normalizedUrl = String(url || "").trim();
+        const normalizedName = String(fileName || "").trim();
+        const key = `${normalizedUrl}\n${normalizedName}`;
+        if (!normalizedUrl || !normalizedName || seen.has(key)) return;
+        seen.add(key);
+        files.push({ url: normalizedUrl, fileName: normalizedName });
+      };
+
+      document.querySelectorAll('[role="region"]').forEach((region) => {
+        const labelAttr = region.getAttribute("aria-label") || "";
+        if (!/^(ファイル|file|attachment)s?$/i.test(labelAttr.trim())) return;
+
+        const url = region.querySelector("[data-ally-file-preview-url]")
+          ?.getAttribute("data-ally-file-preview-url") ||
+          region.querySelector("a[href]")?.getAttribute("href") || "";
+        const preview = [...region.querySelectorAll("[aria-label][aria-controls]")]
+          .map((element) => {
+            const label = element.getAttribute("aria-label") || "";
+            const match = label.match(/^ファイル\s+(.+?)\s+をプレビュー$/) ||
+              label.match(/^Preview\s+(?:file\s+)?(.+?)$/i);
+            return match?.[1]?.trim() || "";
+          })
+          .find(Boolean);
+        const menu = [...region.querySelectorAll("[aria-label]")]
+          .map((element) => {
+            const label = element.getAttribute("aria-label") || "";
+            const match = label.match(/^(.+?)\s+のその他のオプション$/) ||
+              label.match(/^More\s+options\s+for\s+(.+?)$/i);
+            return match?.[1]?.trim() || "";
+          })
+          .find(Boolean);
+        const visibleText = region.querySelector(".js-file-viewer-attachment-meta")?.textContent?.trim() ||
+          region.querySelector("a")?.textContent?.trim() || "";
+        addFile(url, preview || menu || visibleText);
+      });
+
+      document.querySelectorAll("[aria-label][aria-controls]").forEach((element) => {
+        const label = element.getAttribute("aria-label") || "";
+        const controls = element.getAttribute("aria-controls") || "";
+        const match = label.match(/^ファイル\s+(.+?)\s+をプレビュー$/) ||
+          label.match(/^Preview\s+(?:file\s+)?(.+?)$/i);
+        if (match && controls) addFile(controls.replace(/^file-preview-/, ""), match[1]);
+      });
+
+      // Label wording varies by locale/version, so also pair the file-viewer
+      // preview targets with the visible file name text next to them.
+      document.querySelectorAll('[aria-controls^="file-preview-"]').forEach((element) => {
+        const url = (element.getAttribute("aria-controls") || "").replace(/^file-preview-/, "");
+        const scope = element.closest(".js-file-viewer-attachment-meta") || element;
+        const name = scope.querySelector('[class*="fileText"]')?.textContent?.trim() ||
+          scope.textContent?.trim() || "";
+        if (url && /\.[a-z0-9]{1,8}$/i.test(name)) addFile(url, name);
+      });
+      return files;
+    },
+  });
+  return Array.isArray(execution?.result) ? execution.result : [];
+}
+
+async function waitForCleDocumentFiles(tabId, milliseconds = 8000) {
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    const files = await extractCleDocumentFiles(tabId).catch(() => []);
+    if (files.length) return files;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return [];
+}
+
+function cleDocumentUrl(courseId, contentId) {
+  return `${CLE_ORIGIN}/ultra/courses/${encodeURIComponent(courseId)}/outline/edit/document/${encodeURIComponent(contentId)}?courseId=${encodeURIComponent(courseId)}&view=content&state=view`;
+}
+
+async function openCleDocument(tabId, courseId, contentId) {
+  await chrome.tabs.update(tabId, { url: cleDocumentUrl(courseId, contentId) });
+  await waitForTabUrlIncludes(tabId, `/document/${contentId}`);
+}
+
 async function ensureKoanTab(active = false) {
   let tab = await findKoanTab();
   if (!tab?.id) {
@@ -1120,6 +1254,239 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "cle-download") {
+    (async () => {
+      requireExtensionPageSender(sender);
+      const url = new URL(message.url);
+      if (url.origin !== CLE_ORIGIN) {
+        throw new Error("CLE以外からのダウンロードは許可されていません。");
+      }
+      const fileName = String(message.fileName || "")
+        .split("/")
+        .map((part) => part.replace(/[<>:"\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/g, "").trim())
+        .filter((part) => part && part !== "." && part !== "..")
+        .join("/");
+      if (!fileName) throw new Error("ダウンロードするファイル名が不正です。");
+      const downloadId = await chrome.downloads.download({
+        url: url.toString(),
+        filename: fileName,
+        conflictAction: "uniquify",
+        saveAs: false,
+      });
+      return { ok: true, downloadId };
+    })()
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    return true;
+  }
+
+  if (message?.type === "cle-download-batch") {
+    (async () => {
+      requireExtensionPageSender(sender);
+      const prepared = (Array.isArray(message.files) ? message.files : [])
+        .slice(0, 500)
+        .map((file) => ({
+          url: String(file?.url || ""),
+          fileName: String(file?.fileName || ""),
+        }));
+      if (!prepared.length) return { ok: true, started: 0, failed: [] };
+      // Hide the download bubble while the batch runs so it doesn't pop up
+      // once per file; restored after every started download settles.
+      const canToggleUi = typeof chrome.downloads.setUiOptions === "function";
+      if (canToggleUi) {
+        await chrome.downloads.setUiOptions({ enabled: false }).catch(() => {});
+      }
+      const downloadIds = [];
+      const failed = [];
+      try {
+        for (const file of prepared) {
+          try {
+            downloadIds.push(await startCleDownload(file.url, file.fileName));
+          } catch (error) {
+            failed.push({
+              fileName: file.fileName,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      } finally {
+        if (canToggleUi) {
+          waitForDownloadsToSettle(downloadIds).finally(() => {
+            chrome.downloads.setUiOptions({ enabled: true }).catch(() => {});
+          });
+        }
+      }
+      return { ok: true, started: downloadIds.length, failed };
+    })()
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    return true;
+  }
+
+  if (message?.type === "cle-visible-files") {
+    (async () => {
+      requireExtensionPageSender(sender);
+      const tabs = await chrome.tabs.query({ url: `${CLE_ORIGIN}/*` });
+      const candidates = message.tabId
+        ? [
+            ...tabs.filter((tab) => tab.id === message.tabId),
+            ...tabs.filter((tab) => tab.id !== message.tabId),
+          ]
+        : tabs;
+      const files = [];
+      for (const tab of candidates) {
+        if (!tab.id || tab.discarded) continue;
+        files.push(...await extractCleDocumentFiles(tab.id).catch(() => []));
+      }
+      return { ok: true, files };
+    })()
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    return true;
+  }
+
+  if (message?.type === "cle-head-batch") {
+    (async () => {
+      requireExtensionPageSender(sender);
+      const urls = [...new Set(
+        (Array.isArray(message.urls) ? message.urls : [])
+          .map((value) => String(value || ""))
+          .filter((value) => {
+            try {
+              return new URL(value).origin === CLE_ORIGIN;
+            } catch {
+              return false;
+            }
+          }),
+      )].slice(0, 200);
+      if (!urls.length) return { ok: true, heads: [] };
+
+      const tabs = await chrome.tabs.query({ url: `${CLE_ORIGIN}/*` });
+      const tab = message.tabId
+        ? tabs.find((candidate) => candidate.id === message.tabId)
+        : tabs
+            .filter((candidate) => !candidate.discarded)
+            .sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0))[0];
+      if (!tab?.id) {
+        throw new Error("CLEをログイン済みのタブで開いてから取得してください。");
+      }
+
+      const [execution] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: "MAIN",
+        func: async (targetUrls) => {
+          const heads = [];
+          let index = 0;
+          const worker = async () => {
+            while (index < targetUrls.length) {
+              const url = targetUrls[index++];
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 10000);
+              try {
+                const response = await fetch(url, {
+                  method: "GET",
+                  credentials: "include",
+                  redirect: "follow",
+                  signal: controller.signal,
+                });
+                const contentDisposition = response.headers.get("content-disposition") || "";
+                const contentType = response.headers.get("content-type") || "";
+                heads.push({
+                  url,
+                  ok: response.ok,
+                  contentDisposition,
+                  contentType,
+                });
+                if (response.body) {
+                  try {
+                    await response.body.getReader().cancel();
+                  } catch {}
+                }
+              } catch {
+                if (!heads.some((h) => h.url === url)) {
+                  heads.push({ url, ok: false, contentDisposition: "", contentType: "" });
+                }
+              } finally {
+                clearTimeout(timeout);
+              }
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(6, targetUrls.length) }, worker));
+          return heads;
+        },
+        args: [urls],
+      });
+      return { ok: true, heads: Array.isArray(execution?.result) ? execution.result : [] };
+    })()
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    return true;
+  }
+
+  if (message?.type === "cle-document-files") {
+    (async () => {
+      requireExtensionPageSender(sender);
+      const courseId = String(message.courseId || "");
+      const contentIds = [...new Set(
+        (Array.isArray(message.contentIds) ? message.contentIds : [])
+          .map((value) => String(value || ""))
+          .filter((value) => /^_\d+_\d+$/.test(value)),
+      )].slice(0, 30);
+      if (!/^_\d+_\d+$/.test(courseId) || !contentIds.length) {
+        return { ok: true, files: [] };
+      }
+
+      const sourceTabs = await chrome.tabs.query({ url: `${CLE_ORIGIN}/*` });
+      const sourceTab = message.tabId
+        ? sourceTabs.find((candidate) => candidate.id === message.tabId)
+        : sourceTabs.find((candidate) => !candidate.discarded);
+      if (!sourceTab?.id) throw new Error("CLEタブが見つかりません。");
+
+      const scanTab = await chrome.tabs.create({
+        active: false,
+        url: cleDocumentUrl(courseId, contentIds[0]),
+      });
+      if (!scanTab.id) throw new Error("資料確認用のCLEタブを開けませんでした。");
+      const files = [];
+      try {
+        for (const [index, contentId] of contentIds.entries()) {
+          try {
+            if (index === 0) {
+              await waitForTabUrlIncludes(scanTab.id, `/document/${contentId}`);
+            } else {
+              await openCleDocument(scanTab.id, courseId, contentId);
+            }
+            const documentFiles = await waitForCleDocumentFiles(scanTab.id);
+            files.push(...documentFiles.map((file) => ({ ...file, contentId })));
+          } catch {
+            // Continue with the remaining documents; unresolved files keep their fallback names.
+          }
+        }
+      } finally {
+        await chrome.tabs.remove(scanTab.id).catch(() => {});
+      }
+      return { ok: true, files };
+    })()
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    return true;
+  }
+
   const targets = {
     "koan-fetch": {
       label: "KOAN",
@@ -1129,7 +1496,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     "cle-fetch": {
       label: "CLE",
       origin: "https://www.cle.osaka-u.ac.jp",
-      methods: ["GET"],
+      methods: ["GET", "HEAD"],
     },
   };
   const target = targets[message?.type];
@@ -1178,6 +1545,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ok: response.ok,
             status: response.status,
             text: await response.text(),
+            contentDisposition: response.headers.get("content-disposition") || "",
+            contentType: response.headers.get("content-type") || "",
             url: response.url,
           };
         } catch (error) {

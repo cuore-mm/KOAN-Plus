@@ -6,6 +6,10 @@ const MESSAGE_PAGE_SIZE = 100;
 const TASK_STATUS_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_STATUS_REQUESTS = 12;
 const MAX_ANNOUNCEMENT_COURSES_PER_REFRESH = 4;
+const MATERIALS_CACHE_KEY = "koan-plus-cle-materials-v14";
+const MATERIALS_CACHE_TTL_MS = 30 * 60 * 1000;
+const MATERIALS_PAGE_SIZE = 100;
+const MAX_MATERIAL_FOLDER_DEPTH = 8;
 const CLE_LEASE_KEY = "koan-plus-cle-refresh-lease-v1";
 const CLE_ATTEMPT_KEY = "koan-plus-cle-refresh-attempt-v1";
 const CLE_FAILURE_KEY = "koan-plus-cle-refresh-failure-v1";
@@ -67,6 +71,25 @@ export type CleAnnouncementCourseCache = {
   nextRetryAt?: number;
 };
 
+export type CleMaterial = {
+  id: string;
+  contentId: string;
+  attachmentId: string;
+  title: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  addedAt: string;
+  folderPath: string[];
+  downloadUrl: string;
+};
+
+export type CleMaterialList = {
+  courseId: string;
+  materials: CleMaterial[];
+  updatedAt: string;
+};
+
 export type CleData = {
   courses: CleCourse[];
   tasks: CleTask[];
@@ -100,13 +123,18 @@ export const EMPTY_CLE_DATA: CleData = {
 type CleTabResponse = {
   ok: boolean;
   status: number;
-  text: string;
+  text?: string;
+  contentDisposition?: string;
+  contentType?: string;
 };
 
 type CleTabMessage = {
   ok: boolean;
   response?: CleTabResponse;
   error?: string;
+  downloadId?: number;
+  files?: Array<{ url: string; fileName: string; contentId?: string }>;
+  heads?: Array<{ url: string; ok: boolean; contentDisposition: string; contentType: string }>;
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -118,6 +146,8 @@ type CleRefreshOptions = {
 };
 
 const jsonRequests = new Map<string, Promise<unknown>>();
+const materialRequests = new Map<string, Promise<CleMaterialList>>();
+const downloadRequests = new Map<string, Promise<number>>();
 
 function readTimestamp(key: string) {
   const value = Number.parseInt(localStorage.getItem(key) || "", 10);
@@ -224,9 +254,18 @@ function asNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+function asBoolean(value: unknown) {
+  return value === true || String(value).toLowerCase() === "true";
+}
+
 function results(value: unknown) {
   const items = asRecord(value).results;
   return Array.isArray(items) ? items.map(asRecord) : [];
+}
+
+function pagingNextUrl(value: unknown) {
+  const paging = asRecord(asRecord(value).paging);
+  return asString(paging.nextPage);
 }
 
 function courseCodeFromDisplayId(value: string) {
@@ -294,7 +333,7 @@ async function fetchJson(url: string, tabId?: number) {
       throw new Error(`CLEの取得に失敗しました (${result.response.status})。`);
     }
     try {
-      return JSON.parse(result.response.text) as unknown;
+      return JSON.parse(result.response.text || "") as unknown;
     } catch {
       throw new Error("CLEからJSON以外の応答が返りました。ログイン状態を確認してください。");
     }
@@ -305,6 +344,706 @@ async function fetchJson(url: string, tabId?: number) {
   } finally {
     if (jsonRequests.get(key) === request) jsonRequests.delete(key);
   }
+}
+
+function loadMaterialCache(): Record<string, CleMaterialList> {
+  try {
+    const value = JSON.parse(localStorage.getItem(MATERIALS_CACHE_KEY) || "{}") as unknown;
+    return asRecord(value) as Record<string, CleMaterialList>;
+  } catch {
+    return {};
+  }
+}
+
+function saveMaterialCache(cache: Record<string, CleMaterialList>) {
+  localStorage.setItem(MATERIALS_CACHE_KEY, JSON.stringify(cache));
+}
+
+function isMaterialCacheFresh(value: CleMaterialList | undefined) {
+  return Boolean(value?.updatedAt && isFresh(value.updatedAt, MATERIALS_CACHE_TTL_MS));
+}
+
+function contentHandlerId(item: JsonRecord) {
+  return asString(asRecord(item.contentHandler).id);
+}
+
+function contentHasChildren(item: JsonRecord) {
+  const handler = contentHandlerId(item);
+  return asBoolean(item.hasChildren) || /folder|lesson/i.test(handler) || (/document/i.test(handler) && !/block/i.test(handler));
+}
+
+function contentMayHaveFiles(item: JsonRecord) {
+  return /file|document/i.test(contentHandlerId(item));
+}
+
+function isDocumentContent(item: JsonRecord) {
+  const handler = contentHandlerId(item);
+  return /document/i.test(handler) && !/block/i.test(handler);
+}
+
+function cleFileUrl(value: string) {
+  if (!value) return "";
+  try {
+    const url = new URL(value, CLE_ORIGIN);
+    return url.origin === CLE_ORIGIN ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function fileNameFromUrl(value: string) {
+  try {
+    const url = new URL(value);
+    for (const key of ["filename", "fileName", "name", "downloadName"]) {
+      const candidate = url.searchParams.get(key);
+      if (candidate) return decodeURIComponent(candidate);
+    }
+    return decodeURIComponent(url.pathname.split("/").pop() || "");
+  } catch {
+    return "";
+  }
+}
+
+function isInternalMaterialName(value: string) {
+  const normalized = value.trim();
+  return !normalized ||
+    /^ultraDocumentBody$/i.test(normalized) ||
+    /^xid-\d+_\d+$/i.test(normalized) ||
+    /^_[0-9]+_[0-9]+$/i.test(normalized);
+}
+
+function fileNameScore(value: string, key: string) {
+  if (isInternalMaterialName(value)) return -1;
+  let score = 0;
+  if (/\.[a-z0-9]{1,8}$/i.test(value)) score += 100;
+  if (/^(originalFileName|fileName|filename|downloadName)$/i.test(key)) score += 50;
+  if (/^(displayName|title|name)$/i.test(key)) score += 20;
+  return score;
+}
+
+function bestFileName(value: unknown) {
+  const candidates: Array<{ value: string; score: number }> = [];
+  const visit = (current: unknown, key = "") => {
+    if (typeof current === "string") {
+      const score = fileNameScore(current, key);
+      if (score >= 0) candidates.push({ value: current.trim(), score });
+      return;
+    }
+    if (Array.isArray(current)) {
+      current.forEach((item) => visit(item, key));
+      return;
+    }
+    if (!current || typeof current !== "object") return;
+    Object.entries(current as JsonRecord).forEach(([childKey, child]) => {
+      if (!/url|href|body|description/i.test(childKey)) visit(child, childKey);
+    });
+  };
+  visit(value);
+  return candidates
+    .sort((left, right) => right.score - left.score || left.value.length - right.value.length)[0]
+    ?.value || "";
+}
+
+function materialFolderName(content: JsonRecord) {
+  const title = asString(content.title);
+  return isInternalMaterialName(title) ? "" : title;
+}
+
+function looksLikeFileUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return /\/download(?:\/|$|\?)/i.test(url.pathname) ||
+      /\/bbcswebdav\//i.test(url.pathname) ||
+      /\.[a-z0-9]{1,8}$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function embeddedMaterial(
+  courseId: string,
+  content: JsonRecord,
+  folderPath: string[],
+  fileName: string,
+  downloadUrl: string,
+  metadata: JsonRecord = {},
+): CleMaterial | null {
+  const safeUrl = cleFileUrl(downloadUrl);
+  const urlName = fileNameFromUrl(safeUrl);
+  const resolvedName = !isInternalMaterialName(fileName)
+    ? fileName.trim()
+    : !isInternalMaterialName(urlName) ? urlName : fileName.trim() || urlName;
+  if (!safeUrl || !looksLikeFileUrl(safeUrl)) return null;
+  const contentId = asString(content.id);
+  return {
+    id: `${contentId}:embedded:${safeUrl}`,
+    contentId,
+    attachmentId: asString(metadata.id),
+    title: materialFolderName(content) || resolvedName || "配布資料",
+    fileName: resolvedName || "配布資料",
+    mimeType: asString(metadata.mimeType) || "application/octet-stream",
+    size: asNumber(metadata.size),
+    // Ultra bulk course copies stamp every item with the same created date;
+    // modified tracks when the item was actually published or updated.
+    addedAt:
+      asString(content.modified) ||
+      asString(content.created),
+    folderPath,
+    downloadUrl: safeUrl,
+  };
+}
+
+function contentDispositionFileName(value: string) {
+  const encoded = value.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded;
+    }
+  }
+  return value.match(/filename="?([^";]+)"?/i)?.[1] || "";
+}
+
+function extractFileIdentifier(value: string) {
+  if (!value) return "";
+  const xidMatch = value.match(/(?:rid|xid)-(\d+)(?:_\d+)?/i);
+  if (xidMatch) return `xid:${xidMatch[1]}`;
+  const attachMatch = value.match(/\/attachments\/_?(\d+)(?:_\d+)?\/(?:download|preview)/i);
+  if (attachMatch) return `attach:${attachMatch[1]}`;
+  try {
+    const url = new URL(value, CLE_ORIGIN);
+    return url.pathname.replace(/\/+$/, "");
+  } catch {
+    return value;
+  }
+}
+
+async function fetchFileMetadataBatch(urls: string[], tabId?: number) {
+  const metadataByUrl = new Map<string, { fileName: string; mimeType: string }>();
+  if (!urls.length) return metadataByUrl;
+  try {
+    const result = await withTimeout(
+      chrome.runtime.sendMessage({
+        type: "cle-head-batch",
+        urls,
+        tabId,
+      }) as Promise<CleTabMessage>,
+      Math.max(REQUEST_TIMEOUT_MS, urls.length * 2000),
+    );
+    const heads = result?.ok && Array.isArray(result.heads) ? result.heads : [];
+    for (const head of heads) {
+      if (!head.ok) continue;
+      const id = extractFileIdentifier(head.url);
+      if (id) {
+        metadataByUrl.set(id, {
+          fileName: contentDispositionFileName(head.contentDisposition || ""),
+          mimeType: head.contentType || "",
+        });
+      }
+    }
+  } catch {
+    // Fall through to slower name resolution paths.
+  }
+  return metadataByUrl;
+}
+
+async function fetchVisibleFileNames(tabId?: number) {
+  try {
+    const result = await withTimeout(
+      chrome.runtime.sendMessage({
+        type: "cle-visible-files",
+        tabId,
+      }) as Promise<CleTabMessage>,
+      REQUEST_TIMEOUT_MS,
+    );
+    return result?.ok && Array.isArray(result.files) ? result.files : [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchDocumentFileNames(
+  courseId: string,
+  contentIds: string[],
+  tabId?: number,
+) {
+  if (!contentIds.length) return [];
+  try {
+    const result = await withTimeout(
+      chrome.runtime.sendMessage({
+        type: "cle-document-files",
+        courseId,
+        contentIds,
+        tabId,
+      }) as Promise<CleTabMessage>,
+      Math.max(REQUEST_TIMEOUT_MS, contentIds.length * 30 * 1000),
+    );
+    return result?.ok && Array.isArray(result.files) ? result.files : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizedFileUrl(value: string) {
+  try {
+    const url = new URL(value, CLE_ORIGIN);
+    return `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+type CleDocumentStub = {
+  contentId: string;
+  // Ultra page documents render at their parent folder's URL, not their own.
+  parentId: string;
+};
+
+async function resolveMaterialNames(
+  courseId: string,
+  materials: CleMaterial[],
+  tabId?: number,
+  documents: Map<string, CleDocumentStub> = new Map(),
+) {
+  const resolved = [...materials];
+  const unresolvedIndexes = () =>
+    resolved.flatMap((material, index) => isInternalMaterialName(material.fileName) ? [index] : []);
+  const applyName = (index: number, fileName: string, mimeType = "") => {
+    const material = resolved[index];
+    resolved[index] = {
+      ...material,
+      title: isInternalMaterialName(material.title) ? fileName : material.title,
+      fileName,
+      mimeType: mimeType || material.mimeType,
+    };
+  };
+  const applyNamesByUrl = (files: Array<{ url: string; fileName: string }>) => {
+    const nameByIdentifier = new Map<string, string>(
+      files
+        .map((file) => [extractFileIdentifier(file.url), file.fileName] as [string, string])
+        .filter(([id]) => id),
+    );
+    for (const index of unresolvedIndexes()) {
+      const id = extractFileIdentifier(resolved[index].downloadUrl);
+      const name = id ? nameByIdentifier.get(id) || "" : "";
+      if (name && !isInternalMaterialName(name)) applyName(index, name);
+    }
+  };
+
+  applyNamesByUrl(await fetchVisibleFileNames(tabId));
+
+  const headIndexes = unresolvedIndexes();
+  const metadataByUrl = await fetchFileMetadataBatch(
+    [...new Set(headIndexes.map((index) => resolved[index].downloadUrl))],
+    tabId,
+  );
+  for (const index of headIndexes) {
+    const id = extractFileIdentifier(resolved[index].downloadUrl);
+    const metadata = id ? metadataByUrl.get(id) : null;
+    if (!metadata) continue;
+    if (metadata.fileName && !isInternalMaterialName(metadata.fileName)) {
+      applyName(index, metadata.fileName, metadata.mimeType);
+    } else if (metadata.mimeType) {
+      resolved[index] = { ...resolved[index], mimeType: metadata.mimeType };
+    }
+  }
+
+  // Ultra page documents render at their parent folder's URL, so scan that
+  // page rather than the ultraDocumentBody child (which only shows an error).
+  const scanIdFor = (contentId: string) =>
+    documents.get(contentId)?.parentId || contentId;
+  const remainingContentIds = [...new Set(
+    unresolvedIndexes()
+      .map((index) => scanIdFor(resolved[index].contentId))
+      .filter(Boolean),
+  )];
+  if (remainingContentIds.length) {
+    const documentFiles = await fetchDocumentFileNames(courseId, remainingContentIds, tabId);
+    applyNamesByUrl(documentFiles);
+    const filesByContent = new Map<string, Array<{ fileName: string }>>();
+    for (const file of documentFiles) {
+      if (!file.contentId) continue;
+      filesByContent.set(file.contentId, [...(filesByContent.get(file.contentId) || []), file]);
+    }
+    for (const index of unresolvedIndexes()) {
+      const material = resolved[index];
+      const scanId = scanIdFor(material.contentId);
+      const siblings = unresolvedIndexes()
+        .filter((other) => scanIdFor(resolved[other].contentId) === scanId);
+      const candidates = filesByContent.get(scanId) || [];
+      if (siblings.length === 1 && candidates.length === 1 &&
+        !isInternalMaterialName(candidates[0].fileName)) {
+        applyName(index, candidates[0].fileName);
+      }
+    }
+  }
+
+  unresolvedIndexes().forEach((index) => applyName(index, `配布資料 ${index + 1}`));
+  return resolved;
+}
+
+function materialIdentity(material: CleMaterial) {
+  const resourceId =
+    material.downloadUrl.match(/(?:rid|xid)-(\d+)_\d+/i)?.[1] ||
+    material.downloadUrl.match(/\/attachments\/_?(\d+)_\d+\/download/i)?.[1] ||
+    material.attachmentId.match(/^_?(\d+)_\d+$/)?.[1];
+  return resourceId
+    ? `${material.contentId}:resource:${resourceId}`
+    : `${material.contentId}:url:${normalizedFileUrl(material.downloadUrl)}`;
+}
+
+function preferNamedMaterial(left: CleMaterial, right: CleMaterial) {
+  const leftInternal = isInternalMaterialName(left.fileName) || /^配布資料 \d+$/.test(left.fileName);
+  const rightInternal = isInternalMaterialName(right.fileName) || /^配布資料 \d+$/.test(right.fileName);
+  if (leftInternal !== rightInternal) return leftInternal ? right : left;
+  return left.downloadUrl.includes("/bbcswebdav/") ? left : right;
+}
+
+function collectEmbeddedMaterials(
+  courseId: string,
+  content: JsonRecord,
+  folderPath: string[],
+  detail: unknown,
+) {
+  const materials: CleMaterial[] = [];
+  const visitHtml = (body: string) => {
+    if (!body.includes("href")) return;
+    const document = new DOMParser().parseFromString(body, "text/html");
+    document.querySelectorAll("a[href]").forEach((anchor) => {
+      // Ultra documents render file anchors with an empty body; the file name
+      // and MIME type live in the data-bbfile attribute as JSON (linkName).
+      let bbFile: JsonRecord = {};
+      try {
+        bbFile = asRecord(JSON.parse(anchor.getAttribute("data-bbfile") || ""));
+      } catch {
+        bbFile = {};
+      }
+      const material = embeddedMaterial(
+        courseId,
+        content,
+        folderPath,
+        asString(bbFile.linkName) ||
+          asString(bbFile.displayName) ||
+          anchor.getAttribute("download") ||
+          anchor.textContent?.trim() ||
+          "",
+        anchor.getAttribute("href") || "",
+        { mimeType: asString(bbFile.mimeType) },
+      );
+      if (material) materials.push(material);
+    });
+  };
+  const visitString = (value: string) => {
+    const trimmed = value.trim();
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        visit(JSON.parse(trimmed));
+        return;
+      } catch {
+        // Some document body strings contain HTML rather than serialized JSON.
+      }
+    }
+    visitHtml(value);
+  };
+  const visit = (value: unknown) => {
+    if (typeof value === "string") {
+      visitString(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const record = value as JsonRecord;
+    const fileName =
+      bestFileName(record) ||
+      asString(record.fileName) ||
+      asString(record.originalFileName) ||
+      asString(record.displayName) ||
+      asString(record.name);
+    const url =
+      asString(record.downloadUrl) ||
+      asString(record.fileUrl) ||
+      asString(record.url) ||
+      asString(record.href);
+    const material = embeddedMaterial(courseId, content, folderPath, fileName, url, record);
+    if (material) materials.push(material);
+    Object.values(record).forEach(visit);
+  };
+  visit(detail);
+  visitHtml(asString(content.body));
+  return materials;
+}
+
+async function fetchAllResults(url: string, tabId?: number) {
+  const collected: JsonRecord[] = [];
+  let nextUrl = url;
+  for (let page = 0; page < 20 && nextUrl; page += 1) {
+    const response = await fetchJson(nextUrl, tabId);
+    const items = results(response);
+    collected.push(...items);
+    const next = pagingNextUrl(response);
+    if (next) {
+      nextUrl = next.startsWith("http") ? next : `${CLE_ORIGIN}${next}`;
+    } else if (items.length >= MATERIALS_PAGE_SIZE) {
+      const parsed = new URL(nextUrl);
+      const offset = Number.parseInt(parsed.searchParams.get("offset") || "0", 10);
+      parsed.searchParams.set("offset", String(offset + items.length));
+      nextUrl = parsed.toString();
+    } else {
+      nextUrl = "";
+    }
+  }
+  return collected;
+}
+
+async function fetchContentChildren(courseId: string, contentId: string, tabId?: number) {
+  const suffix = `/courses/${encodeURIComponent(courseId)}/contents/${encodeURIComponent(contentId)}/children?limit=${MATERIALS_PAGE_SIZE}`;
+  try {
+    return await fetchAllResults(`${API_ORIGIN}/public/v1${suffix}`, tabId);
+  } catch {
+    return fetchAllResults(`${API_ORIGIN}/v1${suffix}`, tabId);
+  }
+}
+
+async function fetchDocumentDetails(courseId: string, contentId: string, tabId?: number) {
+  const suffix = `/courses/${encodeURIComponent(courseId)}/contents/${encodeURIComponent(contentId)}`;
+  // Ultra documents are not fully exposed by every REST version, so query both and keep what responds.
+  const details = await Promise.all([
+    fetchJson(`${API_ORIGIN}/public/v1${suffix}`, tabId).catch(() => null),
+    fetchJson(`${API_ORIGIN}/v1${suffix}`, tabId).catch(() => null),
+  ]);
+  return details.filter((detail) => detail !== null);
+}
+
+async function fetchContentAttachments(
+  courseId: string,
+  content: JsonRecord,
+  folderPath: string[],
+  tabId?: number,
+): Promise<CleMaterial[]> {
+  const contentId = asString(content.id);
+  if (!contentId || !contentMayHaveFiles(content)) return [];
+  let attachmentMaterials: CleMaterial[] = [];
+  const attachmentsSuffix = `/courses/${encodeURIComponent(courseId)}/contents/${encodeURIComponent(contentId)}/attachments`;
+  // Not every Learn instance exposes attachments via the public REST API for
+  // students, so fall back to the internal v1 endpoint the Ultra UI uses.
+  let attachmentsBase = `${API_ORIGIN}/public/v1`;
+  let attachments: JsonRecord[] = [];
+  try {
+    attachments = await fetchAllResults(`${attachmentsBase}${attachmentsSuffix}?limit=${MATERIALS_PAGE_SIZE}`, tabId);
+  } catch {
+    try {
+      attachmentsBase = `${API_ORIGIN}/v1`;
+      attachments = await fetchAllResults(`${attachmentsBase}${attachmentsSuffix}?limit=${MATERIALS_PAGE_SIZE}`, tabId);
+    } catch {
+      attachments = [];
+    }
+  }
+  attachmentMaterials = attachments
+    .map((attachment): CleMaterial => {
+      const attachmentId = asString(attachment.id);
+      const nameCandidate =
+        bestFileName(attachment) ||
+        asString(attachment.fileName) ||
+        asString(attachment.name);
+      const fileName = nameCandidate;
+      const addedAt =
+        asString(content.modified) ||
+        asString(content.created);
+      return {
+        id: `${contentId}:${attachmentId}`,
+        contentId,
+        attachmentId,
+        title: materialFolderName(content) || fileName,
+        fileName,
+        mimeType: asString(attachment.mimeType) || "application/octet-stream",
+        size: asNumber(attachment.size),
+        addedAt,
+        folderPath,
+        downloadUrl: `${attachmentsBase}${attachmentsSuffix}/${encodeURIComponent(attachmentId)}/download`,
+      };
+    })
+    .filter((material) => material.attachmentId);
+  if (!isDocumentContent(content)) return attachmentMaterials;
+  const details = await fetchDocumentDetails(courseId, contentId, tabId);
+  return [
+    ...attachmentMaterials,
+    ...details.flatMap((detail) =>
+      collectEmbeddedMaterials(
+        courseId,
+        content,
+        [...folderPath, materialFolderName(content)].filter(Boolean),
+        detail,
+      ),
+    ),
+  ];
+}
+
+async function fetchMaterialChildren(
+  courseId: string,
+  content: JsonRecord,
+  folderPath: string[],
+  depth: number,
+  tabId?: number,
+  documents?: Map<string, CleDocumentStub>,
+) {
+  if (!contentHasChildren(content)) return [];
+  try {
+    return await fetchMaterialFolder(
+      courseId,
+      asString(content.id),
+      [...folderPath, materialFolderName(content)].filter(Boolean),
+      depth + 1,
+      tabId,
+      documents,
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function fetchMaterialFolder(
+  courseId: string,
+  parentContentId: string | null,
+  folderPath: string[],
+  depth: number,
+  tabId?: number,
+  documents?: Map<string, CleDocumentStub>,
+): Promise<CleMaterial[]> {
+  if (depth > MAX_MATERIAL_FOLDER_DEPTH) return [];
+  const contents = parentContentId
+    ? await fetchContentChildren(courseId, parentContentId, tabId)
+    : await fetchAllResults(
+      `${API_ORIGIN}/public/v1/courses/${encodeURIComponent(courseId)}/contents?limit=${MATERIALS_PAGE_SIZE}`,
+      tabId,
+    );
+  if (documents && parentContentId) {
+    for (const content of contents) {
+      const contentId = asString(content.id);
+      if (!contentId || !isDocumentContent(content)) continue;
+      documents.set(contentId, { contentId, parentId: parentContentId });
+    }
+  }
+  const directMaterials = await Promise.all(
+    contents.map((content) => fetchContentAttachments(courseId, content, folderPath, tabId)),
+  );
+  const childMaterials = await Promise.all(
+    contents
+      .filter(contentHasChildren)
+      .map((content) => fetchMaterialChildren(courseId, content, folderPath, depth, tabId, documents)),
+  );
+  return [...directMaterials, ...childMaterials].flat();
+}
+
+export async function fetchCourseMaterials(
+  courseId: string,
+  tabId?: number,
+  force = false,
+): Promise<CleMaterialList> {
+  const cache = loadMaterialCache();
+  if (!force && isMaterialCacheFresh(cache[courseId])) return cache[courseId];
+  const existing = materialRequests.get(courseId);
+  if (existing) return existing;
+  const documents = new Map<string, CleDocumentStub>();
+  const request = fetchMaterialFolder(courseId, null, [], 0, tabId, documents)
+    .then(async (materials) => {
+      const namedMaterials = await resolveMaterialNames(courseId, materials, tabId, documents);
+      const uniqueByResource = new Map<string, CleMaterial>();
+      namedMaterials.forEach((material) => {
+        const key = materialIdentity(material);
+        const current = uniqueByResource.get(key);
+        uniqueByResource.set(key, current ? preferNamedMaterial(current, material) : material);
+      });
+      const unique = [...uniqueByResource.values()]
+        .sort((left, right) => {
+          const dateOrder = timestampValue(right.addedAt) - timestampValue(left.addedAt);
+          if (dateOrder) return dateOrder;
+          const folderOrder = left.folderPath.join("/").localeCompare(right.folderPath.join("/"), "ja");
+          return folderOrder || left.title.localeCompare(right.title, "ja");
+        });
+      const result = {
+        courseId,
+        materials: unique,
+        updatedAt: new Date().toISOString(),
+      };
+      saveMaterialCache({ ...cache, [courseId]: result });
+      return result;
+    });
+  materialRequests.set(courseId, request);
+  try {
+    return await request;
+  } finally {
+    if (materialRequests.get(courseId) === request) materialRequests.delete(courseId);
+  }
+}
+
+export async function downloadCourseMaterial(material: CleMaterial, filePath = material.fileName) {
+  const downloadUrl = new URL(material.downloadUrl);
+  if (downloadUrl.origin !== CLE_ORIGIN) {
+    throw new Error("CLE以外からのダウンロードは許可されていません。");
+  }
+  const requestKey = `${material.id}:${filePath}`;
+  const existing = downloadRequests.get(requestKey);
+  if (existing) return existing;
+  const request = (async () => {
+    const result = await withTimeout(
+      chrome.runtime.sendMessage({
+        type: "cle-download",
+        url: material.downloadUrl,
+        fileName: filePath,
+      }) as Promise<CleTabMessage>,
+      REQUEST_TIMEOUT_MS,
+    );
+    if (!result?.ok || !Number.isInteger(result.downloadId)) {
+      throw new Error(result?.error || `「${material.fileName}」のダウンロードに失敗しました。拡張機能を再読み込みしてください。`);
+    }
+    return result.downloadId as number;
+  })();
+  downloadRequests.set(requestKey, request);
+  try {
+    return await request;
+  } finally {
+    if (downloadRequests.get(requestKey) === request) downloadRequests.delete(requestKey);
+  }
+}
+
+export type CleBatchDownloadResult = {
+  started: number;
+  failed: Array<{ fileName: string; error: string }>;
+};
+
+export async function downloadCourseMaterialBatch(
+  entries: Array<{ material: CleMaterial; filePath: string }>,
+): Promise<CleBatchDownloadResult> {
+  for (const entry of entries) {
+    if (new URL(entry.material.downloadUrl).origin !== CLE_ORIGIN) {
+      throw new Error("CLE以外からのダウンロードは許可されていません。");
+    }
+  }
+  if (!entries.length) return { started: 0, failed: [] };
+  const result = await withTimeout(
+    chrome.runtime.sendMessage({
+      type: "cle-download-batch",
+      files: entries.map((entry) => ({
+        url: entry.material.downloadUrl,
+        fileName: entry.filePath,
+      })),
+    }) as Promise<CleTabMessage & CleBatchDownloadResult>,
+    Math.max(REQUEST_TIMEOUT_MS, entries.length * 2000),
+  );
+  if (!result?.ok) {
+    throw new Error(result?.error || "一括ダウンロードを開始できませんでした。拡張機能を再読み込みしてください。");
+  }
+  return {
+    started: asNumber(result.started),
+    failed: Array.isArray(result.failed) ? result.failed : [],
+  };
 }
 
 function taskStatus(attemptsResponse: unknown, gradeResponse: unknown, dueAt: string) {

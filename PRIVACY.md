@@ -1,6 +1,6 @@
 # Privacy Policy / プライバシーポリシー
 
-Last updated / 最終更新日: 2026-06-06
+Last updated / 最終更新日: 2026-06-12
 
 ## English
 
@@ -19,7 +19,8 @@ KOAN Plus may process and store:
 - KOAN schedules, course registrations, class changes, bulletin metadata,
   grades, credits, GPA data, and update timestamps;
 - CLE course mappings, assignment titles, due dates, submission or grading
-  status, unread message counts, and update timestamps;
+  status, unread message counts, course material file names and download
+  URLs, and update timestamps;
 - display preferences and refresh coordination timestamps;
 - when auto-login is enabled, the university ID, password, TOTP secret,
   temporary cancellation code, and MFA consent state.
@@ -79,6 +80,9 @@ KOAN Plus requests:
 - `scripting` to run restricted fetches and page actions in KOAN/CLE tabs;
 - `tabs` to find, open, update, and close authentication and CLE tabs;
 - `storage` for session-scoped refresh and tab coordination;
+- `downloads` to save CLE course materials to the user's download folder;
+- `downloads.ui` to temporarily hide Chrome's download bubble while a batch
+  of materials is being saved, so it does not flash once per file;
 - host permissions for the four Osaka University domains listed above.
 
 ## 日本語
@@ -97,7 +101,8 @@ KOAN Plus は、次のデータを処理・保存する場合があります。
 
 - KOANの時間割、履修科目、休講・教室変更、掲示メタデータ、成績、単位、GPA、
   更新日時
-- CLEの科目対応、課題名、期限、提出・採点状態、未読メッセージ数、更新日時
+- CLEの科目対応、課題名、期限、提出・採点状態、未読メッセージ数、
+  配布資料のファイル名・取得用URL、更新日時
 - 表示設定、更新制御用のタイムスタンプ
 - 自動ログインを有効にした場合の学内個人ID、パスワード、TOTPシークレット、
   一時解除コード、MFA同意状態
@@ -152,4 +157,7 @@ KOAN Plus は次の権限を要求します。
 - `scripting`: KOAN/CLEタブ内で、制限された取得処理とページ操作を行うため
 - `tabs`: 認証タブやCLEタブを検索、作成、更新、終了するため
 - `storage`: セッション単位の更新・タブ制御を保存するため
+- `downloads`: CLEの配布資料をユーザーのダウンロードフォルダへ保存するため
+- `downloads.ui`: 一括保存中に Chrome のダウンロード表示を一時的に非表示にし、
+  ファイルごとの点滅を防ぐため
 - 上記4つの大阪大学ドメインに対するホスト権限
