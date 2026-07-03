@@ -15,6 +15,21 @@
 - **WHEN** `package.json` の version または description が変更される
 - **THEN** システムは Chrome 用 manifest と Firefox 用 manifest の両方へ同じ version と description を反映する
 
+### Requirement: Firefox サポート対象バージョン
+システムは Firefox 最新版と現行 Firefox ESR をサポート対象とすることを SHALL とする。Firefox の最低サポートバージョンは実装時点の現行 ESR major に合わせることを MUST とする。旧 ESR や古い Firefox のための複雑な互換処理は追加しないことを MUST とする。
+
+#### Scenario: 最低サポートバージョンを記録する
+- **WHEN** 開発者が Firefox 対応実装を開始する
+- **THEN** システムまたは実装メモは現行 Firefox ESR major を最低サポートバージョンとして記録する
+
+#### Scenario: Firefox 最新版と現行 ESR で検証する
+- **WHEN** 開発者が Firefox 用成果物を検証する
+- **THEN** 開発者は Firefox 最新版と現行 ESR の両方で MVP 機能を確認する
+
+#### Scenario: 旧 ESR 専用分岐を避ける
+- **WHEN** 対象 API が旧 ESR または古い Firefox でのみ不足している
+- **THEN** システムは旧 ESR 専用の複雑な互換処理を追加せず、サポート対象外として扱う
+
 ### Requirement: ブラウザ API 互換呼び出し
 システムは runtime、tabs、storage、scripting、downloads に関するブラウザ API 差異を互換レイヤーまたは同等の集約箇所で吸収することを SHALL とする。新規または変更されるアプリケーションコードは、原則として直接の `chrome.*` 追加を避けることを MUST とする。
 
@@ -28,7 +43,7 @@
 
 #### Scenario: 非対応 API を検出する
 - **WHEN** 対象ブラウザに `storage.session` または `downloads.setUiOptions` が存在しない
-- **THEN** システムは未定義 API を直接呼び出さず、fallback または安全な no-op に切り替える
+- **THEN** システムは未定義 API を直接呼び出さず、現行 ESR 対応に必要な軽い fallback または安全な no-op に切り替える
 
 ### Requirement: Firefox での基本利用フロー
 システムは Firefox で拡張機能を一時ロードした利用者に対し、少なくともダッシュボード起動、オンボーディング、保存済みデータ表示、KOAN/CLE の基本取得を提供することを SHALL とする。

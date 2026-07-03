@@ -15,6 +15,7 @@ KOAN Plus は Vite + React + TypeScript のローカル専用ブラウザ拡張�
 - `chrome.*` と `browser.*`、callback と Promise の差異を吸収する互換レイヤーを導入する。
 - `chrome-extension:` と `moz-extension:` の両方を拡張ページとして扱えるようにする。
 - `storage.session`、`downloads.setUiOptions`、`scripting.executeScript` の Firefox 差異に対して feature detection または代替経路を提供する。
+- Firefox のサポート対象を「最新版」と「現行 ESR」に限定し、最低サポートバージョンは実装時点の現行 Firefox ESR major に合わせる。
 - Chrome 版の `npm run build` と既存手動検証を回帰させない。
 - Firefox MVP として、ダッシュボード起動、オンボーディング、保存済みデータ表示、KOAN/CLE 基本取得を優先して動作させる。
 - page world 依存が強い機能は、実装時に明示的な Firefox 代替経路を作るか、未対応状態をユーザーに分かる形で扱う。
@@ -23,6 +24,7 @@ KOAN Plus は Vite + React + TypeScript のローカル専用ブラウザ拡張�
 
 - Firefox Add-ons / AMO への提出、署名、公開手続きはこの変更の範囲外。
 - Safari、Edge 専用機能、Manifest V2 への対応は範囲外。
+- 旧 ESR や古い Firefox のための複雑な互換処理は範囲外。
 - KOAN、CLE、IdP、MFA の仕様自体の変更は行わない。
 - UI デザインの大幅な刷新は行わない。
 - 自動 E2E テスト基盤の本格導入は必須範囲外。ただし `web-ext lint` など軽量検証の追加は許容する。
@@ -45,7 +47,17 @@ KOAN Plus は Vite + React + TypeScript のローカル専用ブラウザ拡張�
 
 代替案: 全ファイルに `globalThis.browser ?? globalThis.chrome` を直接書く案は、差異のある API で漏れが出るため採用しない。
 
-### Decision 3: Firefox では feature detection と fallback を必須にする
+### Decision 3: Firefox サポート対象は最新版と現行 ESR に限定する
+
+Firefox のサポート対象は Firefox 最新版と現行 Firefox ESR とする。最低サポートバージョンは実装時点の現行 ESR major に合わせ、実装開始時に Mozilla のリリース情報または `web-ext` / Firefox 実機で現行 ESR major を確認して記録する。
+
+ESR 対応のために軽い fallback は持つが、旧 ESR や古い Firefox のための複雑な互換処理は追加しない。例えば、存在確認だけで切り替えられる API fallback、TTL 付き一時状態、未対応 API の安全な no-op は許容する。一方で、旧 ESR 専用の大きな別実装、複数世代の API 分岐、古い Firefox のためだけの page bridge 方式追加は採用しない。
+
+理由: 大学環境では ESR 利用があり得るが、旧 ESR まで広げると互換分岐が増えて Chrome 回帰リスクと保守コストが高くなるため。
+
+代替案: 最新版のみを対象にする案は ESR 利用者を取りこぼすため採用しない。旧 ESR も対象にする案は保守負担が過大なため採用しない。
+
+### Decision 4: Firefox では feature detection と軽い fallback を使う
 
 以下の API は存在確認してから呼び出す。
 
@@ -53,11 +65,11 @@ KOAN Plus は Vite + React + TypeScript のローカル専用ブラウザ拡張�
 - `chrome.downloads.setUiOptions`: 存在しない場合は UI 抑制を行わず、ダウンロード自体を継続する。
 - `chrome.scripting.executeScript` の `world`: Firefox で未対応の場合は isolated world で動く処理へ置き換えるか、content script + page bridge を使う。
 
-理由: Firefox のバージョン差、ESR 差、WebExtensions 実装差を許容するため。
+理由: Firefox 最新版と現行 ESR の API 差を許容しつつ、旧 ESR 向けの複雑な互換処理を避けるため。
 
-代替案: Firefox の最低バージョンを最新のみに限定して fallback を減らす案もあるが、大学環境では ESR 利用があり得るため初期設計では fallback を持つ。
+代替案: すべての API 差を個別実装で吸収する案は、旧 ESR 互換と同等の複雑さになるため採用しない。
 
-### Decision 4: `world: "MAIN"` 依存は機能単位で再設計する
+### Decision 5: `world: "MAIN"` 依存は機能単位で再設計する
 
 `public/background.js` 内の `chrome.scripting.executeScript({ world: "MAIN", func: ... })` 利用箇所を棚卸しし、各用途を以下に分類する。
 
@@ -71,7 +83,7 @@ KOAN Plus は Vite + React + TypeScript のローカル専用ブラウザ拡張�
 
 代替案: Firefox では該当機能をすべて未対応にする案は MVP としては可能だが、最終的な Firefox 対応として不十分なため採用しない。
 
-### Decision 5: MVP と完全対応を分けてタスク化する
+### Decision 6: MVP と完全対応を分けてタスク化する
 
 最初の完了判定は「Firefox で拡張を読み込み、ダッシュボード、オンボーディング、保存済みデータ表示、KOAN/CLE 基本取得が動く」ことに置く。自動ログイン、MFA 自動登録、CLE 資料ダウンロードは page world 依存が残るため、MVP 後に個別検証する。
 
@@ -86,17 +98,18 @@ KOAN Plus は Vite + React + TypeScript のローカル専用ブラウザ拡張�
 - [Risk] `storage.session` fallback に一時認証状態が残る → TTL、用途別 key prefix、処理完了時の削除、タブ close 時の削除を実装する。認証情報そのものは既存の IndexedDB 暗号化保存方針から逸脱しない。
 - [Risk] page bridge が不正な message を受ける → message type、nonce、`event.source === window`、許可 origin または拡張内部の検証を必須にする。資格情報を page bridge へ渡す場合は最小限にし、ログ出力しない。
 - [Risk] Firefox では `downloads.setUiOptions` がないため一括ダウンロード時の UI が Chrome と異なる → Firefox では UI 抑制を仕様上保証しない。ダウンロード成功を優先する。
-- [Risk] Firefox ESR と最新版で API サポートが異なる → feature detection を前提にし、検証時に対象バージョンを記録する。
+- [Risk] Firefox 現行 ESR と最新版で API サポートが異なる → feature detection と軽い fallback を前提にし、検証時に対象 ESR major と最新版 major を記録する。旧 ESR 専用の複雑な互換処理は追加しない。
 
 ## Migration Plan
 
-1. 実装前に `chrome.*` 利用箇所、`world: "MAIN"` 利用箇所、manifest/build script を再調査して一覧化する。
-2. Chrome 用ビルドを現状と同等に通す。既存 `npm run build` を壊さないことを最優先する。
-3. ブラウザ別 manifest と build script を追加し、Chrome と Firefox の出力先を分離する。
-4. `src/App.tsx`、`src/auth.ts` など UI/TypeScript 側から互換レイヤーへ置換する。
-5. `public/background.js` と `public/auth-content.js` の Firefox 非互換 API を feature detection 付きにする。
-6. Firefox で MVP 機能を検証する。
-7. page world 依存機能を分類し、必要なものだけ page bridge または代替実装へ移行する。
+1. 実装前に Firefox 最新版と現行 ESR major を確認し、最低サポートバージョンとして記録する。
+2. 実装前に `chrome.*` 利用箇所、`world: "MAIN"` 利用箇所、manifest/build script を再調査して一覧化する。
+3. Chrome 用ビルドを現状と同等に通す。既存 `npm run build` を壊さないことを最優先する。
+4. ブラウザ別 manifest と build script を追加し、Chrome と Firefox の出力先を分離する。
+5. `src/App.tsx`、`src/auth.ts` など UI/TypeScript 側から互換レイヤーへ置換する。
+6. `public/background.js` と `public/auth-content.js` の Firefox 非互換 API を feature detection 付きにする。
+7. Firefox 最新版と現行 ESR で MVP 機能を検証する。
+8. page world 依存機能を分類し、必要なものだけ page bridge または代替実装へ移行する。
 
 Rollback は、ブラウザ別 build script と manifest を追加した状態でも Chrome 用既存 manifest/build を維持することで行う。Firefox 用出力に問題がある場合は Firefox 用 npm script をリリース対象から外し、Chrome 用 `npm run build` と `npm run zip` のみを使う。
 
@@ -105,6 +118,7 @@ Rollback は、ブラウザ別 build script と manifest を追加した状態�
 - アプリケーションコードの実装時は、この change の spec と tasks を優先する。
 - 直接 `chrome.*` を追加する場合は、なぜ互換レイヤー経由にできないかをコメントまたはタスク完了メモに残す。
 - 新しい Firefox 用処理は Chrome の既存処理を削除せず、feature detection またはブラウザ別エントリで分離する。
+- Firefox 向け互換処理は最新版と現行 ESR を対象にする。旧 ESR や古い Firefox のためだけの複雑な分岐は追加しない。
 - `public/background.js` を大きく分割する場合は、Vite が `public/` をそのままコピーする挙動と、拡張 manifest から参照されるファイル名を必ず確認する。
 - `src/vite-env.d.ts` または型定義には `chrome` と `browser` の両方、または採用する WebExtensions 型を反映する。
 - `dist/`、ZIP、XPI、`node_modules/`、`*.tsbuildinfo` はコミットしない。
@@ -114,13 +128,12 @@ Rollback は、ブラウザ別 build script と manifest を追加した状態�
 
 - `npm run build` で Chrome 既存ビルドが成功することを確認する。
 - Chrome で `dist/` を `chrome://extensions` から読み込み、ダッシュボード起動、オンボーディング、既存データ表示、KOAN/CLE 取得を手動確認する。
-- Firefox 用出力を `about:debugging#/runtime/this-firefox` から一時ロードし、ダッシュボード起動、オンボーディング、既存データ表示、KOAN/CLE 基本取得を確認する。
+- Firefox 用出力を Firefox 最新版と現行 ESR の `about:debugging#/runtime/this-firefox` から一時ロードし、ダッシュボード起動、オンボーディング、既存データ表示、KOAN/CLE 基本取得を確認する。
 - `web-ext` を導入した場合は `npx web-ext lint --source-dir <firefox-dist>` と `npx web-ext build --source-dir <firefox-dist>` を確認する。
 - 自動ログイン、MFA 自動登録、CLE 資料ダウンロードは、Firefox 対応経路を実装した段階で個別に手動検証し、失敗時はユーザーに分かるエラー表示または未対応表示を行う。
 
 ## Open Questions
 
-- Firefox の最低サポートバージョンを最新版のみとするか、ESR も対象にするか。初期設計では ESR を考慮して fallback を持つ。
 - `public/background.js` を TypeScript/Vite 管理下に移すか、当面は `public/` の JavaScript として保つか。実装時にビルド影響を確認して決める。
 - `webextension-polyfill` を依存に追加するか、軽量な自前ラッパーで十分か。まずは依存追加の必要性を調査し、追加する場合は package 更新と build 検証を行う。
 - Firefox 版の拡張 ID は `browser_specific_settings.gecko.id` に固定値を置くか、AMO 提出時に決めるか。開発中は固定 ID を置く方が storage と URL 検証が安定する。
