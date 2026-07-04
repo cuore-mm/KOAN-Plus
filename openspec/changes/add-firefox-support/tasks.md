@@ -1,9 +1,9 @@
 ## 1. 現状調査と互換性棚卸し
 
-- [ ] 1.1 [requires source inspection] `public/background.js`、`public/auth-content.js`、`src/App.tsx`、`src/auth.ts`、`src/vite-env.d.ts` を確認し、`chrome.*`、`browser`、`chrome-extension:`、`world: "MAIN"`、`storage.session`、`downloads.setUiOptions` の使用箇所を一覧化する。一覧にはファイル名、用途、Chrome 維持要否、Firefox 代替要否を含める。
-- [ ] 1.2 [requires source inspection] `public/manifest.json`、root `manifest.json`、`scripts/sync-manifest.mjs`、`scripts/build-zip.mjs`、`vite.config.ts`、`package.json` を確認し、現在の manifest 同期、build、zip 化の入力と出力を記録する。
-- [ ] 1.3 実装時点の Firefox 最新版 major と現行 ESR major を確認し、最低サポートバージョンを現行 ESR major として README または `docs/browser-support.md` に記録する。タスク完了メモにも記録し、旧 ESR や古い Firefox はサポート対象外と明記する。
-- [ ] 1.4 [requires source inspection] Firefox MVP の対象機能を、ダッシュボード起動、オンボーディング、保存済みデータ表示、KOAN/CLE 基本取得として実装メモに明記する。KOAN/CLE 基本取得については、Chrome 版の手動セッション更新フローがダッシュボード表示に使うデータカテゴリを既存実装から確認し、README または `docs/browser-support.md` に取得対象として記録する。自動ログイン、MFA 自動登録、CLE 資料ダウンロードは page world 依存機能として別枠管理する。
+- [x] 1.1 [requires source inspection] `public/background.js`、`public/auth-content.js`、`src/App.tsx`、`src/auth.ts`、`src/vite-env.d.ts` を確認し、`chrome.*`、`browser`、`chrome-extension:`、`world: "MAIN"`、`storage.session`、`downloads.setUiOptions` の使用箇所を一覧化する。一覧にはファイル名、用途、Chrome 維持要否、Firefox 代替要否を含める。
+- [x] 1.2 [requires source inspection] `public/manifest.json`、root `manifest.json`、`scripts/sync-manifest.mjs`、`scripts/build-zip.mjs`、`vite.config.ts`、`package.json` を確認し、現在の manifest 同期、build、zip 化の入力と出力を記録する。
+- [x] 1.3 実装時点の Firefox 最新版 major と現行 ESR major を確認し、最低サポートバージョンを現行 ESR major として README または `docs/browser-support.md` に記録する。タスク完了メモにも記録し、旧 ESR や古い Firefox はサポート対象外と明記する。
+- [x] 1.4 [requires source inspection] Firefox MVP の対象機能を、ダッシュボード起動、オンボーディング、保存済みデータ表示、KOAN/CLE 基本取得として実装メモに明記する。KOAN/CLE 基本取得については、Chrome 版の手動セッション更新フローがダッシュボード表示に使うデータカテゴリを既存実装から確認し、README または `docs/browser-support.md` に取得対象として記録する。自動ログイン、MFA 自動登録、CLE 資料ダウンロードは page world 依存機能として別枠管理する。
 
 ## 2. ブラウザ別 manifest と build 構成
 
