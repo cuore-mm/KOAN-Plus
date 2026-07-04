@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "KOAN Plus",
+  "version": "1.3.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "koan-plus@cuore-mm"
+    }
+  },
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "action": {
+    "default_title": "Open KOAN Plus",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png",
+      "48": "icon-48.png",
+      "128": "icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "scripting",
+    "storage",
+    "tabs",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://koan.osaka-u.ac.jp/*",
+    "https://www.cle.osaka-u.ac.jp/*",
+    "https://ou-idp.auth.osaka-u.ac.jp/*",
+    "https://auth-mfa.auth.osaka-u.ac.jp/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.cle.osaka-u.ac.jp/*",
+        "https://ou-idp.auth.osaka-u.ac.jp/idp/*",
+        "https://auth-mfa.auth.osaka-u.ac.jp/*"
+      ],
+      "js": [
+        "auth-content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "description": "A local-only academic dashboard for Osaka University KOAN and CLE."
+}

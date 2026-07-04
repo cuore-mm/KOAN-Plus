@@ -7,11 +7,11 @@
 
 ## 2. ブラウザ別 manifest と build 構成
 
-- [ ] 2.1 Chrome 用 manifest と Firefox 用 manifest のソース構成を決め、`public/manifest.json` を維持するか、`public/manifest.chrome.json` / `public/manifest.firefox.json` などへ分離する。完了条件は Chrome 用と Firefox 用の manifest 入力ファイルまたは template が明確に存在すること。
-- [ ] 2.2 Firefox 用 manifest に Firefox WebExtensions として必要な background 定義、`browser_specific_settings.gecko`、permission 差分、host permissions を追加し、`downloads.ui` など Firefox 非対応 permission を含めない。
-- [ ] 2.3 `scripts/sync-manifest.mjs` を更新し、`package.json` の `version` と `description` が Chrome 用 manifest と Firefox 用 manifest の両方へ同期されることを確認する。
-- [ ] 2.4 `package.json` に `npm run build:chrome`、`npm run build:firefox`、必要なら `npm run build:all`、`npm run zip:chrome`、`npm run zip:firefox` を追加する。`npm run build` と `npm run zip` は既存互換のため Chrome 用として `dist/` 出力を維持し、`build:chrome` の出力は `dist-chrome/`、`build:firefox` の出力は `dist-firefox/` に分離する。
-- [ ] 2.5 `npm run build`、`npm run build:chrome`、`npm run build:firefox` を実行し、`npm run build` は既存互換の `dist/`、`npm run build:chrome` は `dist-chrome/`、`npm run build:firefox` は `dist-firefox/` に manifest と必要ファイルを生成することを確認する。
+- [x] 2.1 Chrome 用 manifest と Firefox 用 manifest のソース構成を決め、`public/manifest.json` を維持するか、`public/manifest.chrome.json` / `public/manifest.firefox.json` などへ分離する。完了条件は Chrome 用と Firefox 用の manifest 入力ファイルまたは template が明確に存在すること。
+- [x] 2.2 Firefox 用 manifest に Firefox WebExtensions として必要な background 定義、`browser_specific_settings.gecko`、permission 差分、host permissions を追加し、`downloads.ui` など Firefox 非対応 permission を含めない。
+- [x] 2.3 `scripts/sync-manifest.mjs` を更新し、`package.json` の `version` と `description` が Chrome 用 manifest と Firefox 用 manifest の両方へ同期されることを確認する。
+- [x] 2.4 `package.json` に `npm run build:chrome`、`npm run build:firefox`、必要なら `npm run build:all`、`npm run zip:chrome`、`npm run zip:firefox` を追加する。`npm run build` と `npm run zip` は既存互換のため Chrome 用として `dist/` 出力を維持し、`build:chrome` の出力は `dist-chrome/`、`build:firefox` の出力は `dist-firefox/` に分離する。
+- [x] 2.5 `npm run build`、`npm run build:chrome`、`npm run build:firefox` を実行し、`npm run build` は既存互換の `dist/`、`npm run build:chrome` は `dist-chrome/`、`npm run build:firefox` は `dist-firefox/` に manifest と必要ファイルを生成することを確認する。
 
 ## 3. ブラウザ API 互換レイヤー
 
