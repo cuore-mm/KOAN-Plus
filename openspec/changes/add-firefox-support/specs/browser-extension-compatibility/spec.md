@@ -11,6 +11,14 @@
 - **WHEN** 開発者が Firefox 用ビルドを実行する
 - **THEN** システムは Firefox WebExtensions として一時ロードできる manifest、background 設定、Gecko 固有設定を含む成果物を生成する
 
+#### Scenario: 既定 build command を維持する
+- **WHEN** 開発者が `npm run build` を実行する
+- **THEN** システムは既存互換の Chrome 用成果物を `dist/` に生成する
+
+#### Scenario: ブラウザ別 build command を実行する
+- **WHEN** 開発者が `npm run build:chrome` または `npm run build:firefox` を実行する
+- **THEN** システムは Chrome 用成果物を `dist-chrome/`、Firefox 用成果物を `dist-firefox/` に分離して生成する
+
 #### Scenario: 共通メタデータを同期する
 - **WHEN** `package.json` の version または description が変更される
 - **THEN** システムは Chrome 用 manifest と Firefox 用 manifest の両方へ同じ version と description を反映する
@@ -61,8 +69,16 @@
 - **THEN** システムは Chrome 版と同等のダッシュボード表示を行う
 
 #### Scenario: Firefox で KOAN/CLE 基本取得を実行する
-- **WHEN** 利用者が Firefox で KOAN または CLE の基本データ取得を開始する
+- **WHEN** 利用者が Firefox で対象サイトへ手動ログイン済み、または既存セッション Cookie が有効な状態で KOAN または CLE の基本データ取得を開始する
 - **THEN** システムは対象ドメインの権限内でデータ取得を試行し、成功時はダッシュボードを更新する
+
+#### Scenario: Firefox MVP の取得カテゴリを記録する
+- **WHEN** 開発者が KOAN/CLE 基本取得を実装する
+- **THEN** 開発者は Chrome 版の手動セッション更新フローがダッシュボード表示に使う KOAN/CLE データカテゴリを確認し、README または `docs/browser-support.md` に Firefox MVP の取得対象として記録する
+
+#### Scenario: Firefox で KOAN/CLE 基本取得に認証が必要である
+- **WHEN** 利用者が Firefox で未ログインまたはセッション切れの状態で KOAN または CLE の基本データ取得を開始する
+- **THEN** システムは自動ログインや MFA 自動処理を暗黙実行せず、手動ログインが必要であることが分かるエラーを返す
 
 ### Requirement: Firefox 非互換機能の安全な取り扱い
 システムは Firefox で未対応または代替実装が必要な機能を実行する場合、クラッシュや無限待機を起こさないことを MUST とする。未対応状態が残る場合は、利用者または開発者が原因を識別できるエラーを返すことを SHALL とする。
@@ -78,6 +94,41 @@
 #### Scenario: 一時状態 fallback を削除する
 - **WHEN** Firefox fallback によって一時状態を保存した処理が完了、失敗、または対象タブが閉じられる
 - **THEN** システムは該当する一時状態を削除し、資格情報や MFA 関連の一時データを不要に保持しない
+
+#### Scenario: 一時状態 fallback が期限切れになる
+- **WHEN** Firefox fallback によって保存された一時状態が TTL を超過する
+- **THEN** システムは期限切れ状態を再利用せず、削除または無効化する
+
+#### Scenario: page bridge が不正 message を拒否する
+- **WHEN** page bridge が未知の message type、欠落または不一致の nonce、不正な source または origin を持つ message を受信する
+- **THEN** システムはその message を処理せず、資格情報や MFA 関連値をログやエラーに出力しない
+
+#### Scenario: page bridge が許可 origin のみを受け入れる
+- **WHEN** page bridge が KOAN、CLE、OU IdP、MFA の明示的 allowlist に含まれない origin から message を受信する
+- **THEN** システムはその message を処理しない
+
+#### Scenario: page bridge が origin を正規化して比較する
+- **WHEN** page bridge が page origin message を検証する
+- **THEN** システムは `new URL(event.origin).origin` で正規化した HTTPS origin を allowlist と完全一致で比較し、wildcard または subdomain 許可を使う場合は理由を記録する
+
+#### Scenario: page bridge が不正 origin を拒否する
+- **WHEN** page bridge が invalid、opaque、`"null"`、parse 不能、または非 HTTPS の origin を持つ message を受信する
+- **THEN** システムはその message を処理せず、資格情報や MFA 関連値をログやエラーに出力しない
+
+#### Scenario: page world 依存機能が未対応として完了する
+- **WHEN** Firefox で自動ログイン、MFA 自動登録、または CLE 資料ダウンロードの完全対応がこの change 内で提供されない
+- **THEN** システムはクラッシュや無限待機ではなく、明示的な未対応エラーまたは実装待ち表示を返す
+
+### Requirement: Firefox lint と packaging 検証
+システムは Firefox 用成果物に対して WebExtensions lint 検証を実行し、lint error が残る成果物を完了扱いにしないことを MUST とする。Firefox package または XPI script を追加または変更する場合は、packaging 検証も成功させることを MUST とする。
+
+#### Scenario: Firefox lint が成功する
+- **WHEN** 開発者が `npx web-ext lint --source-dir dist-firefox` を実行する
+- **THEN** コマンドは error なしで終了する
+
+#### Scenario: Firefox packaging を検証する
+- **WHEN** 実装が Firefox package script または XPI 相当成果物を追加または変更する
+- **THEN** 開発者は `npx web-ext build --source-dir dist-firefox` または同等の packaging command が成功することを確認し、artifact の出力先とファイル名を記録する
 
 ### Requirement: Chrome 回帰防止
 システムは Firefox 対応の追加後も Chrome 版の既存利用フローを維持することを SHALL とする。Firefox 用の分岐、manifest、fallback は Chrome 用ビルドと runtime に不要な破壊的変更を与えないことを MUST とする。

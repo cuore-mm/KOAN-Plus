@@ -8,7 +8,8 @@ KOAN Plus は現在 Chrome MV3 前提の拡張機能として実装されてお�
 - Chrome 固有 API 呼び出しを整理し、runtime、tabs、storage、scripting、downloads などの差異を吸収する互換レイヤーを導入する。
 - Firefox 用 manifest を用意し、background、permission、Gecko 固有設定を Firefox の WebExtensions 要件に合わせる。
 - `chrome.scripting.executeScript({ world: "MAIN" })`、`chrome.storage.session`、`chrome.downloads.setUiOptions` など Firefox 非互換または差異の大きい箇所に代替経路または feature detection を設計する。
-- Firefox での初期 MVP は、ダッシュボード起動、オンボーディング、保存済みデータ表示、KOAN/CLE の基本取得を優先し、自動ログイン、MFA 自動登録、CLE 資料ダウンロードなど page world 依存が強い機能は段階的に安定化する。
+- Firefox での初期 MVP は、ダッシュボード起動、オンボーディング、保存済みデータ表示、既に認証済みのブラウザセッションを前提にした KOAN/CLE の基本取得を優先し、自動ログイン、MFA 自動登録、CLE 資料ダウンロードなど page world 依存が強い機能は段階的に安定化する。
+- この変更の完了条件は Firefox MVP と Chrome 回帰防止を満たすこととし、自動ログイン、MFA 自動登録、CLE 資料ダウンロードは Firefox で動作する場合は検証し、未対応の場合はクラッシュや無限待機ではなく明示的な未対応エラーとして扱う。
 - Chrome 版の既存挙動を回帰させないため、Chrome 用ビルドと Firefox 用ビルドを分離して検証できるようにする。
 
 ## Capabilities
@@ -21,7 +22,7 @@ KOAN Plus は現在 Chrome MV3 前提の拡張機能として実装されてお�
 
 ## Impact
 
-- 影響対象: `public/manifest.json`, root `manifest.json`, `public/background.js`, `public/auth-content.js`, `src/App.tsx`, `src/auth.ts`, `src/vite-env.d.ts`, `scripts/sync-manifest.mjs`, `scripts/build-zip.mjs`, `vite.config.ts`, `package.json`。
+- 影響対象: `public/manifest.json`, root `manifest.json`, `public/background.js`, `public/auth-content.js`, `src/App.tsx`, `src/auth.ts`, `src/vite-env.d.ts`, `scripts/sync-manifest.mjs`, `scripts/build-zip.mjs`, `vite.config.ts`, `package.json`, README または `docs/browser-support.md`。
 - 新規追加候補: `src/platform/` 配下のブラウザ互換 API、ブラウザ別 manifest、Firefox 用 background/bridge、Firefox packaging/lint scripts。
 - WebExtensions API 差異: `chrome.*` / `browser.*`、callback / Promise、`background.service_worker` / `background.scripts`、`chrome-extension:` / `moz-extension:`、`storage.session`、`downloads.setUiOptions`、`scripting.executeScript` の world 指定。
 - 検証対象: `npm run build` による既存 Chrome 回帰、Chrome での手動ロード、Firefox `about:debugging` での一時ロード、必要に応じた `web-ext lint` / `web-ext build`。
