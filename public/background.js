@@ -85,8 +85,11 @@ function senderUrl(sender) {
 function isExtensionPageSender(sender) {
   const url = senderUrl(sender);
   if (sender.id !== chrome.runtime.id) return false;
-  if (!url?.host || url.host !== chrome.runtime.id) return false;
-  // Chrome: chrome-extension://<id>/... , Firefox: moz-extension://<id>/...
+  // Firefox では runtime.id (gecko.id) と拡張ページ URL の host (内部 UUID) が
+  // 一致しないため、chrome.runtime.getURL("") から実際の host を取得して比較する
+  if (!url?.host) return false;
+  const extensionHost = new URL(chrome.runtime.getURL("")).host;
+  if (url.host !== extensionHost) return false;
   return url.protocol === "chrome-extension:" || url.protocol === "moz-extension:";
 }
 
