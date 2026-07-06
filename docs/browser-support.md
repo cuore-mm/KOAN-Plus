@@ -141,3 +141,46 @@ Firefox MVP の KOAN/CLE 基本取得に含めるデータカテゴリは、現�
 | `scripts/build-zip.mjs` | `dist/` を再帰的に読み込み、root に `koan-plus.zip` を作成 | Chrome / Firefox package 分離時は入力 dir と出力 artifact 名の引数化または別 script 化が必要 |
 | `vite.config.ts` | `outDir: "dist"`, `emptyOutDir: true` | `build:chrome` / `build:firefox` で `dist-chrome/` / `dist-firefox/` を分ける仕組みが必要 |
 | `package.json` scripts | `build = sync-manifest && tsc -b && vite build`, `zip = npm run build && node scripts/build-zip.mjs`, `version = sync-manifest && git add manifest.json public/manifest.json` | 既存 `build` / `zip` は Chrome 用 `dist/` を維持。`build:chrome`, `build:firefox`, 必要に応じて `zip:chrome`, `zip:firefox`, `build:all` を追加する |
+
+## `world: "MAIN"` 使用箇所の分類
+
+`public/background.js` 内の `chrome.scripting.executeScript({ world: "MAIN" })` 使用箇所を
+Firefox 対応方針に基づき以下の 3 カテゴリに分類する。
+
+**分類基準**
+- **A (isolated 代替)**: DOM 操作のみで代替可能。`world` 指定を外して isolated world で動作させれば Firefox でも動く。
+- **B (page bridge 必要)**: page world のグローバル関数・変数に依存。Firefox では page bridge（`window.postMessage` 経由）が必要。
+- **C (実装待ち/未対応)**: MVP では対応必須外。未対応エラーまたは実装待ち表示で安全に扱う。
+
+| 行 | func 内容 | 用途 | 分類 | 理由 / 代替方針 |
+| --- | --- | --- | --- | --- |
+| 479-542 | DOM から `[role="region"]` や `aria-controls` を探索し添付ファイルを抽出 | CLE 資料抽出 | A | DOM 操作のみ。`world` 指定を外せば Firefox でも動く |
+| 672-698 | `fetch(url)` で CLE が API ready か確認 | CLE API probe | A | tab 内 fetch。`world` 指定を外し isolated で動作可能 |
+| 868-905 | `globalThis.execSrvStatus("register")` / form.submit で MFA 登録画面を遷移 | MFA 登録 | B | `execSrvStatus` は page world のグローバル関数。Firefox MVP では必須外 |
+| 1198-1223 | `globalThis.LoginSubmit("ログイン")` / form.submit で IdP ログイン送信 | IdP 自動ログイン | B | `LoginSubmit` は page world のグローバル関数。Firefox MVP では必須外 |
+| 1383-1428 | `fetch(url)` で CLE 資料 URL の HEAD/GET を並列実行 | CLE 資料 HEAD batch | C | Firefox MVP では必須外（資料一括 DL の前処理） |
+| 1531-1567 | `fetch(request)` で `koan-fetch` / `cle-fetch` のタブ内 fetch | KOAN/CLE 基本取得 | A | fetch のみ。`world` 指定を外せば Firefox でも動く。**Firefox MVP の最優先対応項目** |
+
+**class A (isolated 代替) の対応方針**
+
+`world: "MAIN"` を `world: "ISOLATED"` または world 指定なしに変更する。
+Firefox では `world` パラメータが `scripting.executeScript` で ESR 140 以降利用可能か検証し、
+利用不可の場合は world 指定を省略してデフォルトの ISOLATED で動作させる。
+
+**class B (page bridge) の対応方針**
+
+page world のグローバル関数に依存するため、Firefox では page bridge を実装する。
+MVP ではこれらの機能（自動ログイン、MFA 自動登録）は必須外のため、
+bridge 実装は後続タスクとする。
+
+**class C (未対応) の対応方針**
+
+MVP での対応は必須外。CLE 資料ダウンロード関連の処理であり、
+未対応の場合は明示的なエラーを返す。
+
+## 実装済み Firefox 互換対応
+
+- **`isExtensionPageSender`**: `chrome-extension:` と `moz-extension:` の両方を許可（`public/background.js:85-91`）
+- **`storage.session` fallback**: 軽量 in-memory Map fallback + `hasSessionApi()` 検出（`public/background.js:285-318`）
+- **`downloads.setUiOptions`**: `typeof chrome.downloads.setUiOptions === "function"` で feature detection 済み（`public/background.js:1304`）
+- **`browser_specific_settings.gecko.id`**: `public/manifest.firefox.json` に `koan-plus@cuore-mm` を設定済み

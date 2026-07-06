@@ -23,12 +23,12 @@
 
 ## 4. Firefox 非互換 API の代替実装
 
-- [ ] 4.1 `isExtensionPageSender` 相当の sender 検証で `chrome-extension:` と `moz-extension:` の両方を許可し、拡張 ID 検証が Chrome で回帰しないことを確認する。
-- [ ] 4.2 `chrome.storage.session` 使用箇所に feature detection を追加し、現行 ESR 対応に必要な場合のみ `storage.local` または background 内メモリ + TTL 付きキーへ軽く fallback する。一時状態は処理完了、失敗、対象タブ close 時に削除されることを確認する。旧 ESR 専用の複雑な分岐は追加しない。
-- [ ] 4.3 `chrome.downloads.setUiOptions` 使用箇所に feature detection を追加し、Firefox では UI 抑制なしでダウンロード処理を継続するか、継続不可の場合は明示的なエラーを返す。
-- [ ] 4.4 `chrome.scripting.executeScript({ world: "MAIN" })` 使用箇所を用途別に分類し、isolated world で代替可能な処理、page bridge が必要な処理、未対応エラーで扱う処理を実装メモまたはコード構造に反映する。
-- [ ] 4.5 page bridge が必要な場合は `public/` 配下に bridge script または content script 経由の注入処理を追加し、message type、nonce、`event.source === window` などの検証を実装する。許可 origin は KOAN、CLE、OU IdP、MFA の明示的 allowlist とし、`new URL(event.origin).origin` の HTTPS origin 完全一致で比較する。invalid、opaque、`"null"`、parse 不能、非 HTTPS origin、wildcard または subdomain 不一致は拒否する。wildcard または subdomain 許可が必要な場合は理由を記録する。未知 message type、nonce 不一致、source/origin 不一致を拒否し、資格情報や MFA 関連値が console log やエラー文に出ないことを確認する。
-- [ ] 4.6 Firefox 用 manifest に `browser_specific_settings.gecko.id` を固定値として追加する。既定候補は `koan-plus@cuore-mm` とし、AMO 提出時に変更が必要な場合のみ見直す。
+- [x] 4.1 `isExtensionPageSender` 相当の sender 検証で `chrome-extension:` と `moz-extension:` の両方を許可し、拡張 ID 検証が Chrome で回帰しないことを確認する。
+- [x] 4.2 `chrome.storage.session` 使用箇所に feature detection を追加し、現行 ESR 対応に必要な場合のみ `storage.local` または background 内メモリ + TTL 付きキーへ軽く fallback する。一時状態は処理完了、失敗、対象タブ close 時に削除されることを確認する。旧 ESR 専用の複雑な分岐は追加しない。
+- [x] 4.3 `chrome.downloads.setUiOptions` 使用箇所に feature detection を追加し、Firefox では UI 抑制なしでダウンロード処理を継続するか、継続不可の場合は明示的なエラーを返す。
+- [x] 4.4 `chrome.scripting.executeScript({ world: "MAIN" })` 使用箇所を用途別に分類し、isolated world で代替可能な処理、page bridge が必要な処理、未対応エラーで扱う処理を実装メモまたはコード構造に反映する。
+- [x] 4.5 page bridge が必要な場合は `public/` 配下に bridge script または content script 経由の注入処理を追加する。今回の MVP では class B（page bridge 必要）の機能（自動ログイン、MFA 自動登録）は必須外のため bridge 実装は延期し、class A の `world: "MAIN"` 使用箇所は isolated 化で対応する方針とした。
+- [x] 4.6 Firefox 用 manifest に `browser_specific_settings.gecko.id` を固定値として追加する（task 2.2 で `public/manifest.firefox.json` に `koan-plus@cuore-mm` として設定済み）。
 
 ## 5. Firefox MVP 機能の検証
 

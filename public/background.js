@@ -282,11 +282,48 @@ function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+// ---- storage.session 互換 helper ----
+// Firefox ESR 140 では storage.session が利用可能だが、
+// feature detection + in-memory fallback を備える。
+// sessionStorage 風の短期データであり、service worker 再起動で消失してよい。
+
+const sessionFallback = new Map();
+
+function hasSessionApi() {
+  return typeof chrome?.storage?.session?.get === "function";
+}
+
+async function sessionGet(key) {
+  if (hasSessionApi()) {
+    const stored = await chrome.storage.session.get(key);
+    return stored[key];
+  }
+  // fallback: in-memory Map（service worker 再起動で消失）
+  return sessionFallback.get(key);
+}
+
+async function sessionSet(key, value) {
+  if (hasSessionApi()) {
+    await chrome.storage.session.set({ [key]: value });
+    return;
+  }
+  sessionFallback.set(key, value);
+}
+
+async function sessionRemove(key) {
+  if (hasSessionApi()) {
+    await chrome.storage.session.remove(key);
+    return;
+  }
+  sessionFallback.delete(key);
+}
+
+// ---- /storage.session helper ----
+
 async function restoreAutoCollectTabIds() {
-  if (!chrome.storage?.session) return;
-  const stored = await chrome.storage.session.get(AUTO_COLLECT_TAB_IDS_KEY);
-  const tabIds = Array.isArray(stored[AUTO_COLLECT_TAB_IDS_KEY])
-    ? stored[AUTO_COLLECT_TAB_IDS_KEY]
+  const stored = await sessionGet(AUTO_COLLECT_TAB_IDS_KEY);
+  const tabIds = Array.isArray(stored)
+    ? stored
     : [];
   autoCollectTabIds.clear();
   for (const tabId of tabIds) {
@@ -295,10 +332,7 @@ async function restoreAutoCollectTabIds() {
 }
 
 async function persistAutoCollectTabIds() {
-  if (!chrome.storage?.session) return;
-  await chrome.storage.session.set({
-    [AUTO_COLLECT_TAB_IDS_KEY]: [...autoCollectTabIds],
-  });
+  await sessionSet(AUTO_COLLECT_TAB_IDS_KEY, [...autoCollectTabIds]);
 }
 
 async function addAutoCollectTabId(tabId) {
@@ -323,15 +357,12 @@ function mfaAutoFlowKey(tabId) {
 }
 
 async function readMfaAutoFlow(tabId) {
-  if (!chrome.storage?.session) return null;
   const key = mfaAutoFlowKey(tabId);
-  const stored = await chrome.storage.session.get(key);
-  return stored[key] || null;
+  return await sessionGet(key) || null;
 }
 
 async function writeMfaAutoFlow(tabId, value) {
-  if (!chrome.storage?.session) return;
-  await chrome.storage.session.set({ [mfaAutoFlowKey(tabId)]: value });
+  await sessionSet(mfaAutoFlowKey(tabId), value);
 }
 
 async function beginMfaAutoFlow(tabId) {
@@ -355,35 +386,30 @@ async function consumeMfaAutoFlow(tabId) {
     };
   }
   if (flow?.status === "saved" || flow?.status === "cancelled") {
-    await chrome.storage.session.remove(key);
+    await sessionRemove(key);
   }
   return flow;
 }
 
 async function savePendingMfa(value) {
   pendingMfa = value;
-  if (chrome.storage?.session) {
-    await chrome.storage.session.set({ [PENDING_MFA_KEY]: value });
-  }
+  await sessionSet(PENDING_MFA_KEY, value);
 }
 
 async function readPendingMfa() {
-  if (!pendingMfa && chrome.storage?.session) {
-    const stored = await chrome.storage.session.get(PENDING_MFA_KEY);
-    pendingMfa = stored[PENDING_MFA_KEY] || null;
+  if (!pendingMfa) {
+    pendingMfa = await sessionGet(PENDING_MFA_KEY) || null;
   }
   if (pendingMfa && Date.now() - Number(pendingMfa.createdAt || 0) > MFA_PENDING_TTL_MS) {
     pendingMfa = null;
-    if (chrome.storage?.session) await chrome.storage.session.remove(PENDING_MFA_KEY);
+    await sessionRemove(PENDING_MFA_KEY);
   }
   return pendingMfa;
 }
 
 async function clearPendingMfa() {
   pendingMfa = null;
-  if (chrome.storage?.session) {
-    await chrome.storage.session.remove(PENDING_MFA_KEY);
-  }
+  await sessionRemove(PENDING_MFA_KEY);
 }
 
 async function withTimeout(task, milliseconds) {
@@ -817,10 +843,11 @@ async function authResponse(message, sender) {
 
   if (message.type === "auth-claim-startup-refresh") {
     const claim = startupRefreshClaimTask.then(async () => {
-      if (!chrome.storage?.session) return true;
-      const stored = await chrome.storage.session.get(STARTUP_REFRESH_CLAIMED_KEY);
-      if (stored[STARTUP_REFRESH_CLAIMED_KEY]) return false;
-      await chrome.storage.session.set({ [STARTUP_REFRESH_CLAIMED_KEY]: true });
+      // sessionApi がない場合は in-memory fallback のみ（refresh を常に許可）
+      if (!hasSessionApi()) return true;
+      const value = await sessionGet(STARTUP_REFRESH_CLAIMED_KEY);
+      if (value) return false;
+      await sessionSet(STARTUP_REFRESH_CLAIMED_KEY, true);
       return true;
     });
     startupRefreshClaimTask = claim.then(() => undefined, () => undefined);
@@ -829,12 +856,11 @@ async function authResponse(message, sender) {
 
   if (message.type === "auth-claim-dashboard-refresh") {
     const claim = dashboardRefreshClaimTask.then(async () => {
-      if (!chrome.storage?.session) return true;
-      const stored = await chrome.storage.session.get(DASHBOARD_REFRESH_ATTEMPT_KEY);
-      const previous = Number(stored[DASHBOARD_REFRESH_ATTEMPT_KEY]) || 0;
+      if (!hasSessionApi()) return true;
+      const previous = Number(await sessionGet(DASHBOARD_REFRESH_ATTEMPT_KEY)) || 0;
       const retryAfterMs = Math.max(0, 60 * 1000 - (Date.now() - previous));
       if (retryAfterMs > 0) return { allowed: false, retryAfterMs };
-      await chrome.storage.session.set({ [DASHBOARD_REFRESH_ATTEMPT_KEY]: Date.now() });
+      await sessionSet(DASHBOARD_REFRESH_ATTEMPT_KEY, Date.now());
       return { allowed: true, retryAfterMs: 60 * 1000 };
     });
     dashboardRefreshClaimTask = claim.then(() => undefined, () => undefined);
@@ -1299,6 +1325,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!prepared.length) return { ok: true, started: 0, failed: [] };
       // Hide the download bubble while the batch runs so it doesn't pop up
       // once per file; restored after every started download settles.
+      // Firefox では chrome.downloads.setUiOptions が存在しないため feature detection。
       const canToggleUi = typeof chrome.downloads.setUiOptions === "function";
       if (canToggleUi) {
         await chrome.downloads.setUiOptions({ enabled: false }).catch(() => {});
