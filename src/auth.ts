@@ -1,3 +1,5 @@
+import { sendMessage, isExtensionContext } from "./platform";
+
 export type AuthSettings = {
   configured: boolean;
   enabled: boolean;
@@ -19,10 +21,10 @@ type AuthResponse = AuthSettings & {
 };
 
 async function sendAuthMessage(message: unknown): Promise<AuthResponse> {
-  if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
-    throw new Error("自動ログイン設定はChrome拡張機能から開いてください。");
+  if (!isExtensionContext()) {
+    throw new Error("自動ログイン設定はブラウザ拡張機能から開いてください。");
   }
-  const response = await chrome.runtime.sendMessage(message) as AuthResponse;
+  const response = await sendMessage<AuthResponse>(message);
   if (!response.ok) throw new Error(response.error || "自動ログイン設定の更新に失敗しました。");
   return response;
 }
@@ -86,24 +88,24 @@ export type MfaSecrets = {
 };
 
 export async function getSavedMfaSecrets(): Promise<MfaSecrets> {
-  if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
+  if (!isExtensionContext()) {
     throw new Error("拡張機能のコンテキスト以外から呼び出されています。");
   }
-  const response = await chrome.runtime.sendMessage({ type: "auth-get-secrets" }) as MfaSecrets & { ok: boolean };
+  const response = await sendMessage<MfaSecrets & { ok: boolean }>({ type: "auth-get-secrets" });
   if (!response.ok) throw new Error(response.error || "シークレットの取得に失敗しました。");
   return response;
 }
 
 export async function checkLoginStatus(): Promise<{ koanLoggedIn: boolean; cleLoggedIn: boolean }> {
-  if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
+  if (!isExtensionContext()) {
     return { koanLoggedIn: false, cleLoggedIn: false };
   }
-  const response = await chrome.runtime.sendMessage({ type: "auth-check-login" }) as {
+  const response = await sendMessage<{
     ok: boolean;
     koanLoggedIn: boolean;
     cleLoggedIn: boolean;
     error?: string;
-  };
+  }>({ type: "auth-check-login" });
   if (!response.ok) throw new Error(response.error || "ログイン状態の確認に失敗しました。");
   return { koanLoggedIn: response.koanLoggedIn, cleLoggedIn: response.cleLoggedIn };
 }

@@ -15,11 +15,11 @@
 
 ## 3. ブラウザ API 互換レイヤー
 
-- [ ] 3.1 `src/platform/` などに runtime、tabs、storage、scripting、downloads の互換 API を作成し、`chrome` と `browser` の存在判定、callback API と Promise API の統一、エラー伝播を実装する。初期実装では `webextension-polyfill` を追加せず、自前 wrapper で不足する場合のみ依存追加を検討する。
-- [ ] 3.2 `src/vite-env.d.ts` または採用する型定義を更新し、`chrome` と `browser` の両方、または互換レイヤーで必要な WebExtensions 型が TypeScript で扱えることを確認する。
-- [ ] 3.3 `src/App.tsx` の `chrome.runtime.getManifest`、`chrome.tabs.create`、`chrome.tabs.onRemoved` などの使用箇所を互換 API 経由に置き換え、Firefox でも Promise として完了や失敗を扱えることを確認する。
-- [ ] 3.4 `src/auth.ts` の `chrome.runtime.sendMessage` 使用箇所を互換 API 経由に置き換え、送信失敗時に既存と同等以上のエラーが呼び出し元へ返ることを確認する。
-- [ ] 3.5 `public/background.js` と `public/auth-content.js` は初期実装では `public/` 配下の JavaScript として維持する。共通 helper を使えるか確認し、使えない場合は self-contained な browser API 判定関数を追加して direct `chrome.*` 差異を局所化する。
+- [x] 3.1 `src/platform/` などに runtime、tabs、storage、scripting、downloads の互換 API を作成し、`chrome` と `browser` の存在判定、callback API と Promise API の統一、エラー伝播を実装する。初期実装では `webextension-polyfill` を追加せず、自前 wrapper で不足する場合のみ依存追加を検討する。
+- [x] 3.2 `src/vite-env.d.ts` または採用する型定義を更新し、`chrome` と `browser` の両方、または互換レイヤーで必要な WebExtensions 型が TypeScript で扱えることを確認する。
+- [x] 3.3 `src/App.tsx` の `chrome.runtime.getManifest`、`chrome.tabs.create`、`chrome.tabs.onRemoved` などの使用箇所を互換 API 経由に置き換え、Firefox でも Promise として完了や失敗を扱えることを確認する。
+- [x] 3.4 `src/auth.ts` の `chrome.runtime.sendMessage` 使用箇所を互換 API 経由に置き換え、送信失敗時に既存と同等以上のエラーが呼び出し元へ返ることを確認する。
+- [x] 3.5 `public/background.js` と `public/auth-content.js` は初期実装では `public/` 配下の JavaScript として維持する。共通 helper を使えるか確認し、使えない場合は self-contained な browser API 判定関数を追加して direct `chrome.*` 差異を局所化する。
 
 ## 4. Firefox 非互換 API の代替実装
 

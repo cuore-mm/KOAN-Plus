@@ -64,6 +64,7 @@ import {
 } from "./auth";
 import QRCode from "qrcode";
 import ThemeToggle, { loadTheme } from "./ThemeToggle";
+import { getManifest, sendMessage, createTab, updateTab, removeTab, tabOnRemoved, isExtensionContext } from "./platform";
 
 
 const EMPTY = {
@@ -868,9 +869,8 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
 
 function getContactUrl() {
   const baseUrl = "https://docs.google.com/forms/d/e/1FAIpQLSdo3KmL2KnbDLtqgQfjtqO2NG7W6M0rTVeEJ4I5aPyJ2HsQyA/viewform";
-  const chromeObj = typeof window !== "undefined" ? (window as any).chrome : undefined;
-  const version = chromeObj && chromeObj.runtime?.getManifest
-    ? chromeObj.runtime.getManifest().version
+  const version = isExtensionContext()
+    ? getManifest().version
     : "0.2.0";
   const ua = typeof navigator !== "undefined" ? navigator.userAgent : "unknown";
 
@@ -1008,95 +1008,109 @@ function Settings({
   const canSaveManualTotp = !saving && settings.mfaEnabled && Boolean(totpSecret.trim());
 
   const startAutoCollect = async () => {
-    const chromeObj = typeof window !== "undefined" ? (window as any).chrome : undefined;
-    if (chromeObj && chromeObj.tabs?.create) {
-      setSaving(true);
-      try {
-        const pending = await chromeObj.runtime.sendMessage({ type: "auth-focus-pending-mfa" });
-        if (pending?.found) {
-          setSaving(false);
-          setStatus("先に前面へ移動した二段階認証を完了してください。完了後にMFA登録を開始できます。");
-          setShowMfaWizardModal(false);
-          return;
-        }
-      } catch (error) {
+    if (!isExtensionContext()) {
+      setStatus("自動取得は拡張機能のポップアップまたはオプション画面から実行してください。");
+      setShowMfaWizardModal(false);
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const pending = await sendMessage<{ found?: boolean; tabId?: number }>({ type: "auth-focus-pending-mfa" });
+      if (pending?.found) {
         setSaving(false);
-        setStatus(error instanceof Error ? error.message : "認証待ちタブを確認できませんでした。");
+        setStatus("先に前面へ移動した二段階認証を完了してください。完了後にMFA登録を開始できます。");
         setShowMfaWizardModal(false);
         return;
       }
-      
-      chromeObj.tabs.create({
-        url: "about:blank",
-        active: false
-      }, (tab: any) => {
-        if (!tab || !tab.id) {
+    } catch (error) {
+      setSaving(false);
+      setStatus(error instanceof Error ? error.message : "認証待ちタブを確認できませんでした。");
+      setShowMfaWizardModal(false);
+      return;
+    }
+
+    let tab: { id?: number } | undefined;
+    try {
+      tab = await createTab({ url: "about:blank", active: false });
+    } catch {
+      setSaving(false);
+      setStatus("バックグラウンドタブの作成に失敗しました。");
+      setShowMfaWizardModal(false);
+      return;
+    }
+
+    if (!tab || !tab.id) {
+      setSaving(false);
+      setStatus("バックグラウンドタブの作成に失敗しました。");
+      setShowMfaWizardModal(false);
+      return;
+    }
+
+    const tabId = tab.id;
+
+    // 12秒のセーフティタイマー（ログイン要求やエラー等で進まない場合に前面に出す）
+    const timeoutId = setTimeout(() => {
+      updateTab(tabId, { active: true }).catch(() => {});
+      setStatus("自動ログインが完了しなかったため、タブを前面に表示しました。ログインを完了させてください。");
+    }, 12000);
+
+    // タブが閉じられたことを検知してリロード
+    const listener = (removedTabId: number) => {
+      if (removedTabId === tabId) {
+        tabOnRemoved.removeListener(listener);
+        clearTimeout(timeoutId);
+
+        void sendMessage<{ status?: string; error?: string }>({
+          type: "auth-mfa-registration-result",
+          tabId: removedTabId,
+        }).then(async (result) => {
+          const secrets = await reloadSettings();
           setSaving(false);
-          setStatus("バックグラウンドタブの作成に失敗しました。");
-          setShowMfaWizardModal(false);
-          return;
-        }
-
-        // 12秒のセーフティタイマー（ログイン要求やエラー等で進まない場合に前面に出す）
-        const timeoutId = setTimeout(() => {
-          if (chromeObj.tabs?.update) {
-            chromeObj.tabs.update(tab.id, { active: true });
-            setStatus("自動ログインが完了しなかったため、タブを前面に表示しました。ログインを完了させてください。");
-          }
-        }, 12000);
-
-        // タブが閉じられたことを検知してリロード
-        const listener = (tabId: number) => {
-          if (tabId === tab.id) {
-            chromeObj.tabs.onRemoved.removeListener(listener);
-            clearTimeout(timeoutId);
-            
-            void chromeObj.runtime.sendMessage({
-              type: "auth-mfa-registration-result",
-              tabId,
-            }).then(async (result: any) => {
-              const secrets = await reloadSettings();
-              setSaving(false);
-              if (result?.status === "saved" && secrets?.totpSecret) {
-                setStatus("二段階認証の登録を保存しました。今後はこの端末で6桁コードを生成できます。");
-                setMfaWizardStep("qr");
-                return;
-              }
-              setMfaWizardStep("consent");
-              setShowMfaWizardModal(false);
-              setStatus(result?.error || "MFA登録を完了できませんでした。登録画面を閉じずに、もう一度実行してください。");
-            }).catch((e: Error) => {
-              setSaving(false);
-              setMfaWizardStep("consent");
-              setShowMfaWizardModal(false);
-              setStatus(`MFA登録の完了状態を確認できませんでした: ${e.message}`);
-            });
-          }
-        };
-        chromeObj.tabs.onRemoved.addListener(listener);
-
-        // バックグラウンドに自動取得対象タブとして登録
-        chromeObj.runtime.sendMessage({
-          type: "auth-mfa-register-auto-tab",
-          tabId: tab.id
-        }, (response: any) => {
-          if (!response?.ok) {
-            chromeObj.tabs.onRemoved.removeListener(listener);
-            clearTimeout(timeoutId);
-            chromeObj.tabs.remove(tab.id).catch(() => {});
-            setSaving(false);
-            setMfaWizardStep("consent");
-            setStatus(response?.error || "自動取得タブの登録に失敗しました。");
-            setShowMfaWizardModal(false);
+          if (result?.status === "saved" && secrets?.totpSecret) {
+            setStatus("二段階認証の登録を保存しました。今後はこの端末で6桁コードを生成できます。");
+            setMfaWizardStep("qr");
             return;
           }
-          chromeObj.tabs.update(tab.id, {
-            url: "https://auth-mfa.auth.osaka-u.ac.jp/AttributeRegistSite/MfaInfoServlet#auto-collect"
-          });
+          setMfaWizardStep("consent");
+          setShowMfaWizardModal(false);
+          setStatus(result?.error || "MFA登録を完了できませんでした。登録画面を閉じずに、もう一度実行してください。");
+        }).catch((e: Error) => {
+          setSaving(false);
+          setMfaWizardStep("consent");
+          setShowMfaWizardModal(false);
+          setStatus(`MFA登録の完了状態を確認できませんでした: ${e.message}`);
         });
+      }
+    };
+    tabOnRemoved.addListener(listener);
+
+    // バックグラウンドに自動取得対象タブとして登録
+    try {
+      const response = await sendMessage<{ ok?: boolean; error?: string }>({
+        type: "auth-mfa-register-auto-tab",
+        tabId,
       });
-    } else {
-      setStatus("自動取得は拡張機能のポップアップまたはオプション画面から実行してください。");
+      if (!response?.ok) {
+        tabOnRemoved.removeListener(listener);
+        clearTimeout(timeoutId);
+        removeTab(tabId).catch(() => {});
+        setSaving(false);
+        setMfaWizardStep("consent");
+        setStatus(response?.error || "自動取得タブの登録に失敗しました。");
+        setShowMfaWizardModal(false);
+        return;
+      }
+      await updateTab(tabId, {
+        url: "https://auth-mfa.auth.osaka-u.ac.jp/AttributeRegistSite/MfaInfoServlet#auto-collect",
+      });
+    } catch (error) {
+      tabOnRemoved.removeListener(listener);
+      clearTimeout(timeoutId);
+      removeTab(tabId).catch(() => {});
+      setSaving(false);
+      setMfaWizardStep("consent");
+      setStatus(error instanceof Error ? error.message : "自動取得タブの登録に失敗しました。");
       setShowMfaWizardModal(false);
     }
   };
