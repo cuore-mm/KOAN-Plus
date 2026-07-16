@@ -1,28 +1,30 @@
 ## Why
 
-KOAN Plus は現在 Chrome MV3 前提の拡張機能として実装されており、Firefox では manifest、background、WebExtensions API の差異により主要機能がそのまま動作しない可能性が高い。Firefox 利用者にも同じローカル専用ダッシュボード体験を提供しつつ、既存 Chrome 版の安定性を維持するため、ブラウザ互換方針を明確化して段階的に対応する。
+KOAN Plus を Firefox 最新版と現行 ESR でも利用・配布できるようにする。調査と実機確認の結果、対象 Firefox は既存の `chrome.*` 互換 API、`storage.session`、`scripting.executeScript({ world: "MAIN" })` をサポートしており、広範な互換レイヤーや代替実装は不要と分かった。一方、Firefox 固有 manifest、配布用 package、`moz-extension:` の sender 検証は必要である。Firefox 対応に直接必要な差分だけを残し、Chrome 回帰リスクと保守コストを最小化する。
 
 ## What Changes
 
-- Chrome と Firefox の両方で拡張機能をビルド・読み込みできる構成を追加する。
-- Chrome 固有 API 呼び出しを整理し、runtime、tabs、storage、scripting、downloads などの差異を吸収する互換レイヤーを導入する。
-- Firefox 用 manifest を用意し、background、permission、Gecko 固有設定を Firefox の WebExtensions 要件に合わせる。
-- `chrome.scripting.executeScript({ world: "MAIN" })`、`chrome.storage.session`、`chrome.downloads.setUiOptions` など Firefox 非互換または差異の大きい箇所に代替経路または feature detection を設計する。
-- Firefox での初期 MVP は、ダッシュボード起動、オンボーディング、保存済みデータ表示、既に認証済みのブラウザセッションを前提にした KOAN/CLE の基本取得を優先し、自動ログイン、MFA 自動登録、CLE 資料ダウンロードなど page world 依存が強い機能は段階的に安定化する。
-- この変更の完了条件は Firefox MVP と Chrome 回帰防止を満たすこととし、自動ログイン、MFA 自動登録、CLE 資料ダウンロードは Firefox で動作する場合は検証し、未対応の場合はクラッシュや無限待機ではなく明示的な未対応エラーとして扱う。
-- Chrome 版の既存挙動を回帰させないため、Chrome 用ビルドと Firefox 用ビルドを分離して検証できるようにする。
+- Chrome 用 `public/manifest.json` を維持し、Firefox 用 `public/manifest.firefox.json` を用意する。
+- Firefox manifest は `background.scripts`、固定 Gecko ID、Firefox 対応 permissions を使用し、`downloads.ui` を含めない。
+- 既存の `npm run build` / `npm run zip` を Chrome 用として維持し、Firefox 用に `npm run build:firefox` / `npm run zip:firefox` だけを追加する。
+- Firefox 用成果物を `dist-firefox/` に生成し、配布可能な ZIP package を生成する。
+- 拡張ページ sender 検証で `moz-extension:` と Firefox 内部 UUID を正しく扱う。
+- Firefox ESR 140 以降で既にサポートされる API のための独自互換レイヤー、`storage.session` fallback、page bridge は導入しない。
+- 既に追加された任意の互換実装と重複 build command を戻し、必要最小限の差分へ整理する。
+- Firefox 最新版と現行 ESR で、オンボーディング、KOAN/CLE 取得、自動ログイン、MFA、資料ダウンロードを既存実装のまま検証する。必須ワークフローに差異が見つかった場合は完了を保留し、本change内で対象箇所だけを修正して再検証する。
 
 ## Capabilities
 
 ### New Capabilities
-- `browser-extension-compatibility`: Chrome と Firefox の両方で KOAN Plus 拡張機能をビルド、読み込み、主要ワークフローを実行できる互換性要件を扱う。
+- `browser-extension-compatibility`: Chrome 版を維持しながら、Firefox 向け成果物と配布 package を生成し、既存主要ワークフローを実行できることを扱う。
 
 ### Modified Capabilities
 - なし。既存 OpenSpec capability はまだ定義されていない。
 
 ## Impact
 
-- 影響対象: `public/manifest.json`, root `manifest.json`, `public/background.js`, `public/auth-content.js`, `src/App.tsx`, `src/auth.ts`, `src/vite-env.d.ts`, `scripts/sync-manifest.mjs`, `scripts/build-zip.mjs`, `vite.config.ts`, `package.json`, README または `docs/browser-support.md`。
-- 新規追加候補: `src/platform/` 配下のブラウザ互換 API、ブラウザ別 manifest、Firefox 用 background/bridge、Firefox packaging/lint scripts。
-- WebExtensions API 差異: `chrome.*` / `browser.*`、callback / Promise、`background.service_worker` / `background.scripts`、`chrome-extension:` / `moz-extension:`、`storage.session`、`downloads.setUiOptions`、`scripting.executeScript` の world 指定。
-- 検証対象: `npm run build` による既存 Chrome 回帰、Chrome での手動ロード、Firefox `about:debugging` での一時ロード、必要に応じた `web-ext lint` / `web-ext build`。
+- 必須変更対象: `public/manifest.firefox.json`、`public/background.js` の sender 検証、`scripts/sync-manifest.mjs`、Firefox build/package に必要な最小スクリプト、`package.json`。
+- 整理対象: `src/platform/`、互換レイヤー導入に伴う `src/App.tsx` / `src/auth.ts` / `src/vite-env.d.ts` の変更、`storage.session` fallback、重複する Chrome 用追加 command、不要な manifest 検証。
+- 検証対象: Chrome build/package、Firefox build/package、`web-ext lint`、Firefox 最新版と現行 ESR での主要ワークフロー、sender検証のfocused harness。
+- ドキュメント対象: `docs/browser-support.md` のbuild/package手順、対象version、MAIN world分類、実機確認結果。
+- 範囲外: AMO への提出、署名、公開手続き、旧 ESR 対応、Safari 対応。
