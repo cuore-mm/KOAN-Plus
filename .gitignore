@@ -3,7 +3,6 @@ node_modules/
 
 # Build outputs
 dist/
-dist-chrome/
 dist-firefox/
 /*.zip
 
