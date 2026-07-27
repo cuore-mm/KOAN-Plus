@@ -27,6 +27,7 @@ const EXTENSION_ONLY_AUTH_TYPES = new Set([
   "auth-ensure-koan",
   "auth-ensure-cle",
   "auth-refresh-cle",
+  "auth-open-url",
 ]);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -459,6 +460,7 @@ async function startCleDownload(rawUrl, rawFileName) {
   return chrome.downloads.download({
     url: url.toString(),
     filename: fileName,
+    // Never replace an existing user file; Chrome will append a suffix instead.
     conflictAction: "uniquify",
     saveAs: false,
   });
@@ -796,6 +798,47 @@ async function ensureCleLogin(record, sender, force = false) {
     }
   })();
   return cleLoginTask;
+}
+
+function requireAuthenticatedTarget(rawUrl) {
+  const url = new URL(String(rawUrl || ""));
+  const isKoan = url.origin === "https://koan.osaka-u.ac.jp" &&
+    url.pathname.startsWith("/campusweb/");
+  const isCle = url.origin === CLE_ORIGIN;
+  if (!isKoan && !isCle) {
+    throw new Error("KOANまたはCLE以外のページは認証付きで開けません。");
+  }
+  return { isKoan, url };
+}
+
+async function openAuthenticatedUrl(rawUrl, record, sender) {
+  const target = requireAuthenticatedTarget(rawUrl);
+  if (target.isKoan) {
+    await ensureKoanLogin(record, sender);
+    const tab = await chrome.tabs.create({
+      url: target.url.toString(),
+      active: true,
+    });
+    if (Number.isInteger(tab?.windowId)) {
+      await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    }
+    return { ok: true, tabId: tab.id };
+  }
+
+  const auth = await ensureCleLogin(record, sender);
+  const tab = auth.loginStarted && Number.isInteger(auth.tabId)
+    ? await chrome.tabs.update(auth.tabId, {
+        url: target.url.toString(),
+        active: true,
+      })
+    : await chrome.tabs.create({
+        url: target.url.toString(),
+        active: true,
+      });
+  if (Number.isInteger(tab?.windowId)) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  }
+  return { ok: true, tabId: tab.id };
 }
 
 async function authResponse(message, sender) {
@@ -1168,6 +1211,10 @@ async function authResponse(message, sender) {
     return ensureCleLogin(record, sender, true);
   }
 
+  if (message.type === "auth-open-url") {
+    return openAuthenticatedUrl(message.url, record, sender);
+  }
+
   if (message.type === "auth-auto-login-state") {
     if (!isIdpSender(sender) && !isCleLoginSender(sender)) {
       throw new Error("認証画面以外には自動ログイン状態を渡しません。");
@@ -1257,22 +1304,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "cle-download") {
     (async () => {
       requireExtensionPageSender(sender);
-      const url = new URL(message.url);
-      if (url.origin !== CLE_ORIGIN) {
-        throw new Error("CLE以外からのダウンロードは許可されていません。");
-      }
-      const fileName = String(message.fileName || "")
-        .split("/")
-        .map((part) => part.replace(/[<>:"\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/g, "").trim())
-        .filter((part) => part && part !== "." && part !== "..")
-        .join("/");
-      if (!fileName) throw new Error("ダウンロードするファイル名が不正です。");
-      const downloadId = await chrome.downloads.download({
-        url: url.toString(),
-        filename: fileName,
-        conflictAction: "uniquify",
-        saveAs: false,
-      });
+      const downloadId = await startCleDownload(message.url, message.fileName);
       return { ok: true, downloadId };
     })()
       .then(sendResponse)

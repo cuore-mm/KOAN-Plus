@@ -18,11 +18,22 @@ type AuthResponse = AuthSettings & {
   retryAfterMs?: number;
 };
 
+function requireRuntimeResponse<T>(response: T | null | undefined): T {
+  if (response == null) {
+    throw new Error(
+      "拡張機能のバックグラウンドから応答がありません。KOAN Plusを再読み込みして、画面を開き直してください。",
+    );
+  }
+  return response;
+}
+
 async function sendAuthMessage(message: unknown): Promise<AuthResponse> {
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
     throw new Error("自動ログイン設定はChrome拡張機能から開いてください。");
   }
-  const response = await chrome.runtime.sendMessage(message) as AuthResponse;
+  const response = requireRuntimeResponse(
+    await chrome.runtime.sendMessage(message) as AuthResponse | null | undefined,
+  );
   if (!response.ok) throw new Error(response.error || "自動ログイン設定の更新に失敗しました。");
   return response;
 }
@@ -65,6 +76,10 @@ export function refreshCleLogin() {
   return sendAuthMessage({ type: "auth-refresh-cle" });
 }
 
+export function openAuthenticatedUrl(url: string) {
+  return sendAuthMessage({ type: "auth-open-url", url });
+}
+
 export async function claimStartupRefresh() {
   const response = await sendAuthMessage({ type: "auth-claim-startup-refresh" });
   return Boolean(response.shouldRefresh);
@@ -89,7 +104,12 @@ export async function getSavedMfaSecrets(): Promise<MfaSecrets> {
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
     throw new Error("拡張機能のコンテキスト以外から呼び出されています。");
   }
-  const response = await chrome.runtime.sendMessage({ type: "auth-get-secrets" }) as MfaSecrets & { ok: boolean };
+  const response = requireRuntimeResponse(
+    await chrome.runtime.sendMessage({ type: "auth-get-secrets" }) as
+      | (MfaSecrets & { ok: boolean })
+      | null
+      | undefined,
+  );
   if (!response.ok) throw new Error(response.error || "シークレットの取得に失敗しました。");
   return response;
 }
@@ -98,12 +118,14 @@ export async function checkLoginStatus(): Promise<{ koanLoggedIn: boolean; cleLo
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
     return { koanLoggedIn: false, cleLoggedIn: false };
   }
-  const response = await chrome.runtime.sendMessage({ type: "auth-check-login" }) as {
-    ok: boolean;
-    koanLoggedIn: boolean;
-    cleLoggedIn: boolean;
-    error?: string;
-  };
+  const response = requireRuntimeResponse(
+    await chrome.runtime.sendMessage({ type: "auth-check-login" }) as {
+      ok: boolean;
+      koanLoggedIn: boolean;
+      cleLoggedIn: boolean;
+      error?: string;
+    } | null | undefined,
+  );
   if (!response.ok) throw new Error(response.error || "ログイン状態の確認に失敗しました。");
   return { koanLoggedIn: response.koanLoggedIn, cleLoggedIn: response.cleLoggedIn };
 }

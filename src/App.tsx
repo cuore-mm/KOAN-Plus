@@ -1,8 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type AnchorHTMLAttributes,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import DOMPurify from "dompurify";
 import {
   BOARD_URL,
   GENRES,
+  NOTICE_SNAPSHOT_VERSION,
   PORTAL_URL,
   SNAPSHOT_TTL_MS,
   type ChangeItem,
@@ -57,11 +65,13 @@ import {
   ensureCleLogin,
   ensureKoanLogin,
   loadAuthSettings,
+  openAuthenticatedUrl,
   refreshCleLogin,
   saveAuthSettings,
   getSavedMfaSecrets,
   checkLoginStatus,
 } from "./auth";
+import { buildGpaTrendPoints } from "./grades";
 import QRCode from "qrcode";
 import ThemeToggle, { loadTheme } from "./ThemeToggle";
 
@@ -150,7 +160,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [progress, setProgress] = useState("");
   const [query, setQuery] = useState("");
   const [genre, setGenre] = useState("");
-  const [scope, setScope] = useState("attention");
+  const [scope, setScope] = useState("all");
   const [view, setView] = useState<AppView>(initialView);
   const [selectedCourseCode, setSelectedCourseCode] = useState("");
   const [gradesData, setGradesData] = useState<GradeData | null>(() =>
@@ -433,6 +443,8 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     setSnapshotLoading(true);
     setSnapshotStatus("掲示スナップショットを同期中");
     try {
+      setProgress("KOANログイン状態を確認中");
+      await ensureKoanLogin();
       const snapshot = await refreshSnapshot(data, setProgress);
       setData((current) => {
         const next = {
@@ -524,7 +536,9 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       .sort((a, b) => attentionScore(b) - attentionScore(a));
   }, [data.notices, genre, query, scope]);
 
-  const snapshotExpired = isExpired(data.snapshotUpdatedAt, SNAPSHOT_TTL_MS);
+  const snapshotExpired =
+    data.snapshotVersion !== NOTICE_SNAPSHOT_VERSION ||
+    isExpired(data.snapshotUpdatedAt, SNAPSHOT_TTL_MS);
   const snapshotAvailability = getSnapshotAvailability();
   const snapshotNow = Math.max(freshnessClock, Date.now());
   const snapshotBlocked = snapshotAvailability.blockedUntil > snapshotNow;
@@ -913,12 +927,29 @@ function Sidebar({
       </nav>
       <div className="sidebar-footer">
         <small>外部リンク</small>
-        <a href={PORTAL_URL} target="_blank" rel="noopener noreferrer">KOAN</a>
-        <a href={CLE_MESSAGES_URL} target="_blank" rel="noopener noreferrer">CLE</a>
+        <AuthenticatedLink href={PORTAL_URL} target="_blank">KOAN</AuthenticatedLink>
+        <AuthenticatedLink href={CLE_MESSAGES_URL} target="_blank">CLE</AuthenticatedLink>
         <a href={contactUrl} target="_blank" rel="noopener noreferrer">お問い合わせ</a>
       </div>
     </aside>
   );
+}
+
+function AuthenticatedLink({
+  href,
+  onClick,
+  rel = "noopener noreferrer",
+  ...props
+}: Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> & { href: string }) {
+  const handleClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    onClick?.(event);
+    if (event.defaultPrevented || event.button !== 0) return;
+    event.preventDefault();
+    void openAuthenticatedUrl(href).catch((error) => {
+      window.alert(error instanceof Error ? error.message : String(error));
+    });
+  };
+  return <a {...props} href={href} onClick={handleClick} rel={rel} />;
 }
 
 const EMPTY_AUTH_SETTINGS: AuthSettings = {
@@ -1843,7 +1874,8 @@ function Settings({
   );
 }
 
-function fmtDue(value: string) {
+function fmtDue(value: string | null) {
+  if (!value) return "期限なし";
   return new Intl.DateTimeFormat("ja-JP", {
     month: "numeric",
     day: "numeric",
@@ -1853,7 +1885,8 @@ function fmtDue(value: string) {
   }).format(new Date(value));
 }
 
-function dueLabel(value: string) {
+function dueLabel(value: string | null) {
+  if (!value) return "期限なし";
   const milliseconds = new Date(value).getTime() - Date.now();
   const hours = Math.ceil(milliseconds / (60 * 60 * 1000));
   if (hours < 0) return "期限超過";
@@ -1862,15 +1895,36 @@ function dueLabel(value: string) {
 }
 
 function taskLabel(task: CleTask) {
-  if (["提出済み", "採点済み", "期限切れ"].includes(task.status)) {
-    return task.status;
+  const status = taskDisplayStatus(task);
+  if (["提出済み", "採点済み", "期限切れ"].includes(status)) {
+    return status;
   }
   return dueLabel(task.dueAt);
 }
 
+function taskDisplayStatus(task: CleTask): CleTask["status"] {
+  if (["提出済み", "採点済み"].includes(task.status)) return task.status;
+  if (task.status === "期限切れ" || (task.dueAt && new Date(task.dueAt).getTime() < Date.now())) {
+    return "期限切れ";
+  }
+  return task.status;
+}
+
+function taskDueDescription(task: CleTask) {
+  return task.dueAt ? `${fmtDue(task.dueAt)}まで` : "期限なし";
+}
+
+function compareTaskDueAt(left: CleTask, right: CleTask) {
+  if (!left.dueAt && !right.dueAt) return left.title.localeCompare(right.title, "ja");
+  if (!left.dueAt) return 1;
+  if (!right.dueAt) return -1;
+  return left.dueAt.localeCompare(right.dueAt);
+}
+
 function taskTone(task: CleTask) {
-  if (["提出済み", "採点済み"].includes(task.status)) return "done";
-  if (task.status === "期限切れ" || dueLabel(task.dueAt) === "期限超過") return "attention";
+  const status = taskDisplayStatus(task);
+  if (["提出済み", "採点済み"].includes(status)) return "done";
+  if (status === "期限切れ") return "attention";
   return "neutral";
 }
 
@@ -1964,9 +2018,10 @@ function buildCourseSummaries(data: KoanData, cleData: CleData): CourseSummary[]
       cleCourse,
       tasks: tasks.sort((left, right) => {
         const getTaskPriority = (task: CleTask) => {
-          const isDone = ["提出済み", "採点済み"].includes(task.status);
+          const status = taskDisplayStatus(task);
+          const isDone = ["提出済み", "採点済み"].includes(status);
           if (isDone) return 3;
-          const isOverdue = task.status === "期限切れ" || new Date(task.dueAt).getTime() < Date.now();
+          const isOverdue = status === "期限切れ";
           if (isOverdue) return 2;
           return 1;
         };
@@ -1975,7 +2030,7 @@ function buildCourseSummaries(data: KoanData, cleData: CleData): CourseSummary[]
         if (leftPriority !== rightPriority) {
           return leftPriority - rightPriority;
         }
-        return left.dueAt.localeCompare(right.dueAt);
+        return compareTaskDueAt(left, right);
       }),
       messages,
       announcements: announcements.sort((left, right) => right.created.localeCompare(left.created)),
@@ -2201,7 +2256,7 @@ function CoursesPage({
     }
   }, [courses, selectedCode, onSelectCode]);
   const selected = courses.find((course) => course.code === selectedCode);
-  const regularCourses = courses.filter((course) => courseSlots(course.koan).some((slot) =>
+  const regularCourses = courses.filter((course) => !course.koan.isIntensive && courseSlots(course.koan).some((slot) =>
     timetableDays.includes(slot.day as typeof timetableDays[number]) &&
     timetablePeriods.includes(slot.period),
   ));
@@ -2258,6 +2313,7 @@ function CoursesPage({
       <div className="course-detail-pane">
         {selected ? (
           <CourseDetail
+            allNotices={data.notices}
             course={selected}
             onOpenNotice={onOpenNotice}
             onOpenAnnouncement={onOpenAnnouncement}
@@ -2336,17 +2392,35 @@ function CourseDefaultDetail() {
 }
 
 function CourseDetail({
+  allNotices,
   course,
   onOpenNotice,
   onOpenAnnouncement,
   onOpenMaterials,
 }: {
+  allNotices: Notice[];
   course: CourseSummary;
   onOpenNotice: (notice: Notice) => void;
   onOpenAnnouncement: (ann: CleAnnouncement) => void;
   onOpenMaterials: (course: CourseSummary) => void;
 }) {
   const teacherRoom = courseTeacherRoom(course.koan.teacherAndRoom);
+  const [openingNotice, setOpeningNotice] = useState("");
+  const openNotice = async (notice: Notice) => {
+    const key = noticeKey(notice);
+    const detailWindow = window.open("", "_blank");
+    setOpeningNotice(key);
+    try {
+      await ensureKoanLogin();
+      const url = await resolveNoticeUrl(notice, allNotices);
+      if (detailWindow) detailWindow.location.href = url || BOARD_URL;
+      onOpenNotice(notice);
+    } catch {
+      if (detailWindow) detailWindow.location.href = BOARD_URL;
+    } finally {
+      setOpeningNotice("");
+    }
+  };
   return (
     <div className="course-detail">
       <div className="course-detail-header">
@@ -2365,10 +2439,10 @@ function CourseDetail({
           <h3>課題</h3>
           <div className="course-line-list">
             {course.tasks.length ? course.tasks.map((task) => (
-              <a className="course-line-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
+              <AuthenticatedLink className="course-line-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
                 <b className={`course-status-label ${taskTone(task)}`}>{taskLabel(task)}</b>
-                <span>{task.title}<small>{fmtDue(task.dueAt)}まで / {task.status}</small></span>
-              </a>
+                <span>{task.title}<small>{taskDueDescription(task)} / {taskDisplayStatus(task)}</small></span>
+              </AuthenticatedLink>
             )) : (
               <EmptyState
                 icon="check-circle"
@@ -2400,10 +2474,10 @@ function CourseDetail({
                   </button>
                 ))}
                 {course.messages.map((message) => (
-                  <a className="course-line-row" href={cleMessageUrl(message.courseId)} key={message.courseId} target="_blank">
+                  <AuthenticatedLink className="course-line-row" href={cleMessageUrl(message.courseId)} key={message.courseId} target="_blank">
                     <b>{message.unreadCount ? "未読" : "連絡"}</b>
                     <span>{message.courseName}<small>{message.unreadCount ? `${message.unreadCount}件の未読` : "既読"}</small></span>
-                  </a>
+                  </AuthenticatedLink>
                 ))}
               </>
             ) : (
@@ -2429,10 +2503,11 @@ function CourseDetail({
               <button
                 className="course-line-row course-notice-row"
                 key={noticeKey(notice)}
-                onClick={() => onOpenNotice(notice)}
+                disabled={Boolean(openingNotice)}
+                onClick={() => void openNotice(notice)}
                 type="button"
               >
-                <b>掲示</b>
+                <b>{openingNotice === noticeKey(notice) ? "取得中" : "掲示"}</b>
                 <span>{notice.title}<small>{[notice.period, notice.genre].filter(Boolean).join(" / ") || notice.author}</small></span>
               </button>
             ))}
@@ -2449,12 +2524,12 @@ function CourseDetail({
 
       <div className="course-link-actions">
         {course.koan.syllabusUrl ? (
-          <a href={course.koan.syllabusUrl} target="_blank">シラバス</a>
+          <AuthenticatedLink href={course.koan.syllabusUrl} target="_blank">シラバス</AuthenticatedLink>
         ) : (
           <span className="disabled">シラバス</span>
         )}
         {course.cleCourse ? (
-          <a href={cleCourseUrl(course.cleCourse.courseId)} target="_blank">CLE</a>
+          <AuthenticatedLink href={cleCourseUrl(course.cleCourse.courseId)} target="_blank">CLE</AuthenticatedLink>
         ) : (
           <span className="disabled">CLE</span>
         )}
@@ -2529,11 +2604,14 @@ function NextActions({
     (task) => !["提出済み", "採点済み"].includes(task.status),
   );
   const upcomingTasks = tasks
-    .filter((task) => new Date(task.dueAt).getTime() >= Date.now())
-    .sort((left, right) => left.dueAt.localeCompare(right.dueAt));
+    .filter((task) => task.dueAt && new Date(task.dueAt).getTime() >= Date.now())
+    .sort(compareTaskDueAt);
+  const noDueTasks = tasks
+    .filter((task) => !task.dueAt)
+    .sort(compareTaskDueAt);
   const expiredTasks = tasks
-    .filter((task) => new Date(task.dueAt).getTime() < Date.now())
-    .sort((left, right) => right.dueAt.localeCompare(left.dueAt));
+    .filter((task) => task.dueAt && new Date(task.dueAt).getTime() < Date.now())
+    .sort((left, right) => compareTaskDueAt(right, left));
   return (
     <section className="section next-actions">
       <div className="section-heading">
@@ -2541,10 +2619,12 @@ function NextActions({
           <h2>直近の課題</h2>
           <p>CLE取得 {fmtTime(data.updatedAt)}{status ? ` / ${status}` : ""}</p>
         </div>
-        <a className="detail-link" href={CLE_CALENDAR_URL} target="_blank">CLEカレンダー</a>
+        <AuthenticatedLink className="detail-link" href={CLE_CALENDAR_URL} target="_blank">CLEカレンダー</AuthenticatedLink>
       </div>
       <div className="task-list">
-        {upcomingTasks.length ? upcomingTasks.map((task) => <CleTaskRow task={task} key={task.id} />) : (
+        {upcomingTasks.map((task) => <CleTaskRow task={task} key={task.id} />)}
+        {noDueTasks.map((task) => <CleTaskRow task={task} key={task.id} />)}
+        {!upcomingTasks.length && !noDueTasks.length && (
           <EmptyState
             icon={loading ? "spinner" : "sparkles"}
             title={loading ? "取得中です" : "直近の課題はありません"}
@@ -2564,15 +2644,15 @@ function NextActions({
 }
 
 function CleTaskRow({ task }: { task: CleTask }) {
-  const overdue = new Date(task.dueAt).getTime() < Date.now();
+  const overdue = Boolean(task.dueAt && new Date(task.dueAt).getTime() < Date.now());
   return (
-    <a className="cle-task-row" href={cleTaskUrl(task)} target="_blank">
+    <AuthenticatedLink className="cle-task-row" href={cleTaskUrl(task)} target="_blank">
       <time className={overdue ? "overdue" : ""}>{dueLabel(task.dueAt)}</time>
       <span>
         {task.title}
-        <small>{courseDisplayName(task.courseName)} / {fmtDue(task.dueAt)}まで / {task.status}</small>
+        <small>{courseDisplayName(task.courseName)} / {taskDueDescription(task)} / {taskDisplayStatus(task)}</small>
       </span>
-    </a>
+    </AuthenticatedLink>
   );
 }
 
@@ -2646,7 +2726,7 @@ function Grades({ data }: { data: GradeData | null }) {
                   </tbody>
                 </table>
               </div>
-              <GpaTrend courses={data.courses} termGpas={data.termGpas} />
+              <GpaTrend termGpas={data.termGpas} />
             </section>
           )}
 
@@ -2675,49 +2755,12 @@ function Grades({ data }: { data: GradeData | null }) {
   );
 }
 
-function halfTerm(value: string) {
-  return /春|夏/.test(value) ? "前期" : /秋|冬/.test(value) ? "後期" : "";
-}
-
 function GpaTrend({
-  courses,
   termGpas,
 }: {
-  courses: GradeData["courses"];
   termGpas: GradeData["termGpas"];
 }) {
-  const termCredits = new Map<string, number>();
-  for (const course of courses) {
-    const key = `${course.year}-${course.term}`;
-    termCredits.set(key, (termCredits.get(key) || 0) + course.credits);
-  }
-  const grouped = new Map<string, { credits: number; qualityPoints: number }>();
-  for (const item of termGpas) {
-    const half = halfTerm(item.term);
-    const gpa = Number.parseFloat(item.gpa);
-    const credits = termCredits.get(`${item.year}-${item.term}`) || 0;
-    if (!half || !Number.isFinite(gpa) || credits <= 0) continue;
-    const key = `${item.year}-${half}`;
-    const current = grouped.get(key) || { credits: 0, qualityPoints: 0 };
-    grouped.set(key, {
-      credits: current.credits + credits,
-      qualityPoints: current.qualityPoints + gpa * credits,
-    });
-  }
-  let cumulativeCredits = 0;
-  let cumulativeQualityPoints = 0;
-  const points = [...grouped.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, values]) => {
-      const [year, half] = key.split("-");
-      cumulativeCredits += values.credits;
-      cumulativeQualityPoints += values.qualityPoints;
-      return {
-        cumulative: cumulativeQualityPoints / cumulativeCredits,
-        key,
-        label: `${year} ${half}`,
-      };
-    });
+  const points = buildGpaTrendPoints(termGpas);
   const width = 590;
   const height = 285;
   const margin = { top: 35, right: 20, bottom: 50, left: 42 };
@@ -2726,29 +2769,29 @@ function GpaTrend({
   const x = (index: number) =>
     margin.left + (points.length <= 1 ? plotWidth / 2 : (plotWidth * index) / (points.length - 1));
   const y = (value: number) => margin.top + plotHeight - (plotHeight * value) / 4;
-  const cumulativePolyline = points.map((point, index) => `${x(index)},${y(point.cumulative)}`).join(" ");
+  const gpaPolyline = points.map((point, index) => `${x(index)},${y(point.gpa)}`).join(" ");
 
   return (
     <section className="section grade-section gpa-trend">
       <div className="section-heading">
         <div>
           <h2>GPA 推移</h2>
-          <p>前期・後期ごとの時点累積 GPA</p>
+          <p>KOANに記録された学期ごとの公式 GPA</p>
         </div>
       </div>
       <div className="gpa-chart">
-        <svg aria-label="前期・後期ごとの時点累積 GPA の推移" role="img" viewBox={`0 0 ${width} ${height}`}>
+        <svg aria-label="学期ごとの公式 GPA の推移" role="img" viewBox={`0 0 ${width} ${height}`}>
           {[0, 1, 2, 3, 4].map((tick) => (
             <g className="gpa-grid-line" key={tick}>
               <line x1={margin.left} x2={width - margin.right} y1={y(tick)} y2={y(tick)} />
               <text x={margin.left - 11} y={y(tick) + 4}>{tick.toFixed(1)}</text>
             </g>
           ))}
-          {!!points.length && <polyline className="gpa-line cumulative" points={cumulativePolyline} />}
+          {!!points.length && <polyline className="gpa-line cumulative" points={gpaPolyline} />}
           {points.map((point, index) => (
-            <g className="gpa-point cumulative" key={`${point.key}-cumulative`}>
-              <circle cx={x(index)} cy={y(point.cumulative)} r="4" />
-              <text className="gpa-value" x={x(index)} y={y(point.cumulative) - 12}>{point.cumulative.toFixed(2)}</text>
+            <g className="gpa-point cumulative" key={point.key}>
+              <circle cx={x(index)} cy={y(point.gpa)} r="4" />
+              <text className="gpa-value" x={x(index)} y={y(point.gpa) - 12}>{point.gpa.toFixed(2)}</text>
               <text className="gpa-label" x={x(index)} y={height - 20}>{point.label}</text>
             </g>
           ))}
@@ -2864,12 +2907,16 @@ function DashboardRightRail({
     [tasks],
   );
   const deadlineDates = useMemo(
-    () => new Set(activeTasks.map((task) => dateKey(new Date(task.dueAt)))),
+    () => new Set(
+      activeTasks
+        .filter((task) => task.dueAt)
+        .map((task) => dateKey(new Date(task.dueAt!))),
+    ),
     [activeTasks],
   );
   const selectedTasks = activeTasks
-    .filter((task) => dateKey(new Date(task.dueAt)) === selectedDate)
-    .sort((left, right) => left.dueAt.localeCompare(right.dueAt));
+    .filter((task) => task.dueAt && dateKey(new Date(task.dueAt)) === selectedDate)
+    .sort(compareTaskDueAt);
   return (
     <aside className="dashboard-right-rail">
       <section className="rail-section calendar-panel">
@@ -2962,13 +3009,13 @@ function DashboardRightRail({
           {selectedTasks.length ? (
             <>
               {selectedTasks.slice(0, 2).map((task) => (
-                <a className="rail-deadline-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
-                  <time>{new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(new Date(task.dueAt))}</time>
+                <AuthenticatedLink className="rail-deadline-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
+                  <time>{new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(new Date(task.dueAt!))}</time>
                   <span>
                     <b>{task.title}</b>
                     <small>{courseDisplayName(task.courseName)}</small>
                   </span>
-                </a>
+                </AuthenticatedLink>
               ))}
               {selectedTasks.length > 2 && <p className="rail-more">他 {selectedTasks.length - 2} 件</p>}
             </>
@@ -3105,7 +3152,7 @@ function NewActivity({
           <div>
             <h2>CLEメッセージ</h2>
           </div>
-          <a className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</a>
+          <AuthenticatedLink className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</AuthenticatedLink>
         </div>
         <div className="cle-messages-list">
           {recentAnnouncements.length || messages.length ? (
@@ -3131,10 +3178,10 @@ function NewActivity({
                 </button>
               ))}
               {messages.map((message) => (
-                <a className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
+                <AuthenticatedLink className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
                   <span>{courseDisplayName(message.courseName)}</span>
                   <b>未読 {message.unreadCount}</b>
-                </a>
+                </AuthenticatedLink>
               ))}
             </>
           ) : (
@@ -3341,7 +3388,7 @@ function NoticeList({
   const importantNotices = notices.filter(isImportantNotice);
   const otherNotices = notices.filter((notice) => !isImportantNotice(notice));
   const showGroups = Boolean(importantNotices.length && otherNotices.length);
-  const renderRows = (items: Notice[]) => items.slice(0, 300).map((notice) => {
+  const renderRows = (items: Notice[]) => items.map((notice) => {
     const key = `${notice.title}-${notice.period}`;
     const openingThis = opening === key;
     return (

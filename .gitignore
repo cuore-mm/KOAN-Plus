@@ -25,6 +25,9 @@ Thumbs.db
 .vscode/
 .VSCodeCounter/
 
+# Local design notes (not published with the OSS repo)
+/design.md
+
 # Temporary assets and scratch files at the root level
 /*.png
 /*.jpg

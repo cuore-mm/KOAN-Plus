@@ -8,6 +8,7 @@ export const GRADE_HISTORY_URL = `${BASE_URL}campussquare.do?_flowId=SIW0001200-
 export const CREDIT_STATUS_URL = `${BASE_URL}campussquare.do?_flowId=SIW0001300-flow`;
 
 export const SNAPSHOT_TTL_MS = 6 * 60 * 60 * 1000;
+export const NOTICE_SNAPSHOT_VERSION = 2;
 export const LIGHT_REFRESH_TTL_MS = 10 * 60 * 1000;
 export const SCHEDULE_REFRESH_TTL_MS = 30 * 60 * 1000;
 export const FUTURE_SCHEDULE_REFRESH_TTL_MS = 6 * 60 * 60 * 1000;
@@ -24,7 +25,7 @@ const LIGHT_ATTEMPT_KEY = "koan-plus-light-refresh-attempt-v1";
 const LIGHT_FAILURE_KEY = "koan-plus-light-refresh-failure-v1";
 const SNAPSHOT_LEASE_KEY = "koan-plus-snapshot-lease-v1";
 const SNAPSHOT_ATTEMPT_KEY = "koan-plus-snapshot-attempt-v1";
-const SNAPSHOT_COMPLETED_KEY = "koan-plus-snapshot-completed-v1";
+const SNAPSHOT_COMPLETED_KEY = "koan-plus-snapshot-completed-v2";
 const SNAPSHOT_FAILURE_KEY = "koan-plus-snapshot-failure-v1";
 const NOTICE_RESOLVE_LEASE_KEY = "koan-plus-notice-resolve-lease-v1";
 const NOTICE_RESOLVE_ATTEMPT_KEY = "koan-plus-notice-resolve-attempt-v1";
@@ -61,6 +62,7 @@ export type CourseRegistration = {
   period: string;
   teacherAndRoom: string;
   syllabusUrl: string;
+  isIntensive?: boolean;
 };
 export type ChangeItem = { type: string; date: string; period: string; course: string };
 export type Notice = {
@@ -87,6 +89,7 @@ export type KoanData = {
   coursesUpdatedAt: string | null;
   changesUpdatedAt: string | null;
   noticesUpdatedAt: string | null;
+  snapshotVersion?: number;
   snapshotGenreSyncAt?: Record<string, string>;
 };
 export type GradeHistoryItem = {
@@ -548,40 +551,83 @@ function parseSyllabusCall(value: string) {
 
 function parseCourseRegistrations(doc: Document): CourseRegistration[] {
   const table = doc.querySelector("table.rishu-koma");
-  if (!table) return [];
   const weekdays = ["月", "火", "水", "木", "金", "土"];
   const courses: CourseRegistration[] = [];
-  for (const row of [...table.querySelectorAll(":scope > tbody > tr")].slice(1)) {
-    const rowCells = [...row.children].filter((cell) => cell.tagName === "TD");
-    const period = normalize(rowCells[0]?.textContent);
-    rowCells.slice(1).forEach((cell, index) => {
-      const rows = [...cell.querySelectorAll(":scope table tr")]
-        .map((innerRow) => normalize(innerRow.textContent))
-        .filter(Boolean);
-      if (!rows.length || rows[0] === "未登録") return;
-      const onclick = [...cell.querySelectorAll("a")]
-        .map((link) => link.getAttribute("onclick") || "")
-        .find((value) => value.includes("syllabusRefer")) || "";
-      const syllabus = parseSyllabusCall(onclick);
-      const code = syllabus?.code || rows[0];
-      courses.push({
-        code,
-        departmentCode: syllabus?.departmentCode || "",
-        year: syllabus?.year || "",
-        title: rows[1] || "",
-        day: weekdays[index] || "",
-        period,
-        teacherAndRoom: rows[2] || "",
-        syllabusUrl: syllabus
-          ? `${BASE_URL}campussquare.do?_flowId=SYW0001000-flow&_eventId=syllabus&nendo=${syllabus.year}&jikanwarishozokucd=${syllabus.departmentCode}&jikanwaricd=${syllabus.code}`
-          : "",
+  if (table) {
+    for (const row of [...table.querySelectorAll(":scope > tbody > tr")].slice(1)) {
+      const rowCells = [...row.children].filter((cell) => cell.tagName === "TD");
+      const period = normalize(rowCells[0]?.textContent);
+      rowCells.slice(1).forEach((cell, index) => {
+        const rows = [...cell.querySelectorAll(":scope table tr")]
+          .map((innerRow) => normalize(innerRow.textContent))
+          .filter(Boolean);
+        if (!rows.length || rows[0] === "未登録") return;
+        const onclick = [...cell.querySelectorAll("a")]
+          .map((link) => link.getAttribute("onclick") || "")
+          .find((value) => value.includes("syllabusRefer")) || "";
+        const syllabus = parseSyllabusCall(onclick);
+        const code = syllabus?.code || rows[0];
+        courses.push({
+          code,
+          departmentCode: syllabus?.departmentCode || "",
+          year: syllabus?.year || "",
+          title: rows[1] || "",
+          day: weekdays[index] || "",
+          period,
+          teacherAndRoom: rows[2] || "",
+          syllabusUrl: syllabus
+            ? `${BASE_URL}campussquare.do?_flowId=SYW0001000-flow&_eventId=syllabus&nendo=${syllabus.year}&jikanwarishozokucd=${syllabus.departmentCode}&jikanwaricd=${syllabus.code}`
+            : "",
+        });
       });
+    }
+  }
+
+  const intensiveTable = doc.querySelector("table.rishu-etc");
+  for (const row of intensiveTable?.querySelectorAll(":scope > tbody > tr") || []) {
+    const cells = [...row.children].filter((cell) => cell.tagName === "TD");
+    if (cells.length < 7) continue;
+    const rawCode = normalize(cells[2]?.textContent);
+    const title = normalize(cells[4]?.textContent);
+    if (!rawCode || rawCode === "時間割コード" || !title) continue;
+    const onclick = [...row.querySelectorAll("a")]
+      .map((link) => link.getAttribute("onclick") || "")
+      .find((value) => value.includes("syllabusRefer")) || "";
+    const syllabus = parseSyllabusCall(onclick);
+    const teacher = normalize(cells[5]?.textContent);
+    const room = normalize(cells[6]?.textContent);
+    courses.push({
+      code: syllabus?.code || rawCode,
+      departmentCode: syllabus?.departmentCode || "",
+      year: syllabus?.year || "",
+      title,
+      day: normalize(cells[0]?.textContent).replace(/曜日$/, ""),
+      period: normalize(cells[1]?.textContent),
+      teacherAndRoom: [teacher, room].filter(Boolean).join(" / "),
+      syllabusUrl: syllabus
+        ? `${BASE_URL}campussquare.do?_flowId=SYW0001000-flow&_eventId=syllabus&nendo=${syllabus.year}&jikanwarishozokucd=${syllabus.departmentCode}&jikanwaricd=${syllabus.code}`
+        : "",
+      isIntensive: true,
     });
   }
   return courses;
 }
 
-function mergeCourses(items: CourseRegistration[]) {
+function courseSlotTokens(course: CourseRegistration) {
+  const encodedSlots = [...course.period.matchAll(/([月火水木金土日])\s*(\d+)/g)]
+    .map((match) => `${match[1]}${match[2]}`);
+  if (encodedSlots.length) return encodedSlots;
+
+  const period = periodNumber(course.period);
+  if (!period) return [];
+  return course.day
+    .split(",")
+    .map((day) => day.trim())
+    .filter(Boolean)
+    .map((day) => `${day}${period}`);
+}
+
+export function mergeCourses(items: CourseRegistration[]) {
   const grouped = new Map<string, CourseRegistration>();
   for (const item of items) {
     const current = grouped.get(item.code);
@@ -589,17 +635,19 @@ function mergeCourses(items: CourseRegistration[]) {
       grouped.set(item.code, item);
       continue;
     }
-    const slots = new Set(
-      `${current.day}${periodNumber(current.period) || current.period}`
-        .split(",")
-        .filter(Boolean),
-    );
-    const nextSlot = `${item.day}${periodNumber(item.period) || item.period}`;
-    if (nextSlot) slots.add(nextSlot);
+    const slots = new Set([
+      ...courseSlotTokens(current),
+      ...courseSlotTokens(item),
+    ]);
+    const days = [
+      ...current.day.split(","),
+      ...item.day.split(","),
+    ].map((day) => day.trim()).filter(Boolean);
     grouped.set(item.code, {
       ...current,
-      day: [...new Set([current.day, item.day].filter(Boolean))].join(","),
-      period: [...slots].join(","),
+      day: [...new Set(days)].join(","),
+      period: slots.size ? [...slots].join(",") : current.period || item.period,
+      isIntensive: Boolean(current.isIntensive && item.isIntensive),
     });
   }
   return [...grouped.values()].sort((left, right) =>
@@ -920,7 +968,6 @@ async function fetchGenre(
   root: { doc: Document; url: string },
   genre: string,
   deadline: number,
-  knownKeys: Set<string>,
 ) {
   requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
   const link = [...root.doc.querySelectorAll("a")].find(
@@ -935,9 +982,6 @@ async function fetchGenre(
   for (let index = 0; index < MAX_BOARD_PAGES_PER_GENRE; index += 1) {
     const pageNotices = parseNotices(page.doc, page.url);
     notices.push(...pageNotices);
-    if (knownKeys.size && pageNotices.some((notice) => knownKeys.has(noticeKey(notice)))) {
-      break;
-    }
     const next = [...page.doc.querySelectorAll("a")].find(
       (item) => normalize(item.textContent) === "次へ >>",
     );
@@ -961,7 +1005,6 @@ export async function refreshSnapshot(
   requireCooldown(SNAPSHOT_ATTEMPT_KEY, 10 * 60 * 1000, "掲示同期の再試行は10分後にできます。");
   requireNoActiveLease(NOTICE_RESOLVE_LEASE_KEY, "掲示を検索中です。完了後に同期してください。");
   const release = acquireLease(SNAPSHOT_LEASE_KEY, SNAPSHOT_MAX_DURATION_MS + REQUEST_TIMEOUT_MS, "別の画面で掲示を同期中です。");
-  localStorage.setItem(SNAPSHOT_ATTEMPT_KEY, String(Date.now()));
   try {
     const notices: Notice[] = [];
     const deadline = Date.now() + SNAPSHOT_MAX_DURATION_MS;
@@ -969,16 +1012,12 @@ export async function refreshSnapshot(
     if (new URL(root.url).origin !== "https://koan.osaka-u.ac.jp") {
       throw new Error("KOANにログインしてから更新してください。");
     }
+    localStorage.setItem(SNAPSHOT_ATTEMPT_KEY, String(Date.now()));
     const syncAt = new Date().toISOString();
     const snapshotGenreSyncAt = { ...(previous.snapshotGenreSyncAt || {}) };
     for (const [index, genre] of GENRES.entries()) {
       onProgress?.(`${index + 1}/${GENRES.length} ${genre}`);
-      const knownKeys = new Set(
-        previous.notices
-          .filter((notice) => notice.genre === genre)
-          .map(noticeKey),
-      );
-      notices.push(...(await fetchGenre(root, genre, deadline, knownKeys)));
+      notices.push(...(await fetchGenre(root, genre, deadline)));
       snapshotGenreSyncAt[genre] = syncAt;
       await pause(BOARD_REQUEST_GAP_MS);
       requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
@@ -988,6 +1027,7 @@ export async function refreshSnapshot(
     const result = {
       notices: mergeNotices(notices),
       snapshotUpdatedAt: syncAt,
+      snapshotVersion: NOTICE_SNAPSHOT_VERSION,
       snapshotGenreSyncAt,
     };
     localStorage.removeItem(SNAPSHOT_FAILURE_KEY);

@@ -36,7 +36,7 @@ export type CleTask = {
   courseId: string;
   courseName: string;
   title: string;
-  dueAt: string;
+  dueAt: string | null;
   status: CleTaskStatus;
   statusUpdatedAt?: string | null;
 };
@@ -1046,7 +1046,7 @@ export async function downloadCourseMaterialBatch(
   };
 }
 
-function taskStatus(attemptsResponse: unknown, gradeResponse: unknown, dueAt: string) {
+function taskStatus(attemptsResponse: unknown, gradeResponse: unknown, dueAt: string | null) {
   const attempts = results(attemptsResponse);
   const latestAttempt = attempts[0] || {};
   const attemptStatus = asString(latestAttempt.status);
@@ -1054,7 +1054,7 @@ function taskStatus(attemptsResponse: unknown, gradeResponse: unknown, dueAt: st
   if (/graded|completed|posted/i.test(gradeStatus)) return "採点済み";
   if (/inprogress/i.test(attemptStatus)) return "一時保存";
   if (attempts.length || /needsgrading|submitted/i.test(gradeStatus)) return "提出済み";
-  if (new Date(dueAt).getTime() < Date.now()) return "期限切れ";
+  if (dueAt && new Date(dueAt).getTime() < Date.now()) return "期限切れ";
   return "未着手";
 }
 
@@ -1075,7 +1075,68 @@ async function fetchTaskStatus(task: CleTask, tabId?: number): Promise<CleTask> 
   }
 }
 
-async function fetchTasks(tabId?: number) {
+export function gradebookColumnsToTasks(
+  course: Pick<CleCourse, "courseId" | "name">,
+  columns: JsonRecord[],
+): CleTask[] {
+  return columns
+    .filter((item) => asString(item.contentId))
+    .filter((item) => !asBoolean(item.externalGrade))
+    .map((item): CleTask => {
+      const dueAt = asString(asRecord(item.grading).due) || null;
+      return {
+        id: asString(item.id),
+        courseId: course.courseId,
+        courseName: course.name,
+        title: asString(item.name) || asString(item.displayName),
+        dueAt,
+        status: dueAt && new Date(dueAt).getTime() < Date.now()
+          ? "期限切れ"
+          : "状態不明",
+      };
+    })
+    .filter((task) => task.id && task.courseId && task.title);
+}
+
+async function fetchGradebookTasks(courses: CleCourse[], tabId?: number) {
+  const candidates = courses.filter((course) => course.available !== false);
+  const tasks: CleTask[] = [];
+  const successfulCourseIds = new Set<string>();
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < candidates.length) {
+      const course = candidates[nextIndex];
+      nextIndex += 1;
+      try {
+        const params = new URLSearchParams({
+          limit: String(MATERIALS_PAGE_SIZE),
+          fields: "id,name,displayName,externalGrade,contentId,grading.due",
+        });
+        const columns = await fetchAllResults(
+          `${API_ORIGIN}/public/v2/courses/${encodeURIComponent(course.courseId)}/gradebook/columns?${params}`,
+          tabId,
+        );
+        tasks.push(...gradebookColumnsToTasks(course, columns));
+        successfulCourseIds.add(course.courseId);
+      } catch {
+        // Keep the previous cached items for a course when its gradebook is temporarily unavailable.
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(4, candidates.length) }, worker),
+  );
+  return { tasks, successfulCourseIds };
+}
+
+function compareTaskDueAt(left: CleTask, right: CleTask) {
+  if (!left.dueAt && !right.dueAt) return left.title.localeCompare(right.title, "ja");
+  if (!left.dueAt) return 1;
+  if (!right.dueAt) return -1;
+  return left.dueAt.localeCompare(right.dueAt);
+}
+
+async function fetchTasks(courses: CleCourse[], previousTasks: CleTask[], tabId?: number) {
   const since = new Date(Date.now() - TASK_STATUS_WINDOW_MS).toISOString();
   const until = new Date(Date.now() + 8 * 7 * 24 * 60 * 60 * 1000).toISOString();
   const params = new URLSearchParams({
@@ -1083,8 +1144,11 @@ async function fetchTasks(tabId?: number) {
     until,
     fields: "id,type,calendarId,calendarName,title,start,end,dynamicCalendarItemProps",
   });
-  const response = await fetchJson(`${API_ORIGIN}/public/v1/calendars/items?${params}`, tabId);
-  const tasks = results(response)
+  const [response, gradebookResult] = await Promise.all([
+    fetchJson(`${API_ORIGIN}/public/v1/calendars/items?${params}`, tabId),
+    fetchGradebookTasks(courses, tabId),
+  ]);
+  const calendarTasks = results(response)
     .filter((item) => asString(item.type) === "GradebookColumn")
     .map((item): CleTask => ({
       id: asString(item.id),
@@ -1096,9 +1160,22 @@ async function fetchTasks(tabId?: number) {
         ? "期限切れ"
         : "状態不明",
     }))
-    .filter((task) => task.id && task.courseId && task.title && task.dueAt)
-    .sort((left, right) => left.dueAt.localeCompare(right.dueAt));
-  return tasks;
+    .filter((task) => task.id && task.courseId && task.title && task.dueAt);
+  const activeCourseIds = new Set(
+    courses
+      .filter((course) => course.available !== false)
+      .map((course) => course.courseId),
+  );
+  const cachedGradebookTasks = previousTasks.filter(
+    (task) =>
+      activeCourseIds.has(task.courseId) &&
+      !gradebookResult.successfulCourseIds.has(task.courseId),
+  );
+  const tasksByKey = new Map<string, CleTask>();
+  for (const task of [...cachedGradebookTasks, ...calendarTasks, ...gradebookResult.tasks]) {
+    tasksByKey.set(cachedTaskKey(task), task);
+  }
+  return [...tasksByKey.values()].sort(compareTaskDueAt);
 }
 
 function cachedTaskKey(task: CleTask) {
@@ -1127,7 +1204,8 @@ function taskStatusTtl(task: CleTask) {
 }
 
 function taskStatusPriority(task: CleTask) {
-  const dueAt = new Date(task.dueAt).getTime();
+  const dueAt = task.dueAt ? new Date(task.dueAt).getTime() : null;
+  if (dueAt === null) return 2 * TASK_STATUS_WINDOW_MS;
   const distance = dueAt - Date.now();
   const unresolved = !["提出済み", "採点済み", "期限切れ"].includes(task.status);
   if (unresolved && distance >= 0 && distance <= 24 * 60 * 60 * 1000) {
@@ -1140,7 +1218,9 @@ function taskStatusPriority(task: CleTask) {
 
 async function refreshTaskStatuses(tasks: CleTask[], tabId?: number, force = false) {
   const statusTargets = tasks
-    .filter((task) => new Date(task.dueAt).getTime() <= Date.now() + TASK_STATUS_WINDOW_MS)
+    .filter((task) =>
+      !task.dueAt || new Date(task.dueAt).getTime() <= Date.now() + TASK_STATUS_WINDOW_MS,
+    )
     .filter((task) => task.status !== "採点済み")
     .filter((task) =>
       force || !isFresh(task.statusUpdatedAt, taskStatusTtl(task)),
@@ -1331,16 +1411,38 @@ export async function refreshCle(
       isFresh(clePartUpdatedAt(previous, "messagesUpdatedAt"), messagesTtl);
     const taskStatusesFresh = !force &&
       isFresh(clePartUpdatedAt(previous, "taskStatusesUpdatedAt"), CLE_TASK_STATUSES_TTL_MS);
+    const coursesPromise = coursesFresh
+      ? Promise.resolve({
+        courses: previous?.courses || [],
+        updatedAt: clePartUpdatedAt(previous, "coursesUpdatedAt"),
+      }).then((result) => {
+        markDone("コースキャッシュ");
+        return result;
+      })
+      : fetchCourses(tabId)
+        .then((courses) => {
+          markDone("コース");
+          return { courses, updatedAt: now };
+        })
+        .catch(() => {
+          markDone("コースキャッシュ");
+          return {
+            courses: previous?.courses || [],
+            updatedAt: clePartUpdatedAt(previous, "coursesUpdatedAt"),
+          };
+        });
     const [taskList, messages, coursesResult] = await Promise.all([
       tasksFresh
         ? Promise.resolve(previous?.tasks || []).then((result) => {
           markDone("課題キャッシュ");
           return result;
         })
-        : fetchTasks(tabId).then((result) => {
-          markDone("課題");
-          return result;
-        }),
+        : coursesPromise
+          .then(({ courses }) => fetchTasks(courses, previous?.tasks || [], tabId))
+          .then((result) => {
+            markDone("課題");
+            return result;
+          }),
       messagesFresh
         ? Promise.resolve(previous?.messages || []).then((result) => {
           markDone("メッセージキャッシュ");
@@ -1350,26 +1452,7 @@ export async function refreshCle(
           markDone("メッセージ");
           return result;
         }),
-      coursesFresh
-        ? Promise.resolve({
-          courses: previous?.courses || [],
-          updatedAt: clePartUpdatedAt(previous, "coursesUpdatedAt"),
-        }).then((result) => {
-          markDone("コースキャッシュ");
-          return result;
-        })
-        : fetchCourses(tabId)
-          .then((courses) => {
-            markDone("コース");
-            return { courses, updatedAt: now };
-          })
-          .catch(() => {
-            markDone("コースキャッシュ");
-            return {
-              courses: previous?.courses || [],
-              updatedAt: clePartUpdatedAt(previous, "coursesUpdatedAt"),
-            };
-          }),
+      coursesPromise,
     ]);
     let tasks = tasksFresh ? taskList : mergeCachedTaskStatuses(taskList, previous?.tasks || []);
     let taskStatusesUpdatedAt = taskStatusesFresh
