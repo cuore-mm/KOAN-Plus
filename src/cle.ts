@@ -4,7 +4,9 @@ const REQUEST_TIMEOUT_MS = 30 * 1000;
 const MAX_MESSAGE_PAGES = 8;
 const MESSAGE_PAGE_SIZE = 100;
 const TASK_STATUS_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
-const MAX_STATUS_REQUESTS = 12;
+const NORMAL_STATUS_TASK_LIMIT = 6;
+const FORCED_STATUS_TASK_LIMIT = 12;
+const GRADED_STATUS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ANNOUNCEMENT_COURSES_PER_REFRESH = 4;
 const MATERIALS_CACHE_KEY = "koan-plus-cle-materials-v14";
 const MATERIALS_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -13,6 +15,10 @@ const MAX_MATERIAL_FOLDER_DEPTH = 8;
 const CLE_LEASE_KEY = "koan-plus-cle-refresh-lease-v1";
 const CLE_ATTEMPT_KEY = "koan-plus-cle-refresh-attempt-v1";
 const CLE_FAILURE_KEY = "koan-plus-cle-refresh-failure-v1";
+const CLE_COURSES_FAILURE_KEY = "koan-plus-cle-courses-failure-v1";
+const CLE_TASKS_FAILURE_KEY = "koan-plus-cle-tasks-failure-v1";
+const CLE_MESSAGES_FAILURE_KEY = "koan-plus-cle-messages-failure-v1";
+const CLE_TASK_SCOPE_VERSION = 3;
 export const CLE_TASKS_TTL_MS = 10 * 60 * 1000;
 export const CLE_MESSAGES_TTL_MS = 15 * 60 * 1000;
 export const CLE_MESSAGES_FOCUSED_TTL_MS = 5 * 60 * 1000;
@@ -38,6 +44,8 @@ export type CleTask = {
   title: string;
   dueAt: string | null;
   status: CleTaskStatus;
+  score?: number;
+  possibleScore?: number;
   statusUpdatedAt?: string | null;
 };
 
@@ -101,6 +109,8 @@ export type CleData = {
   messagesUpdatedAt: string | null;
   coursesUpdatedAt: string | null;
   taskStatusesUpdatedAt: string | null;
+  taskScopeVersion?: number;
+  taskStatusCursor?: number;
   announcementsUpdatedAt?: string | null;
   announcementCourses?: Record<string, CleAnnouncementCourseCache>;
 };
@@ -116,6 +126,8 @@ export const EMPTY_CLE_DATA: CleData = {
   messagesUpdatedAt: null,
   coursesUpdatedAt: null,
   taskStatusesUpdatedAt: null,
+  taskScopeVersion: CLE_TASK_SCOPE_VERSION,
+  taskStatusCursor: 0,
   announcementsUpdatedAt: null,
   announcementCourses: {},
 };
@@ -138,8 +150,13 @@ type CleTabMessage = {
 };
 
 type JsonRecord = Record<string, unknown>;
+export type CleActiveCourse = {
+  code: string;
+  title: string;
+  year: string;
+};
 type CleRefreshOptions = {
-  activeCourseCodes?: string[];
+  activeCourses?: CleActiveCourse[];
   priorityCourseCode?: string;
   messagesFocused?: boolean;
   bypassBackoff?: boolean;
@@ -160,15 +177,26 @@ function timestampValue(value: string | null | undefined) {
 }
 
 function isFresh(value: string | null | undefined, ttl: number) {
+  return isFreshAt(value, ttl, Date.now());
+}
+
+function isFreshAt(
+  value: string | null | undefined,
+  ttl: number,
+  now: number,
+) {
   const timestamp = timestampValue(value);
-  return timestamp > 0 && Date.now() - timestamp < ttl;
+  return timestamp > 0 && now - timestamp < ttl;
 }
 
 function clePartUpdatedAt(previous: CleData | null | undefined, key: keyof Pick<
   CleData,
   "coursesUpdatedAt" | "tasksUpdatedAt" | "messagesUpdatedAt" | "taskStatusesUpdatedAt" | "announcementsUpdatedAt"
 >) {
-  return (previous?.[key] as string | null) || previous?.updatedAt || null;
+  if (previous && key in previous) {
+    return (previous[key] as string | null) || null;
+  }
+  return previous?.updatedAt || null;
 }
 
 function latestTimestamp(values: Array<string | null | undefined>) {
@@ -177,6 +205,7 @@ function latestTimestamp(values: Array<string | null | undefined>) {
 }
 
 export function isCleCacheFresh(data: CleData) {
+  if (data.taskScopeVersion !== CLE_TASK_SCOPE_VERSION) return false;
   if (data.courses?.length && !data.courses.some((c) => "available" in c)) {
     return false;
   }
@@ -212,6 +241,10 @@ function requireRetryAvailable(key: string, label: string) {
   throw new Error(`${label}は失敗後の待機中です。${seconds}秒後に再試行できます。`);
 }
 
+function retryAvailable(key: string) {
+  return readFailureState(key).nextRetryAt <= Date.now();
+}
+
 function recordFailure(key: string) {
   const previous = readFailureState(key);
   const count = previous.count + 1;
@@ -242,6 +275,11 @@ function requireCleApiUrl(url: string) {
   }
 }
 
+function isCleAuthenticationError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\((?:401|403)\)|ログイン|認証|セッション/i.test(message);
+}
+
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
@@ -252,6 +290,10 @@ function asString(value: unknown) {
 
 function asNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function finiteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function asBoolean(value: unknown) {
@@ -272,6 +314,10 @@ function courseCodeFromDisplayId(value: string) {
   return value.match(/^\d{4}-\d{2}-(\d{6})-/)?.[1] || "";
 }
 
+function courseYearFromDisplayId(value: string) {
+  return value.match(/^(\d{4})-/)?.[1] || "";
+}
+
 function cleanCourseName(value: string) {
   const withoutCode = value.replace(/^[^:]+:\s*\d+\s*/, "");
   const japanese = withoutCode.split(/\s*\/\s*/)[0];
@@ -286,6 +332,37 @@ function courseNamesMatch(left: string, right: string) {
   const l = cleanCourseName(left);
   const r = cleanCourseName(right);
   return Boolean(l && r && (l.includes(r) || r.includes(l)));
+}
+
+export function resolveActiveCleCourses(
+  courses: CleCourse[],
+  activeCourses: CleActiveCourse[],
+) {
+  const resolved = new Map<string, CleCourse>();
+  for (const active of activeCourses) {
+    const sameYear = courses.filter(
+      (course) => courseYearFromDisplayId(course.displayId) === active.year,
+    );
+    const directWithMatchingName = sameYear.find(
+      (course) =>
+        course.available !== false &&
+        course.timetableCode === active.code &&
+        courseNamesMatch(active.title, course.name),
+    );
+    const direct = sameYear.find(
+      (course) =>
+        course.available !== false &&
+        course.timetableCode === active.code,
+    );
+    const byName = sameYear.find(
+      (course) =>
+        course.available !== false &&
+        courseNamesMatch(active.title, course.name),
+    );
+    const match = directWithMatchingName || direct || byName;
+    if (match) resolved.set(match.courseId, match);
+  }
+  return [...resolved.values()];
 }
 
 function isYes(value: unknown) {
@@ -1046,33 +1123,161 @@ export async function downloadCourseMaterialBatch(
   };
 }
 
-function taskStatus(attemptsResponse: unknown, gradeResponse: unknown, dueAt: string | null) {
+export function resolveTaskStatus(
+  attemptsResponse: unknown,
+  gradeResponse: unknown,
+  dueAt: string | null,
+): CleTaskStatus {
   const attempts = results(attemptsResponse);
-  const latestAttempt = attempts[0] || {};
-  const attemptStatus = asString(latestAttempt.status);
-  const gradeStatus = asString(asRecord(gradeResponse).status);
-  if (/graded|completed|posted/i.test(gradeStatus)) return "採点済み";
-  if (/inprogress/i.test(attemptStatus)) return "一時保存";
-  if (attempts.length || /needsgrading|submitted/i.test(gradeStatus)) return "提出済み";
+  const grade = asRecord(gradeResponse);
+  const gradeStatus = asString(grade.status);
+  const hasRecordedScore =
+    finiteNumber(grade.score) !== null ||
+    attempts.some((attempt) => finiteNumber(attempt.score) !== null);
+  if (
+    /graded|completed|posted/i.test(gradeStatus) ||
+    attempts.some((attempt) => /graded|completed|posted/i.test(asString(attempt.status))) ||
+    hasRecordedScore
+  ) return "採点済み";
+  if (
+    attempts.some((attempt) => /needsgrading|submitted/i.test(asString(attempt.status))) ||
+    /needsgrading|submitted/i.test(gradeStatus)
+  ) return "提出済み";
+  if (attempts.some((attempt) => /inprogress/i.test(asString(attempt.status)))) return "一時保存";
+  if (attempts.length) return "提出済み";
   if (dueAt && new Date(dueAt).getTime() < Date.now()) return "期限切れ";
   return "未着手";
 }
 
-async function fetchTaskStatus(task: CleTask, tabId?: number): Promise<CleTask> {
-  try {
-    const path = `${API_ORIGIN}/public/v2/courses/${encodeURIComponent(task.courseId)}/gradebook/columns/${encodeURIComponent(task.id)}`;
-    const [grade, attempts] = await Promise.all([
-      fetchJson(`${path}/users/me`, tabId),
-      fetchJson(`${path}/attempts?limit=10`, tabId),
-    ]);
-    return {
-      ...task,
-      status: taskStatus(attempts, grade, task.dueAt),
-      statusUpdatedAt: new Date().toISOString(),
-    };
-  } catch {
-    return task;
+function positiveTaskStatus(
+  attemptsResponse: unknown,
+  gradeResponse: unknown,
+): CleTaskStatus | null {
+  const status = resolveTaskStatus(attemptsResponse, gradeResponse, null);
+  return ["採点済み", "提出済み", "一時保存"].includes(status)
+    ? status
+    : null;
+}
+
+function recordedTaskScore(attemptsResponse: unknown, gradeResponse: unknown) {
+  const gradeScore = finiteNumber(asRecord(gradeResponse).score);
+  if (gradeScore !== null) return gradeScore;
+  for (const attempt of results(attemptsResponse)) {
+    const score = finiteNumber(attempt.score);
+    if (score !== null) return score;
   }
+  return null;
+}
+
+export function resolveTaskStatusEvidence(options: {
+  attemptsResponse: unknown;
+  attemptsSucceeded: boolean;
+  dueAt: string | null;
+  gradeResponse: unknown;
+  gradeSucceeded: boolean;
+}) {
+  const positive = positiveTaskStatus(
+    options.attemptsSucceeded ? options.attemptsResponse : null,
+    options.gradeSucceeded ? options.gradeResponse : null,
+  );
+  if (positive) {
+    return {
+      score: recordedTaskScore(
+        options.attemptsSucceeded ? options.attemptsResponse : null,
+        options.gradeSucceeded ? options.gradeResponse : null,
+      ),
+      status: positive,
+      verified: true,
+    };
+  }
+  if (!options.gradeSucceeded || !options.attemptsSucceeded) {
+    return {
+      score: null,
+      status: null,
+      verified: false,
+    };
+  }
+  return {
+    score: null,
+    status: resolveTaskStatus(
+      options.attemptsResponse,
+      options.gradeResponse,
+      options.dueAt,
+    ),
+    verified: true,
+  };
+}
+
+function applyTaskStatus(
+  task: CleTask,
+  status: CleTaskStatus,
+  score: number | null,
+): CleTask {
+  const next = {
+    ...task,
+    status,
+    statusUpdatedAt: new Date().toISOString(),
+  };
+  if (score === null) delete next.score;
+  else next.score = score;
+  return next;
+}
+
+type TaskStatusFetchResult = {
+  task: CleTask;
+  verified: boolean;
+};
+
+async function fetchTaskStatus(task: CleTask, tabId?: number): Promise<TaskStatusFetchResult> {
+  const path = `${API_ORIGIN}/public/v2/courses/${encodeURIComponent(task.courseId)}/gradebook/columns/${encodeURIComponent(task.id)}`;
+  const gradeResult = await fetchJson(`${path}/users/me`, tabId)
+    .then((value) => ({ ok: true as const, value }))
+    .catch((error) => {
+      if (isCleAuthenticationError(error)) throw error;
+      return { ok: false as const, value: null };
+    });
+  const gradeEvidence = resolveTaskStatusEvidence({
+    attemptsResponse: null,
+    attemptsSucceeded: false,
+    dueAt: task.dueAt,
+    gradeResponse: gradeResult.value,
+    gradeSucceeded: gradeResult.ok,
+  });
+  if (gradeEvidence.verified && gradeEvidence.status) {
+    return {
+      task: applyTaskStatus(
+        task,
+        gradeEvidence.status,
+        gradeEvidence.score,
+      ),
+      verified: true,
+    };
+  }
+
+  const attemptsResult = await fetchJson(`${path}/attempts?limit=10`, tabId)
+    .then((value) => ({ ok: true as const, value }))
+    .catch((error) => {
+      if (isCleAuthenticationError(error)) throw error;
+      return { ok: false as const, value: null };
+    });
+  const evidence = resolveTaskStatusEvidence({
+    attemptsResponse: attemptsResult.value,
+    attemptsSucceeded: attemptsResult.ok,
+    dueAt: task.dueAt,
+    gradeResponse: gradeResult.value,
+    gradeSucceeded: gradeResult.ok,
+  });
+  if (evidence.verified && evidence.status) {
+    return {
+      task: applyTaskStatus(
+        task,
+        evidence.status,
+        evidence.score,
+      ),
+      verified: true,
+    };
+  }
+  return { task, verified: false };
 }
 
 export function gradebookColumnsToTasks(
@@ -1084,6 +1289,7 @@ export function gradebookColumnsToTasks(
     .filter((item) => !asBoolean(item.externalGrade))
     .map((item): CleTask => {
       const dueAt = asString(asRecord(item.grading).due) || null;
+      const possibleScore = finiteNumber(asRecord(item.score).possible);
       return {
         id: asString(item.id),
         courseId: course.courseId,
@@ -1093,6 +1299,7 @@ export function gradebookColumnsToTasks(
         status: dueAt && new Date(dueAt).getTime() < Date.now()
           ? "期限切れ"
           : "状態不明",
+        ...(possibleScore === null ? {} : { possibleScore }),
       };
     })
     .filter((task) => task.id && task.courseId && task.title);
@@ -1110,7 +1317,7 @@ async function fetchGradebookTasks(courses: CleCourse[], tabId?: number) {
       try {
         const params = new URLSearchParams({
           limit: String(MATERIALS_PAGE_SIZE),
-          fields: "id,name,displayName,externalGrade,contentId,grading.due",
+          fields: "id,name,displayName,externalGrade,contentId,grading.due,score.possible",
         });
         const columns = await fetchAllResults(
           `${API_ORIGIN}/public/v2/courses/${encodeURIComponent(course.courseId)}/gradebook/columns?${params}`,
@@ -1118,7 +1325,8 @@ async function fetchGradebookTasks(courses: CleCourse[], tabId?: number) {
         );
         tasks.push(...gradebookColumnsToTasks(course, columns));
         successfulCourseIds.add(course.courseId);
-      } catch {
+      } catch (error) {
+        if (isCleAuthenticationError(error)) throw error;
         // Keep the previous cached items for a course when its gradebook is temporarily unavailable.
       }
     }
@@ -1136,7 +1344,12 @@ function compareTaskDueAt(left: CleTask, right: CleTask) {
   return left.dueAt.localeCompare(right.dueAt);
 }
 
-async function fetchTasks(courses: CleCourse[], previousTasks: CleTask[], tabId?: number) {
+async function fetchTasks(
+  courses: CleCourse[],
+  previousTasks: CleTask[],
+  restrictToCourses: boolean,
+  tabId?: number,
+) {
   const since = new Date(Date.now() - TASK_STATUS_WINDOW_MS).toISOString();
   const until = new Date(Date.now() + 8 * 7 * 24 * 60 * 60 * 1000).toISOString();
   const params = new URLSearchParams({
@@ -1144,11 +1357,17 @@ async function fetchTasks(courses: CleCourse[], previousTasks: CleTask[], tabId?
     until,
     fields: "id,type,calendarId,calendarName,title,start,end,dynamicCalendarItemProps",
   });
-  const [response, gradebookResult] = await Promise.all([
-    fetchJson(`${API_ORIGIN}/public/v1/calendars/items?${params}`, tabId),
+  const [calendarResult, gradebookResult] = await Promise.all([
+    fetchJson(`${API_ORIGIN}/public/v1/calendars/items?${params}`, tabId)
+      .then((value) => ({ ok: true as const, value }))
+      .catch((error) => {
+        if (isCleAuthenticationError(error)) throw error;
+        return { ok: false as const, value: null };
+      }),
     fetchGradebookTasks(courses, tabId),
   ]);
-  const calendarTasks = results(response)
+  const activeCourseIds = new Set(courses.map((course) => course.courseId));
+  const calendarTasks = results(calendarResult.value)
     .filter((item) => asString(item.type) === "GradebookColumn")
     .map((item): CleTask => ({
       id: asString(item.id),
@@ -1160,12 +1379,8 @@ async function fetchTasks(courses: CleCourse[], previousTasks: CleTask[], tabId?
         ? "期限切れ"
         : "状態不明",
     }))
-    .filter((task) => task.id && task.courseId && task.title && task.dueAt);
-  const activeCourseIds = new Set(
-    courses
-      .filter((course) => course.available !== false)
-      .map((course) => course.courseId),
-  );
+    .filter((task) => task.id && task.courseId && task.title && task.dueAt)
+    .filter((task) => !restrictToCourses || activeCourseIds.has(task.courseId));
   const cachedGradebookTasks = previousTasks.filter(
     (task) =>
       activeCourseIds.has(task.courseId) &&
@@ -1175,7 +1390,12 @@ async function fetchTasks(courses: CleCourse[], previousTasks: CleTask[], tabId?
   for (const task of [...cachedGradebookTasks, ...calendarTasks, ...gradebookResult.tasks]) {
     tasksByKey.set(cachedTaskKey(task), task);
   }
-  return [...tasksByKey.values()].sort(compareTaskDueAt);
+  return {
+    tasks: [...tasksByKey.values()].sort(compareTaskDueAt),
+    successful:
+      calendarResult.ok ||
+      gradebookResult.successfulCourseIds.size > 0,
+  };
 }
 
 function cachedTaskKey(task: CleTask) {
@@ -1190,6 +1410,8 @@ function mergeCachedTaskStatuses(tasks: CleTask[], previousTasks: CleTask[]) {
       ? {
         ...task,
         status: previous.status,
+        score: previous.score,
+        possibleScore: task.possibleScore ?? previous.possibleScore,
         statusUpdatedAt: previous.statusUpdatedAt,
       }
       : task;
@@ -1197,16 +1419,16 @@ function mergeCachedTaskStatuses(tasks: CleTask[], previousTasks: CleTask[]) {
 }
 
 function taskStatusTtl(task: CleTask) {
-  if (task.status === "採点済み") return Number.POSITIVE_INFINITY;
+  if (task.status === "採点済み") return GRADED_STATUS_TTL_MS;
   if (task.status === "提出済み") return 6 * 60 * 60 * 1000;
   if (task.status === "期限切れ") return 24 * 60 * 60 * 1000;
   return CLE_TASK_STATUSES_TTL_MS;
 }
 
-function taskStatusPriority(task: CleTask) {
+function taskStatusPriority(task: CleTask, now: number) {
   const dueAt = task.dueAt ? new Date(task.dueAt).getTime() : null;
   if (dueAt === null) return 2 * TASK_STATUS_WINDOW_MS;
-  const distance = dueAt - Date.now();
+  const distance = dueAt - now;
   const unresolved = !["提出済み", "採点済み", "期限切れ"].includes(task.status);
   if (unresolved && distance >= 0 && distance <= 24 * 60 * 60 * 1000) {
     return distance;
@@ -1216,23 +1438,75 @@ function taskStatusPriority(task: CleTask) {
   return 3 * TASK_STATUS_WINDOW_MS + Math.abs(distance);
 }
 
-async function refreshTaskStatuses(tasks: CleTask[], tabId?: number, force = false) {
-  const statusTargets = tasks
+export function selectTaskStatusTargets(
+  tasks: CleTask[],
+  options: {
+    force: boolean;
+    cursor?: number;
+    priorityCourseId?: string;
+    now?: number;
+  },
+) {
+  const now = options.now ?? Date.now();
+  const limit = options.force
+    ? FORCED_STATUS_TASK_LIMIT
+    : NORMAL_STATUS_TASK_LIMIT;
+  const candidates = tasks
     .filter((task) =>
-      !task.dueAt || new Date(task.dueAt).getTime() <= Date.now() + TASK_STATUS_WINDOW_MS,
+      !task.dueAt || new Date(task.dueAt).getTime() <= now + TASK_STATUS_WINDOW_MS,
     )
-    .filter((task) => task.status !== "採点済み")
     .filter((task) =>
-      force || !isFresh(task.statusUpdatedAt, taskStatusTtl(task)),
+      options.force || !isFreshAt(task.statusUpdatedAt, taskStatusTtl(task), now),
     )
-    .sort((left, right) => taskStatusPriority(left) - taskStatusPriority(right))
-    .slice(0, MAX_STATUS_REQUESTS);
-  const statuses = new Map<string, CleTask>();
-  for (const task of statusTargets) {
-    const status = await fetchTaskStatus(task, tabId);
-    statuses.set(cachedTaskKey(status), status);
+    .sort((left, right) => {
+      const leftFocused = left.courseId === options.priorityCourseId ? 0 : 1;
+      const rightFocused = right.courseId === options.priorityCourseId ? 0 : 1;
+      return leftFocused - rightFocused ||
+        taskStatusPriority(left, now) - taskStatusPriority(right, now) ||
+        cachedTaskKey(left).localeCompare(cachedTaskKey(right));
+    });
+  if (!options.force || candidates.length <= limit) {
+    return {
+      targets: candidates.slice(0, limit),
+      nextCursor: options.force ? 0 : Math.max(0, options.cursor || 0),
+      candidateCount: candidates.length,
+    };
   }
-  return tasks.map((task) => statuses.get(cachedTaskKey(task)) || task);
+  const start = Math.max(0, options.cursor || 0) % candidates.length;
+  const rotated = [...candidates.slice(start), ...candidates.slice(0, start)];
+  const targets = rotated.slice(0, limit);
+  return {
+    targets,
+    nextCursor: (start + targets.length) % candidates.length,
+    candidateCount: candidates.length,
+  };
+}
+
+async function refreshTaskStatuses(
+  tasks: CleTask[],
+  tabId?: number,
+  force = false,
+  cursor = 0,
+  priorityCourseId = "",
+) {
+  const selection = selectTaskStatusTargets(tasks, {
+    force,
+    cursor,
+    priorityCourseId,
+  });
+  const statuses = new Map<string, CleTask>();
+  let verifiedCount = 0;
+  for (const task of selection.targets) {
+    const result = await fetchTaskStatus(task, tabId);
+    statuses.set(cachedTaskKey(result.task), result.task);
+    if (result.verified) verifiedCount += 1;
+  }
+  return {
+    tasks: tasks.map((task) => statuses.get(cachedTaskKey(task)) || task),
+    nextCursor: selection.nextCursor,
+    targetCount: selection.targets.length,
+    verifiedCount,
+  };
 }
 
 async function fetchMessages(tabId?: number) {
@@ -1347,7 +1621,8 @@ async function refreshAnnouncements(
           failureCount: 0,
           nextRetryAt: 0,
         };
-      } catch {
+      } catch (error) {
+        if (isCleAuthenticationError(error)) throw error;
         const old = cache[course.courseId];
         const failureCount = (old?.failureCount || 0) + 1;
         const delay = Math.min(
@@ -1403,6 +1678,7 @@ export async function refreshCle(
     const coursesFresh = !force &&
       isFresh(clePartUpdatedAt(previous, "coursesUpdatedAt"), CLE_COURSES_TTL_MS);
     const tasksFresh = !force &&
+      previous?.taskScopeVersion === CLE_TASK_SCOPE_VERSION &&
       isFresh(clePartUpdatedAt(previous, "tasksUpdatedAt"), CLE_TASKS_TTL_MS);
     const messagesTtl = options.messagesFocused
       ? CLE_MESSAGES_FOCUSED_TTL_MS
@@ -1411,7 +1687,8 @@ export async function refreshCle(
       isFresh(clePartUpdatedAt(previous, "messagesUpdatedAt"), messagesTtl);
     const taskStatusesFresh = !force &&
       isFresh(clePartUpdatedAt(previous, "taskStatusesUpdatedAt"), CLE_TASK_STATUSES_TTL_MS);
-    const coursesPromise = coursesFresh
+    const activeCourses = options.activeCourses || [];
+    const coursesPromise = coursesFresh || !retryAvailable(CLE_COURSES_FAILURE_KEY)
       ? Promise.resolve({
         courses: previous?.courses || [],
         updatedAt: clePartUpdatedAt(previous, "coursesUpdatedAt"),
@@ -1421,81 +1698,120 @@ export async function refreshCle(
       })
       : fetchCourses(tabId)
         .then((courses) => {
+          localStorage.removeItem(CLE_COURSES_FAILURE_KEY);
           markDone("コース");
           return { courses, updatedAt: now };
         })
-        .catch(() => {
+        .catch((error) => {
+          if (isCleAuthenticationError(error)) throw error;
+          recordFailure(CLE_COURSES_FAILURE_KEY);
           markDone("コースキャッシュ");
           return {
             courses: previous?.courses || [],
             updatedAt: clePartUpdatedAt(previous, "coursesUpdatedAt"),
           };
         });
-    const [taskList, messages, coursesResult] = await Promise.all([
-      tasksFresh
-        ? Promise.resolve(previous?.tasks || []).then((result) => {
+    const [taskResult, messagesResult, coursesResult] = await Promise.all([
+      tasksFresh || !retryAvailable(CLE_TASKS_FAILURE_KEY)
+        ? Promise.resolve({
+          tasks: previous?.tasks || [],
+          updatedAt: clePartUpdatedAt(previous, "tasksUpdatedAt"),
+        }).then((result) => {
           markDone("課題キャッシュ");
           return result;
         })
         : coursesPromise
-          .then(({ courses }) => fetchTasks(courses, previous?.tasks || [], tabId))
+          .then(({ courses }) => {
+            const resolvedCourses = resolveActiveCleCourses(courses, activeCourses);
+            return fetchTasks(
+              resolvedCourses,
+              previous?.tasks || [],
+              activeCourses.length > 0,
+              tabId,
+            );
+          })
           .then((result) => {
-            markDone("課題");
-            return result;
+            if (result.successful) {
+              localStorage.removeItem(CLE_TASKS_FAILURE_KEY);
+              markDone("課題");
+              return { tasks: result.tasks, updatedAt: now };
+            }
+            recordFailure(CLE_TASKS_FAILURE_KEY);
+            markDone("課題キャッシュ");
+            return {
+              tasks: result.tasks,
+              updatedAt: clePartUpdatedAt(previous, "tasksUpdatedAt"),
+            };
+          })
+          .catch((error) => {
+            if (isCleAuthenticationError(error)) throw error;
+            recordFailure(CLE_TASKS_FAILURE_KEY);
+            markDone("課題キャッシュ");
+            return {
+              tasks: previous?.tasks || [],
+              updatedAt: clePartUpdatedAt(previous, "tasksUpdatedAt"),
+            };
           }),
-      messagesFresh
-        ? Promise.resolve(previous?.messages || []).then((result) => {
+      messagesFresh || !retryAvailable(CLE_MESSAGES_FAILURE_KEY)
+        ? Promise.resolve({
+          messages: previous?.messages || [],
+          updatedAt: clePartUpdatedAt(previous, "messagesUpdatedAt"),
+        }).then((result) => {
           markDone("メッセージキャッシュ");
           return result;
         })
         : fetchMessages(tabId).then((result) => {
+          localStorage.removeItem(CLE_MESSAGES_FAILURE_KEY);
           markDone("メッセージ");
-          return result;
+          return { messages: result, updatedAt: now };
+        }).catch((error) => {
+          if (isCleAuthenticationError(error)) throw error;
+          recordFailure(CLE_MESSAGES_FAILURE_KEY);
+          markDone("メッセージキャッシュ");
+          return {
+            messages: previous?.messages || [],
+            updatedAt: clePartUpdatedAt(previous, "messagesUpdatedAt"),
+          };
         }),
       coursesPromise,
     ]);
-    let tasks = tasksFresh ? taskList : mergeCachedTaskStatuses(taskList, previous?.tasks || []);
-    let taskStatusesUpdatedAt = taskStatusesFresh
-      ? clePartUpdatedAt(previous, "taskStatusesUpdatedAt")
-      : null;
-    if (taskStatusesFresh) {
-      markDone("状態キャッシュ");
-    } else {
-      tasks = await refreshTaskStatuses(tasks, tabId, force);
-      taskStatusesUpdatedAt = now;
-      markDone("状態");
-    }
-
+    let tasks = mergeCachedTaskStatuses(taskResult.tasks, previous?.tasks || []);
+    const messages = messagesResult.messages;
     const courses = coursesResult.courses;
     const coursesUpdatedAt = coursesResult.updatedAt;
+    const priorityCourseId = resolveActiveCleCourses(courses, activeCourses)
+      .find((course) => course.timetableCode === options.priorityCourseCode)
+      ?.courseId || "";
+    const statusResult = await refreshTaskStatuses(
+      tasks,
+      tabId,
+      force,
+      previous?.taskStatusCursor || 0,
+      priorityCourseId,
+    );
+    tasks = statusResult.tasks;
+    let taskStatusesUpdatedAt = clePartUpdatedAt(previous, "taskStatusesUpdatedAt");
+    if (statusResult.targetCount === 0) {
+      taskStatusesUpdatedAt = taskStatusesFresh
+        ? taskStatusesUpdatedAt
+        : now;
+      markDone("状態キャッシュ");
+    } else if (statusResult.verifiedCount > 0) {
+      taskStatusesUpdatedAt = now;
+      markDone("状態");
+    } else {
+      markDone("状態キャッシュ");
+    }
 
     const recentCourseIds = new Set([
       ...tasks.map((task) => task.courseId),
       ...messages.map((message) => message.courseId),
     ]);
-    const activeCodes = new Set(options.activeCourseCodes || []);
-    const resolvedActiveIds = new Set<string>();
-    if (activeCodes.size) {
-      for (const code of activeCodes) {
-        const match = courses.find((c) => c.timetableCode === code);
-        if (match) {
-          if (match.available !== false) {
-            resolvedActiveIds.add(match.courseId);
-          } else {
-            const parentMatch = courses.find(
-              (c) => c.available !== false && courseNamesMatch(match.name, c.name)
-            );
-            if (parentMatch) {
-              resolvedActiveIds.add(parentMatch.courseId);
-            } else {
-              resolvedActiveIds.add(match.courseId);
-            }
-          }
-        }
-      }
-    }
+    const resolvedActiveIds = new Set(
+      resolveActiveCleCourses(courses, activeCourses).map((course) => course.courseId),
+    );
     const announcementCourses = courses.filter((course) =>
-      activeCodes.size
+      activeCourses.length
         ? resolvedActiveIds.has(course.courseId)
         : recentCourseIds.has(course.courseId),
     );
@@ -1512,8 +1828,8 @@ export async function refreshCle(
     markDone("連絡事項");
 
     onProgress?.("取得結果を整理中");
-    const tasksUpdatedAt = tasksFresh ? clePartUpdatedAt(previous, "tasksUpdatedAt") : now;
-    const messagesUpdatedAt = messagesFresh ? clePartUpdatedAt(previous, "messagesUpdatedAt") : now;
+    const tasksUpdatedAt = taskResult.updatedAt;
+    const messagesUpdatedAt = messagesResult.updatedAt;
     localStorage.removeItem(CLE_FAILURE_KEY);
     return {
       courses,
@@ -1526,6 +1842,8 @@ export async function refreshCle(
       tasksUpdatedAt,
       messagesUpdatedAt,
       taskStatusesUpdatedAt,
+      taskScopeVersion: CLE_TASK_SCOPE_VERSION,
+      taskStatusCursor: statusResult.nextCursor,
       announcementsUpdatedAt,
       announcementCourses: announcementResult.cache,
     };

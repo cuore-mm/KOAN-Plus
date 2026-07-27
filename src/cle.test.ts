@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { gradebookColumnsToTasks } from "./cle";
+import {
+  gradebookColumnsToTasks,
+  resolveActiveCleCourses,
+  resolveTaskStatus,
+  resolveTaskStatusEvidence,
+  selectTaskStatusTargets,
+  type CleCourse,
+  type CleTask,
+} from "./cle";
 
 describe("gradebookColumnsToTasks", () => {
   const course = {
@@ -47,6 +55,23 @@ describe("gradebookColumnsToTasks", () => {
     ]);
   });
 
+  it("keeps the possible score for displaying a posted grade", () => {
+    const tasks = gradebookColumnsToTasks(course, [
+      {
+        id: "scored",
+        name: "小テスト",
+        contentId: "content-2",
+        score: { possible: 20 },
+        grading: {},
+      },
+    ]);
+
+    expect(tasks[0]).toMatchObject({
+      id: "scored",
+      possibleScore: 20,
+    });
+  });
+
   it("omits overall-grade and unlinked manual columns", () => {
     const tasks = gradebookColumnsToTasks(course, [
       {
@@ -64,5 +89,200 @@ describe("gradebookColumnsToTasks", () => {
     ]);
 
     expect(tasks).toEqual([]);
+  });
+});
+
+describe("resolveActiveCleCourses", () => {
+  const cleCourse = (
+    courseId: string,
+    displayId: string,
+    name: string,
+  ): CleCourse => ({
+    courseId,
+    displayId,
+    timetableCode: displayId.match(/^\d{4}-\d{2}-(\d{6})-/)?.[1] || "",
+    name,
+    available: true,
+  });
+
+  it("selects only the KOAN course from the matching academic year", () => {
+    const resolved = resolveActiveCleCourses(
+      [
+        cleCourse("old", "2025-01-123456-01", "情報社会基礎"),
+        cleCourse("current", "2026-01-123456-01", "情報社会基礎"),
+        cleCourse("unrelated", "2026-01-999999-01", "総合英語"),
+      ],
+      [{ code: "123456", title: "情報社会基礎", year: "2026" }],
+    );
+
+    expect(resolved.map((course) => course.courseId)).toEqual(["current"]);
+  });
+
+  it("uses the course name for a same-year parent course", () => {
+    const resolved = resolveActiveCleCourses(
+      [
+        cleCourse("child", "2026-01-123456-01", "【取消】情報社会基礎"),
+        cleCourse("parent", "2026-01-654321-01", "情報社会基礎"),
+      ].map((course) =>
+        course.courseId === "child" ? { ...course, available: false } : course,
+      ),
+      [{ code: "123456", title: "情報社会基礎", year: "2026" }],
+    );
+
+    expect(resolved.map((course) => course.courseId)).toEqual(["parent"]);
+  });
+});
+
+describe("resolveTaskStatus", () => {
+  it("recognizes a posted grade even when the attempts request is unavailable", () => {
+    expect(resolveTaskStatus(
+      null,
+      { status: "Graded", score: 20 },
+      "2026-06-13T14:59:00.000Z",
+    )).toBe("採点済み");
+  });
+
+  it("recognizes a completed scored attempt when the grade request is unavailable", () => {
+    expect(resolveTaskStatus(
+      { results: [{ status: "Completed", score: 0 }] },
+      null,
+      "2026-06-13T14:59:00.000Z",
+    )).toBe("採点済み");
+  });
+
+  it("keeps an ungraded attempt as submitted", () => {
+    expect(resolveTaskStatus(
+      { results: [{ status: "NeedsGrading" }] },
+      null,
+      "2026-06-13T14:59:00.000Z",
+    )).toBe("提出済み");
+  });
+
+  it("finds a graded attempt even when it is not the first result", () => {
+    expect(resolveTaskStatus(
+      {
+        results: [
+          { status: "InProgress" },
+          { status: "Completed", score: 15 },
+        ],
+      },
+      null,
+      "2026-06-13T14:59:00.000Z",
+    )).toBe("採点済み");
+  });
+});
+
+describe("resolveTaskStatusEvidence", () => {
+  it("does not infer an overdue state from one empty response and one failure", () => {
+    expect(resolveTaskStatusEvidence({
+      attemptsResponse: { results: [] },
+      attemptsSucceeded: true,
+      dueAt: "2026-06-13T14:59:00.000Z",
+      gradeResponse: null,
+      gradeSucceeded: false,
+    })).toMatchObject({
+      status: null,
+      verified: false,
+    });
+  });
+
+  it("accepts positive grading evidence from only one successful endpoint", () => {
+    expect(resolveTaskStatusEvidence({
+      attemptsResponse: null,
+      attemptsSucceeded: false,
+      dueAt: "2026-06-13T14:59:00.000Z",
+      gradeResponse: { status: "Graded", score: 20 },
+      gradeSucceeded: true,
+    })).toEqual({
+      score: 20,
+      status: "採点済み",
+      verified: true,
+    });
+  });
+
+  it("infers an overdue state only after both endpoints return successfully", () => {
+    expect(resolveTaskStatusEvidence({
+      attemptsResponse: { results: [] },
+      attemptsSucceeded: true,
+      dueAt: "2026-06-13T14:59:00.000Z",
+      gradeResponse: {},
+      gradeSucceeded: true,
+    })).toMatchObject({
+      status: "期限切れ",
+      verified: true,
+    });
+  });
+});
+
+describe("selectTaskStatusTargets", () => {
+  const task = (index: number, overrides: Partial<CleTask> = {}): CleTask => ({
+    id: `task-${String(index).padStart(2, "0")}`,
+    courseId: "course-1",
+    courseName: "テスト科目",
+    title: `課題${index}`,
+    dueAt: null,
+    status: "状態不明",
+    ...overrides,
+  });
+
+  it("rotates forced refreshes instead of checking the same first 12 tasks", () => {
+    const tasks = Array.from({ length: 15 }, (_, index) => task(index));
+    const first = selectTaskStatusTargets(tasks, {
+      force: true,
+      cursor: 0,
+      now: Date.UTC(2026, 6, 28),
+    });
+    const second = selectTaskStatusTargets(tasks, {
+      force: true,
+      cursor: first.nextCursor,
+      now: Date.UTC(2026, 6, 28),
+    });
+
+    expect(first.targets).toHaveLength(12);
+    expect(second.targets.map((item) => item.id)).toEqual([
+      "task-12",
+      "task-13",
+      "task-14",
+      "task-00",
+      "task-01",
+      "task-02",
+      "task-03",
+      "task-04",
+      "task-05",
+      "task-06",
+      "task-07",
+      "task-08",
+    ]);
+  });
+
+  it("limits normal refreshes to six stale tasks", () => {
+    const selection = selectTaskStatusTargets(
+      Array.from({ length: 10 }, (_, index) => task(index)),
+      {
+        force: false,
+        now: Date.UTC(2026, 6, 28),
+      },
+    );
+
+    expect(selection.targets).toHaveLength(6);
+  });
+
+  it("rechecks graded scores after seven days but not before", () => {
+    const now = Date.UTC(2026, 6, 28);
+    const selection = selectTaskStatusTargets([
+      task(1, {
+        status: "採点済み",
+        statusUpdatedAt: new Date(now - 6 * 24 * 60 * 60 * 1000).toISOString(),
+      }),
+      task(2, {
+        status: "採点済み",
+        statusUpdatedAt: new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString(),
+      }),
+    ], {
+      force: false,
+      now,
+    });
+
+    expect(selection.targets.map((item) => item.id)).toEqual(["task-02"]);
   });
 });

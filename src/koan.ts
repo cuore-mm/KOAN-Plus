@@ -294,7 +294,8 @@ function koanPartUpdatedAt(
     | "noticesUpdatedAt"
   >,
 ) {
-  return data?.[key] || data?.lightUpdatedAt || null;
+  if (data && key in data) return data[key] || null;
+  return data?.lightUpdatedAt || null;
 }
 
 function latestTimestamp(values: Array<string | null | undefined>) {
@@ -894,6 +895,12 @@ export async function refreshLight(
         : fetchHtml(CHANGES_URL).then((result) => {
           markDone("休講補講");
           return { changes: parseChanges(result.doc), updatedAt: now };
+        }).catch(() => {
+          markDone("休講補講キャッシュ");
+          return {
+            changes: previous.changes,
+            updatedAt: koanPartUpdatedAt(previous, "changesUpdatedAt"),
+          };
         }),
       noticesFresh
         ? Promise.resolve({
@@ -906,6 +913,12 @@ export async function refreshLight(
         : fetchHtml(BOARD_URL).then((board) => {
           markDone("新着掲示");
           return { board, updatedAt: now };
+        }).catch(() => {
+          markDone("新着掲示キャッシュ");
+          return {
+            board: null,
+            updatedAt: koanPartUpdatedAt(previous, "noticesUpdatedAt"),
+          };
         }),
     ]);
     onProgress?.("取得結果を整理中");

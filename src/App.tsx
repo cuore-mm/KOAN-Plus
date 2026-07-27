@@ -4,7 +4,9 @@ import {
   useRef,
   useState,
   type AnchorHTMLAttributes,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import DOMPurify from "dompurify";
 import {
@@ -74,6 +76,8 @@ import {
 import { buildGpaTrendPoints } from "./grades";
 import QRCode from "qrcode";
 import ThemeToggle, { loadTheme } from "./ThemeToggle";
+import { useEscapeKey } from "./useEscapeKey";
+import { useOverflowFade } from "./useOverflowFade";
 
 
 const EMPTY = {
@@ -103,7 +107,6 @@ const fmtTime = (value: string | null) =>
 const isExpired = (value: string | null, ttl: number) =>
   !value || Date.now() - new Date(value).getTime() >= ttl;
 
-const compactStatus = (label: string, value: string) => value ? `${label}: ${value}` : "";
 
 function safeDownloadName(value: string) {
   return value
@@ -133,6 +136,88 @@ function formatFileSize(bytes: number) {
 }
 
 type AppView = "dashboard" | "courses" | "reference" | "grades" | "settings";
+
+/**
+ * Progress and success messages. Everything else that lands in a status slot is
+ * treated as an error and shown in the same top-bar status slot.
+ * Keep the wording here in sync with the setStatus/setCleStatus/... call sites.
+ */
+const BENIGN_STATUSES = new Set([
+  "ログイン状態を確認しています",
+  "データを取得しています",
+  "自動ログイン完了 / データを取得しています",
+  "セッションを再認証しています",
+  "KOANログイン完了後に更新します",
+  "手動ログインの完了を待っています",
+  "更新しています",
+  "更新しました",
+  "更新をキャンセルしました",
+]);
+
+/**
+ * KOAN and CLE report separately but usually say the same thing. Label the two
+ * sources only when they actually differ - otherwise the user reads one sentence
+ * twice for no reason.
+ */
+function mergeStatuses(koan: string, cle: string) {
+  if (!koan) return cle;
+  if (!cle || koan === cle) return koan;
+  return `KOAN: ${koan} / CLE: ${cle}`;
+}
+
+/**
+ * Every dialog in the app. Handles the three ways out that a dialog owes the
+ * user - Escape, a click on the backdrop, and the button inside - and puts focus
+ * in the dialog on open, returning it where it came from on close.
+ *
+ * Pass `onDismiss={undefined}` for a step that must not be abandoned halfway
+ * (registration in flight); the dialog then only closes through its own buttons.
+ */
+function Modal({
+  children,
+  className = "",
+  labelledBy,
+  onDismiss,
+  overlayClassName = "",
+  style,
+}: {
+  children: ReactNode;
+  className?: string;
+  labelledBy?: string;
+  onDismiss?: () => void;
+  overlayClassName?: string;
+  style?: CSSProperties;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus();
+    return () => previous?.focus?.();
+  }, []);
+
+  useEscapeKey(onDismiss);
+
+  return (
+    <div
+      className={["settings-modal-overlay", overlayClassName].filter(Boolean).join(" ")}
+      onClick={onDismiss}
+    >
+      <div
+        aria-labelledby={labelledBy}
+        aria-modal="true"
+        className={["settings-modal", className].filter(Boolean).join(" ")}
+        onClick={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+        style={style}
+        tabIndex={-1}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
 
 function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [theme, setTheme] = useState(loadTheme);
@@ -204,15 +289,15 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
 
   const updateKoan = async (force = false) => {
     setLoading(true);
-    setStatus("ログイン状態を確認中");
+    setStatus("ログイン状態を確認しています");
     try {
       if (!force && isKoanCacheFresh(data)) {
         setStatus(`キャッシュ表示中 / 更新 ${fmtTime(data.lightUpdatedAt)}`);
         return true;
       }
       const auth = await ensureKoanLogin();
-      if (auth.loginStarted) setStatus("自動ログイン完了 / データ取得準備中");
-      else setStatus("データ取得準備中");
+      if (auth.loginStarted) setStatus("自動ログイン完了 / データを取得しています");
+      else setStatus("データを取得しています");
       const result = await refreshLight(data, {
         force,
         portalHtml: auth.portalHtml,
@@ -238,39 +323,48 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
 
   const updateCle = async (force = false) => {
     setCleLoading(true);
-    setCleStatus("CLEログイン状態を確認中");
+    setCleStatus("ログイン状態を確認しています");
     try {
       if (!force && isCleCacheFresh(cleData)) {
         setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
         return true;
       }
       const auth = await ensureCleLogin();
-      if (auth.loginStarted) setCleStatus("自動ログイン完了 / データ取得準備中");
-      else setCleStatus("データ取得準備中");
+      if (auth.loginStarted) setCleStatus("自動ログイン完了 / データを取得しています");
+      else setCleStatus("データを取得しています");
       let next;
       try {
         next = await refreshCle(cleData, auth.tabId, (value) => {
           if (value) setCleStatus(value);
         }, force, {
-          activeCourseCodes: data.courses.map((course) => course.code),
+          activeCourses: data.courses.map((course) => ({
+            code: course.code,
+            title: course.title,
+            year: course.year,
+          })),
           priorityCourseCode: selectedCourseCode,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (/別の画面|1分後|待機中|再試行できます/.test(message)) throw error;
-        setCleStatus("セッションを再認証中");
+        if (!/\((?:401|403)\)|ログイン|認証|セッション/i.test(message)) throw error;
+        setCleStatus("セッションを再認証しています");
         const refreshedAuth = await refreshCleLogin();
         next = await refreshCle(cleData, refreshedAuth.tabId, (value) => {
           if (value) setCleStatus(value);
         }, force, {
-          activeCourseCodes: data.courses.map((course) => course.code),
+          activeCourses: data.courses.map((course) => ({
+            code: course.code,
+            title: course.title,
+            year: course.year,
+          })),
           priorityCourseCode: selectedCourseCode,
           bypassBackoff: true,
         });
       }
       setCleData(next);
       saveCleCache(next);
-      setCleStatus("CLE更新済み");
+      setCleStatus("更新しました");
       return true;
     } catch (error) {
       setCleStatus(error instanceof Error ? error.message : String(error));
@@ -298,8 +392,12 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     }
   };
 
+  // A download in flight writes to disk, so leaving mid-way is the one dismissal
+  // the materials dialog refuses.
+  const materialsBusy = Boolean(materialDownloadingId || materialBatchProgress);
+
   const closeMaterials = () => {
-    if (materialDownloadingId || materialBatchProgress) return;
+    if (materialsBusy) return;
     setMaterialCourse(null);
     setMaterialList(null);
     setMaterialError("");
@@ -356,15 +454,15 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       const claim = await claimDashboardRefresh();
       setRefreshBlockedUntil(Date.now() + claim.retryAfterMs);
       if (!claim.allowed) {
-        setStatus("更新の再試行は1分後にできます。");
-        setCleStatus("更新の再試行は1分後にできます。");
+        setStatus("更新の再試行は1分後にできます");
+        setCleStatus("更新の再試行は1分後にできます");
         return;
       }
       if (sequential) {
         setCleStatus("KOANログイン完了後に更新します");
         const koanUpdated = await updateKoan(force);
         if (!koanUpdated) {
-          setCleStatus("KOANログインが完了しなかったため、CLE更新を中止しました。");
+          setCleStatus("KOANログインが完了しなかったため、CLE更新を中止しました");
           return;
         }
         await updateCle(force);
@@ -396,22 +494,33 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     if (loggedIn) return { manualMode: true, mfaEnabled: currentAuthSettings.mfaEnabled };
 
     if (action === "dashboard") {
-      setStatus("手動ログインの確認待ち");
-      setCleStatus("手動ログインの確認待ち");
+      setStatus("手動ログインの完了を待っています");
+      setCleStatus("手動ログインの完了を待っています");
     } else {
-      setGradesStatus("手動ログインの確認待ち");
+      setGradesStatus("手動ログインの完了を待っています");
     }
     setPendingAction(action);
     setShowManualLoginModal(true);
     return null;
   };
 
+  const cancelManualLogin = () => {
+    setShowManualLoginModal(false);
+    if (pendingAction === "grades") {
+      setGradesStatus("更新をキャンセルしました");
+    } else {
+      setStatus("更新をキャンセルしました");
+      setCleStatus("更新をキャンセルしました");
+    }
+    setPendingAction(null);
+  };
+
   const runUpdate = async (force = false) => {
     if (authCheckLock.current || updateLock.current) return;
     authCheckLock.current = true;
     setAuthChecking(true);
-    setStatus("ログイン状態を確認中");
-    setCleStatus("ログイン状態を確認中");
+    setStatus("ログイン状態を確認しています");
+    setCleStatus("ログイン状態を確認しています");
     let manualMode = false;
     let sequential = false;
     try {
@@ -441,7 +550,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     if (snapshotLock.current) return;
     snapshotLock.current = true;
     setSnapshotLoading(true);
-    setSnapshotStatus("掲示スナップショットを同期中");
+    setSnapshotStatus("更新しています");
     try {
       setProgress("KOANログイン状態を確認中");
       await ensureKoanLogin();
@@ -455,7 +564,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         saveCache(next);
         return next;
       });
-      setSnapshotStatus("掲示スナップショットを同期しました");
+      setSnapshotStatus("更新しました");
     } catch (error) {
       setSnapshotStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -469,17 +578,17 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     if (gradesLock.current) return;
     gradesLock.current = true;
     setGradesLoading(true);
-    setGradesStatus("ログイン状態を確認中");
+    setGradesStatus("ログイン状態を確認しています");
     try {
       const auth = await ensureKoanLogin({ requireTab: true });
       if (!auth.tabId) {
         throw new Error("成績取得に使用するKOANタブを準備できませんでした。");
       }
-      setGradesStatus("成績を取得中");
+      setGradesStatus("更新しています");
       const next = await refreshGrades(setGradesStatus, auth.tabId);
       setGradesData(next);
       saveGradesCache(next);
-      setGradesStatus("取得しました");
+      setGradesStatus("更新しました");
     } catch (error) {
       setGradesStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -492,7 +601,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     if (authCheckLock.current || gradesLock.current) return;
     authCheckLock.current = true;
     setAuthChecking(true);
-    setGradesStatus("ログイン状態を確認中");
+    setGradesStatus("ログイン状態を確認しています");
     try {
       const prepared = await prepareAuthenticatedAction("grades");
       if (!prepared) return;
@@ -576,65 +685,58 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     grades: "成績",
     settings: "設定",
   }[view];
-  const showGradesError = gradesStatus && gradesStatus !== "取得しました" && gradesStatus !== "成績を取得中";
-  const hasKoanError = status && status !== "更新しました" && !status.includes("キャッシュ表示中");
-  const hasCleError = cleStatus && cleStatus !== "CLE更新済み" && !cleStatus.includes("キャッシュ表示中");
+  // Statuses double as the error channel, so anything outside this set is something
+  // the user needs to read in full rather than squint at in the one-line slot.
+  const isBenign = (value: string) =>
+    !value || value.includes("キャッシュ表示中") || BENIGN_STATUSES.has(value);
+  const showGradesError = !isBenign(gradesStatus);
+  const hasKoanError = !isBenign(status);
+  const hasCleError = !isBenign(cleStatus);
   const showUpdateError = hasKoanError || hasCleError;
+  const snapshotError = !isBenign(snapshotStatus) && !snapshotLoading;
+
   const cacheFresh = isKoanCacheFresh(data) && isCleCacheFresh(cleData);
   const refreshCoolingDown = refreshBlockedUntil > Date.now();
   const autoLoginActive = Boolean(authSettings?.configured && authSettings.enabled);
 
+  // One vocabulary for the update control on every page: the button always says
+  // 更新, the line beside it always says 最終更新 <time>. Only the target changes.
+  //
+  // The button is never disabled just because the data looks fresh. Rate limiting
+  // that protects KOAN/CLE lives where it belongs - claimDashboardRefresh() in the
+  // background worker and the cooldown guards inside refreshSnapshot() - and both
+  // answer with a message the user can read. Disabling here only hid the reason.
   const topbarState = view === "reference" ? {
     action: syncSnapshot,
     busy: snapshotLoading,
-    disabled: snapshotLoading || !snapshotExpired || snapshotBlocked,
-    label: snapshotLoading
-      ? "同期中..."
-      : !snapshotExpired || snapshotAvailability.reason === "completed"
-        ? "同期済み"
-        : snapshotBlocked
-          ? "待機中"
-          : "掲示を同期",
+    label: snapshotLoading ? "更新中…" : "更新",
     status: snapshotLoading
-      ? (progress || "掲示同期中...")
-      : snapshotBlocked
-        ? snapshotBlockedStatus
-        : snapshotStatus || `掲示同期 ${fmtTime(data.snapshotUpdatedAt)} / 更新推奨`,
+      ? (progress || "掲示を同期しています")
+      : snapshotError
+        ? snapshotStatus
+        : snapshotBlocked
+          ? snapshotBlockedStatus
+          : `最終更新 ${fmtTime(data.snapshotUpdatedAt)}${snapshotExpired ? " / 更新できます" : ""}`,
   } : view === "grades" ? {
     action: updateGrades,
     busy: gradesLoading || authChecking,
-    disabled: gradesLoading || authChecking,
-    label: gradesLoading ? "取得中..." : authChecking ? "確認中..." : "成績を取得",
+    label: gradesLoading || authChecking ? "更新中…" : "更新",
     status: gradesLoading || authChecking
-      ? (gradesStatus || "成績を取得中...")
+      ? (gradesStatus || "成績を取得しています")
       : showGradesError
         ? gradesStatus
-        : `成績更新履歴 ${fmtTime(gradesData?.updatedAt ?? null)}`,
+        : `最終更新 ${fmtTime(gradesData?.updatedAt ?? null)}`,
   } : {
-    action: update,
+    // Fresh cache means a plain click would be a no-op, so force the refresh and
+    // let the 60s claim decide - the user asked for new data, not for a shrug.
+    action: () => runUpdate(cacheFresh || refreshCoolingDown),
     busy: loading || cleLoading || authChecking,
-    disabled: loading || cleLoading || authChecking ||
-      (autoLoginActive && (cacheFresh || refreshCoolingDown)),
-    label: loading || cleLoading
-      ? "更新中..."
-      : authChecking
-        ? "確認中..."
-      : cacheFresh && autoLoginActive
-        ? "最新"
-        : refreshCoolingDown && autoLoginActive
-          ? "待機中"
-          : "更新",
+    label: loading || cleLoading || authChecking ? "更新中…" : "更新",
     status: loading || cleLoading || authChecking
-      ? [
-          compactStatus("KOAN", status),
-          compactStatus("CLE", cleStatus),
-        ].filter(Boolean).join(" / ") || (authChecking ? "ログイン状態を確認中..." : "更新中...")
+      ? mergeStatuses(status, cleStatus) || "更新しています"
       : showUpdateError
-        ? [
-            hasKoanError ? compactStatus("KOAN", status) : "",
-            hasCleError ? compactStatus("CLE", cleStatus) : "",
-          ].filter(Boolean).join(" / ")
-        : `更新済み ${fmtTime(latestUpdatedAt)}`,
+        ? mergeStatuses(hasKoanError ? status : "", hasCleError ? cleStatus : "")
+        : `最終更新 ${fmtTime(latestUpdatedAt)}`,
   };
 
   return (
@@ -648,11 +750,11 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         <h1>{viewTitle}</h1>
         <div className="topbar-actions">
           <div className="update-group">
-            <small>{topbarState.status}</small>
+            <small title={topbarState.status}>{topbarState.status}</small>
             <button
               className={topbarState.busy ? "is-loading" : ""}
               type="button"
-              disabled={topbarState.disabled}
+              disabled={topbarState.busy}
               onClick={topbarState.action}
             >
               {topbarState.label}
@@ -697,7 +799,6 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
             onScopeChange={setScope}
             query={query}
             scope={scope}
-            snapshotUpdatedAt={data.snapshotUpdatedAt}
           />
         ) : view === "grades" ? (
           <Grades data={gradesData} />
@@ -705,176 +806,151 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       </main>
 
       {showManualLoginModal && (
-        <div className="settings-modal-overlay">
-          <div className="settings-modal" role="dialog" aria-modal="true">
-            <h3 className="modal-title">手動でログインを行いますか</h3>
-            <p className="modal-text">
-              自動ログインが無効、またはログイン情報が設定されていないため、大阪大学の公式ログイン画面（新しいタブ）を開いて手動でログインする必要があります。
-            </p>
-            <p className="modal-text" style={{ fontSize: "0.85em", color: "var(--text-muted, #6c757d)", marginTop: "8px" }}>
-              ※ログインが完了すると、自動的にこのダッシュボードに戻り、データが取得されます。（IDやパスワードは保存されません）
-            </p>
-            <div className="modal-actions">
-              <button className="modal-btn cancel" onClick={() => {
-                setShowManualLoginModal(false);
-                if (pendingAction === "grades") {
-                  setGradesStatus("取得をキャンセルしました");
-                } else {
-                  setStatus("更新をキャンセルしました");
-                  setCleStatus("更新をキャンセルしました");
-                }
-                setPendingAction(null);
-              }} type="button">
-                キャンセル
-              </button>
-              <button className="modal-btn confirm" onClick={() => {
-                setShowManualLoginModal(false);
-                const action = pendingAction;
-                setPendingAction(null);
-                if (action === "grades") {
-                  void executeGradesUpdate();
-                } else {
-                  void executeUpdate(false, true);
-                }
-              }} type="button">
-                ログイン画面を開く
-              </button>
-            </div>
+        <Modal labelledBy="manual-login-title" onDismiss={cancelManualLogin}>
+          <h3 className="modal-title" id="manual-login-title">手動でログインを行いますか</h3>
+          <p className="modal-text">
+            自動ログインが無効、またはログイン情報が設定されていないため、大阪大学の公式ログイン画面（新しいタブ）を開いて手動でログインする必要があります。
+          </p>
+          <p className="modal-note">
+            ※ログインが完了すると、自動的にこのダッシュボードに戻り、データが取得されます。（IDやパスワードは保存されません）
+          </p>
+          <div className="modal-actions">
+            <button className="modal-btn cancel" onClick={cancelManualLogin} type="button">
+              キャンセル
+            </button>
+            <button className="modal-btn confirm" onClick={() => {
+              setShowManualLoginModal(false);
+              const action = pendingAction;
+              setPendingAction(null);
+              if (action === "grades") {
+                void executeGradesUpdate();
+              } else {
+                void executeUpdate(false, true);
+              }
+            }} type="button">
+              ログイン画面を開く
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {selectedAnnouncement && (
-        <div className="settings-modal-overlay" onClick={() => setSelectedAnnouncement(null)}>
-          <div className="settings-modal announcement-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "640px", width: "90%" }}>
-            <h3 className="modal-title" style={{ fontSize: "17px", fontWeight: "bold", marginBottom: "4px", lineHeight: "1.4", overflowWrap: "break-word" }}>{selectedAnnouncement.title}</h3>
-            <div style={{ fontSize: "12px", color: "var(--text-muted, #6c757d)", marginBottom: "16px" }}>
-              {courseDisplayName(selectedAnnouncement.courseName)} / {fmtDue(selectedAnnouncement.created)}
-            </div>
-            <div
-              className="announcement-modal-body markdown-body"
-              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(selectedAnnouncement.body) }}
-              style={{
-                maxHeight: "50vh",
-                overflowY: "auto",
-                padding: "16px",
-                background: "var(--bg-subtle, #f8f9fa)",
-                borderRadius: "6px",
-                border: "1px solid var(--border-primary, #dee2e6)",
-                fontSize: "14px",
-                lineHeight: "1.6",
-                textAlign: "left",
-                overflowWrap: "break-word",
-              }}
-            />
-            <div className="modal-actions" style={{ marginTop: "20px" }}>
-              <button className="modal-btn cancel" onClick={() => setSelectedAnnouncement(null)} type="button">
-                閉じる
-              </button>
-            </div>
+        <Modal
+          className="announcement-modal"
+          labelledBy="announcement-modal-title"
+          onDismiss={() => setSelectedAnnouncement(null)}
+        >
+          <h3 className="modal-title" id="announcement-modal-title">{selectedAnnouncement.title}</h3>
+          <p className="modal-meta">
+            {courseDisplayName(selectedAnnouncement.courseName)} / {fmtDue(selectedAnnouncement.created)}
+          </p>
+          <div
+            className="announcement-modal-body markdown-body"
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(selectedAnnouncement.body) }}
+          />
+          <div className="modal-actions">
+            <button className="modal-btn cancel" onClick={() => setSelectedAnnouncement(null)} type="button">
+              閉じる
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {materialCourse && (
-        <div className="settings-modal-overlay" onClick={closeMaterials}>
-          <div
-            className="settings-modal materials-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="materials-modal-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <header className="materials-modal-header">
-              <div>
-                <h3 className="modal-title" id="materials-modal-title">資料</h3>
-                <p>{materialCourse.koan.title}</p>
-              </div>
-              <button
-                aria-label="資料一覧を閉じる"
-                className="materials-close"
-                disabled={Boolean(materialDownloadingId || materialBatchProgress)}
-                onClick={closeMaterials}
-                type="button"
-              >
-                閉じる
-              </button>
-            </header>
-
-            <div className="materials-modal-body">
-              {materialLoading ? (
-                <EmptyState
-                  icon="spinner"
-                  title="CLEから資料を読み込んでいます"
-                  description="この授業の資料だけを取得しています。"
-                  variant="normal"
-                />
-              ) : materialError && !materialList ? (
-                <EmptyState
-                  icon="info"
-                  title="資料を読み込めませんでした"
-                  description={materialError}
-                  variant="normal"
-                />
-              ) : materialList?.materials.length ? (
-                <div className="materials-list">
-                  {materialList.materials.map((material) => (
-                    <div className="material-row" key={material.id}>
-                      <div className="material-info">
-                        <strong>{material.title}</strong>
-                        <span>{material.fileName}</span>
-                        <small>
-                          {[
-                            material.folderPath.join(" / "),
-                            material.addedAt ? `追加 ${fmtTime(material.addedAt)}` : "",
-                            formatFileSize(material.size),
-                          ].filter(Boolean).join(" / ")}
-                        </small>
-                      </div>
-                      <button
-                        disabled={Boolean(materialDownloadingId || materialBatchProgress)}
-                        onClick={() => void downloadMaterial(material)}
-                        type="button"
-                      >
-                        {materialDownloadingId === material.id ? "取得中..." : "ダウンロード"}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState
-                  icon="book-open"
-                  title="ダウンロードできる資料はありません"
-                  description="CLE上にファイル形式の資料が追加されると、ここに表示されます。"
-                  variant="normal"
-                />
-              )}
+        <Modal
+          className="materials-modal"
+          labelledBy="materials-modal-title"
+          onDismiss={materialsBusy ? undefined : closeMaterials}
+        >
+          <header className="materials-modal-header">
+            <div>
+              <h3 className="modal-title" id="materials-modal-title">資料</h3>
+              <p>{materialCourse.koan.title}</p>
             </div>
+            <button
+              aria-label="資料一覧を閉じる"
+              className="materials-close"
+              disabled={Boolean(materialDownloadingId || materialBatchProgress)}
+              onClick={closeMaterials}
+              type="button"
+            >
+              閉じる
+            </button>
+          </header>
 
-            {materialError && materialList && (
-              <p className="materials-error" role="alert">{materialError}</p>
+          <div className="materials-modal-body">
+            {materialLoading ? (
+              <EmptyState
+                icon="spinner"
+                title="CLEから資料を読み込んでいます"
+                description="この授業の資料だけを取得しています。"
+                variant="normal"
+              />
+            ) : materialError && !materialList ? (
+              <EmptyState
+                icon="info"
+                title="資料を読み込めませんでした"
+                description={materialError}
+                variant="normal"
+              />
+            ) : materialList?.materials.length ? (
+              <div className="materials-list">
+                {materialList.materials.map((material) => (
+                  <div className="material-row" key={material.id}>
+                    <div className="material-info">
+                      <strong>{material.title}</strong>
+                      <span>{material.fileName}</span>
+                      <small>
+                        {[
+                          material.folderPath.join(" / "),
+                          material.addedAt ? `追加 ${fmtTime(material.addedAt)}` : "",
+                          formatFileSize(material.size),
+                        ].filter(Boolean).join(" / ")}
+                      </small>
+                    </div>
+                    <button
+                      disabled={Boolean(materialDownloadingId || materialBatchProgress)}
+                      onClick={() => void downloadMaterial(material)}
+                      type="button"
+                    >
+                      {materialDownloadingId === material.id ? "取得中..." : "ダウンロード"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                icon="book-open"
+                title="ダウンロードできる資料はありません"
+                description="CLE上にファイル形式の資料が追加されると、ここに表示されます。"
+                variant="normal"
+              />
             )}
-            <footer className="materials-modal-footer">
-              <small>
-                {materialList
-                  ? `${materialList.materials.length}件 / 取得 ${fmtTime(materialList.updatedAt)}`
-                  : "授業を開いた時だけCLEへアクセスします"}
-              </small>
-              <button
-                className="modal-btn primary"
-                disabled={
-                  materialLoading ||
-                  !materialList?.materials.length ||
-                  Boolean(materialDownloadingId || materialBatchProgress)
-                }
-                onClick={() => void downloadAllMaterials()}
-                type="button"
-              >
-                {materialBatchProgress ? `一括取得中 ${materialBatchProgress}` : "すべてダウンロード"}
-              </button>
-            </footer>
           </div>
-        </div>
+
+          {materialError && materialList && (
+            <p className="materials-error" role="alert">{materialError}</p>
+          )}
+          <footer className="materials-modal-footer">
+            <small>
+              {materialList
+                ? `${materialList.materials.length}件 / 取得 ${fmtTime(materialList.updatedAt)}`
+                : "授業を開いた時だけCLEへアクセスします"}
+            </small>
+            <button
+              className="modal-btn primary"
+              disabled={
+                materialLoading ||
+                !materialList?.materials.length ||
+                Boolean(materialDownloadingId || materialBatchProgress)
+              }
+              onClick={() => void downloadAllMaterials()}
+              type="button"
+            >
+              {materialBatchProgress ? `一括取得中 ${materialBatchProgress}` : "すべてダウンロード"}
+            </button>
+          </footer>
+        </Modal>
       )}
     </div>
   );
@@ -941,15 +1017,22 @@ function AuthenticatedLink({
   rel = "noopener noreferrer",
   ...props
 }: Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> & { href: string }) {
+  const [error, setError] = useState("");
   const handleClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
     onClick?.(event);
     if (event.defaultPrevented || event.button !== 0) return;
     event.preventDefault();
-    void openAuthenticatedUrl(href).catch((error) => {
-      window.alert(error instanceof Error ? error.message : String(error));
+    setError("");
+    void openAuthenticatedUrl(href).catch((cause) => {
+      setError(cause instanceof Error ? cause.message : String(cause));
     });
   };
-  return <a {...props} href={href} onClick={handleClick} rel={rel} />;
+  return (
+    <>
+      <a {...props} href={href} onClick={handleClick} rel={rel} />
+      {error && <span className="inline-error" role="alert">{error}</span>}
+    </>
+  );
 }
 
 const EMPTY_AUTH_SETTINGS: AuthSettings = {
@@ -1135,6 +1218,11 @@ function Settings({
   const handleStartRegister = () => {
     setMfaWizardStep("registering");
     void startAutoCollect();
+  };
+
+  const closeMfaWizard = () => {
+    setShowMfaWizardModal(false);
+    setMfaWizardStep("consent");
   };
 
   const qrCanvasRef = (node: HTMLCanvasElement | null) => {
@@ -1646,58 +1734,56 @@ function Settings({
 
       {/* Delete Confirmation Modal */}
       {showDeleteModal && (
-        <div className="settings-modal-overlay">
-          <div className="settings-modal" role="dialog" aria-modal="true">
-            <h3 className="modal-title">認証情報を削除しますか</h3>
-            <p className="modal-text">次の情報をこの端末から削除します。この操作は取り消せません。</p>
-            <ul className="modal-delete-list">
-              <li>大阪大学個人ID</li>
-              <li>パスワード</li>
-            </ul>
-            <p className="modal-text" style={{ fontSize: "0.85em", color: "var(--text-muted, #6c757d)", marginTop: "8px" }}>
-              ※登録済みの二段階認証情報は維持されます。
-            </p>
-            <div className="modal-actions">
-              <button className="modal-btn cancel" onClick={() => setShowDeleteModal(false)} type="button">
-                キャンセル
-              </button>
-              <button className="modal-btn confirm" onClick={removeSavedCredentials} type="button">
-                削除する
-              </button>
-            </div>
+        <Modal labelledBy="delete-credentials-title" onDismiss={() => setShowDeleteModal(false)}>
+          <h3 className="modal-title" id="delete-credentials-title">認証情報を削除しますか</h3>
+          <p className="modal-text">次の情報をこの端末から削除します。この操作は取り消せません。</p>
+          <ul className="modal-delete-list">
+            <li>大阪大学個人ID</li>
+            <li>パスワード</li>
+          </ul>
+          <p className="modal-note">※登録済みの二段階認証情報は維持されます。</p>
+          <div className="modal-actions">
+            <button className="modal-btn cancel" onClick={() => setShowDeleteModal(false)} type="button">
+              キャンセル
+            </button>
+            <button className="modal-btn confirm" onClick={removeSavedCredentials} type="button">
+              削除する
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* MFA Delete Confirmation Modal */}
       {showMfaDeleteModal && (
-        <div className="settings-modal-overlay">
-          <div className="settings-modal" role="dialog" aria-modal="true">
-            <h3 className="modal-title">二段階認証情報を削除しますか</h3>
-            <p className="modal-text">登録されている二段階認証情報（手動入力キー、一時解除コード）をこの端末から削除します。この操作は取り消せません。</p>
-            <div className="modal-actions">
-              <button className="modal-btn cancel" onClick={() => setShowMfaDeleteModal(false)} type="button">
-                キャンセル
-              </button>
-              <button className="modal-btn confirm" onClick={removeSavedMfa} type="button">
-                削除する
-              </button>
-            </div>
+        <Modal labelledBy="delete-mfa-title" onDismiss={() => setShowMfaDeleteModal(false)}>
+          <h3 className="modal-title" id="delete-mfa-title">二段階認証情報を削除しますか</h3>
+          <p className="modal-text">登録されている二段階認証情報（手動入力キー、一時解除コード）をこの端末から削除します。この操作は取り消せません。</p>
+          <div className="modal-actions">
+            <button className="modal-btn cancel" onClick={() => setShowMfaDeleteModal(false)} type="button">
+              キャンセル
+            </button>
+            <button className="modal-btn confirm" onClick={removeSavedMfa} type="button">
+              削除する
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* MFA Wizard Modal */}
       {showMfaWizardModal && (mfaWizardStep !== "qr" || Boolean(savedSecrets?.totpSecret)) && (
-        <div className="settings-modal-overlay mfa-wizard-overlay">
-          <div className="settings-modal mfa-wizard-modal" role="dialog" aria-modal="true">
+        <Modal
+          className="mfa-wizard-modal"
+          labelledBy="mfa-wizard-title"
+          onDismiss={mfaWizardStep === "registering" ? undefined : closeMfaWizard}
+          overlayClassName="mfa-wizard-overlay"
+        >
             <div className="mfa-wizard-viewport">
               <div className={`mfa-wizard-track step-${mfaWizardStep}`}>
                 
                 {/* Step 1: Consent */}
                 <div className="mfa-wizard-slide mfa-consent-slide">
                   <header className="mfa-consent-header">
-                    <h3 className="modal-title">二段階認証を自動登録します</h3>
+                    <h3 className="modal-title" id="mfa-wizard-title">二段階認証を自動登録します</h3>
                     <p>始める前に、認証アプリの再設定と端末内保存について確認してください。</p>
                   </header>
 
@@ -1866,8 +1952,7 @@ function Settings({
 
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
 
@@ -1896,6 +1981,11 @@ function dueLabel(value: string | null) {
 
 function taskLabel(task: CleTask) {
   const status = taskDisplayStatus(task);
+  if (status === "採点済み" && task.score !== undefined) {
+    return task.possibleScore !== undefined
+      ? `${task.score}/${task.possibleScore}`
+      : `${task.score}点`;
+  }
   if (["提出済み", "採点済み", "期限切れ"].includes(status)) {
     return status;
   }
@@ -2405,6 +2495,9 @@ function CourseDetail({
   onOpenMaterials: (course: CourseSummary) => void;
 }) {
   const teacherRoom = courseTeacherRoom(course.koan.teacherAndRoom);
+  const tasksOverflow = useOverflowFade<HTMLDivElement>();
+  const messagesOverflow = useOverflowFade<HTMLDivElement>();
+  const updatesOverflow = useOverflowFade<HTMLDivElement>();
   const [openingNotice, setOpeningNotice] = useState("");
   const openNotice = async (notice: Notice) => {
     const key = noticeKey(notice);
@@ -2437,7 +2530,7 @@ function CourseDetail({
       <div className="course-detail-flow">
         <section className="course-detail-block course-tasks-block">
           <h3>課題</h3>
-          <div className="course-line-list">
+          <div className="course-line-list" data-overflowing={tasksOverflow.overflowing || undefined} ref={tasksOverflow.ref}>
             {course.tasks.length ? course.tasks.map((task) => (
               <AuthenticatedLink className="course-line-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
                 <b className={`course-status-label ${taskTone(task)}`}>{taskLabel(task)}</b>
@@ -2455,7 +2548,7 @@ function CourseDetail({
 
         <section className="course-detail-block course-messages-block">
           <h3>連絡</h3>
-          <div className="course-line-list">
+          <div className="course-line-list" data-overflowing={messagesOverflow.overflowing || undefined} ref={messagesOverflow.ref}>
             {course.announcements.length || course.messages.length ? (
               <>
                 {course.announcements.map((ann) => (
@@ -2492,7 +2585,7 @@ function CourseDetail({
 
         <section className="course-detail-block course-updates-block">
           <h3>変更・掲示</h3>
-          <div className="course-line-list">
+          <div className="course-line-list" data-overflowing={updatesOverflow.overflowing || undefined} ref={updatesOverflow.ref}>
             {course.changes.map((change, index) => (
               <div className="course-line-row" key={`${change.date}-${change.period}-${index}`}>
                 <b>{change.type}</b>
@@ -2567,7 +2660,7 @@ function Dashboard({
   return (
     <>
       <section className="dashboard-main">
-        <NextActions data={cleData} loading={cleLoading} status={cleStatus} />
+        <NextActions data={cleData} loading={cleLoading} />
         <NewActivity
           loading={cleLoading}
           messages={cleData.messages}
@@ -2594,11 +2687,9 @@ function Dashboard({
 function NextActions({
   data,
   loading,
-  status,
 }: {
   data: CleData;
   loading: boolean;
-  status: string;
 }) {
   const tasks = data.tasks.filter(
     (task) => !["提出済み", "採点済み"].includes(task.status),
@@ -2617,7 +2708,7 @@ function NextActions({
       <div className="section-heading">
         <div>
           <h2>直近の課題</h2>
-          <p>CLE取得 {fmtTime(data.updatedAt)}{status ? ` / ${status}` : ""}</p>
+          <p>CLE取得 {fmtTime(data.updatedAt)}</p>
         </div>
         <AuthenticatedLink className="detail-link" href={CLE_CALENDAR_URL} target="_blank">CLEカレンダー</AuthenticatedLink>
       </div>
@@ -2644,10 +2735,9 @@ function NextActions({
 }
 
 function CleTaskRow({ task }: { task: CleTask }) {
-  const overdue = Boolean(task.dueAt && new Date(task.dueAt).getTime() < Date.now());
   return (
     <AuthenticatedLink className="cle-task-row" href={cleTaskUrl(task)} target="_blank">
-      <time className={overdue ? "overdue" : ""}>{dueLabel(task.dueAt)}</time>
+      <time>{dueLabel(task.dueAt)}</time>
       <span>
         {task.title}
         <small>{courseDisplayName(task.courseName)} / {taskDueDescription(task)} / {taskDisplayStatus(task)}</small>
@@ -3163,18 +3253,14 @@ function NewActivity({
                   key={ann.id}
                   onClick={() => onOpenAnnouncement(ann)}
                   type="button"
-                  style={{ background: "transparent", border: "none", cursor: "pointer", width: "100%", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
                 >
-                  <span style={{ flex: 1, marginRight: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    <span style={{ fontSize: "0.8em", color: "var(--text-muted, #6c757d)", fontWeight: "bold" }}>
+                  <span className="announcement-row-text">
+                    <span className="announcement-row-course">
                       [連絡] {courseDisplayName(ann.courseName)}
                     </span>
-                    <br />
-                    <span style={{ fontSize: "0.95em" }}>{ann.title}</span>
+                    <span className="announcement-row-title">{ann.title}</span>
                   </span>
-                  <b className="announcement-date-tag" style={{ fontSize: "0.85em", color: "var(--text-muted, #6c757d)", flexShrink: 0 }}>
-                    {dueLabel(ann.created)}
-                  </b>
+                  <b className="announcement-date-tag">{dueLabel(ann.created)}</b>
                 </button>
               ))}
               {messages.map((message) => (
@@ -3270,7 +3356,6 @@ function ReferenceDesk({
   onScopeChange,
   query,
   scope,
-  snapshotUpdatedAt,
 }: {
   allNotices: Notice[];
   genre: string;
@@ -3281,7 +3366,6 @@ function ReferenceDesk({
   onScopeChange: (value: string) => void;
   query: string;
   scope: string;
-  snapshotUpdatedAt: string | null;
 }) {
   const summary = {
     all: allNotices.length,
@@ -3298,34 +3382,16 @@ function ReferenceDesk({
 
   return (
     <div className="reference-page">
-      <section className="notice-summary" aria-label="掲示サマリー">
-        <div>
-          <span>全</span>
-          <strong>{summary.all}</strong>
-          <small>件</small>
-        </div>
-        <div className="needs-action">
-          <span>未読</span>
-          <strong>{summary.unread}</strong>
-          <small>件</small>
-        </div>
-        <div className="needs-action">
-          <span>要確認</span>
-          <strong>{summary.attention}</strong>
-          <small>件</small>
-        </div>
-        <p>同期 {fmtTime(snapshotUpdatedAt)}</p>
-      </section>
-
+      {/* The summary row that used to sit here repeated all three counts already
+          shown on the filter buttons, plus a sync time the top bar shows. */}
       <section className="notice-operations" aria-label="掲示の絞り込み">
-        <div className="notice-scope-tabs" role="tablist" aria-label="状態">
+        <div className="notice-scope-tabs" role="group" aria-label="状態で絞り込む">
           {tabs.map(([value, label, count]) => (
             <button
-              aria-selected={scope === value}
+              aria-pressed={scope === value}
               className={scope === value ? "active" : ""}
               key={value}
               onClick={() => onScopeChange(value)}
-              role="tab"
               type="button"
             >
               <span>{label}</span>

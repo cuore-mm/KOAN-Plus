@@ -3,6 +3,7 @@ import privacyDocument from "../PRIVACY.md?raw";
 import termsDocument from "../TERMS.md?raw";
 import { loadAuthSettings, saveAuthSettings } from "./auth";
 import ThemeToggle, { loadTheme } from "./ThemeToggle";
+import { useEscapeKey } from "./useEscapeKey";
 
 type OnboardingProps = {
   onComplete: (openSettings: boolean) => void;
@@ -65,6 +66,8 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
   const finish = (openSettings: boolean) => {
     onComplete(openSettings);
   };
+
+  useEscapeKey(legalDocument ? () => setLegalDocument(null) : undefined);
 
   const stepNumber = step === "welcome" ? 1 : 2;
   const privacyJapanese = privacyDocument.includes("## 日本語")
@@ -162,7 +165,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                 <div className="onboarding-actions-right">
                   <button className="subtle-action" disabled={saving} onClick={() => finish(false)} type="button">あとで設定</button>
                   <button className="primary-action" disabled={saving || !id.trim() || !password} onClick={() => void saveCredentials()} type="button">
-                    {saving ? "保存中..." : "保存して利用開始"}
+                    {saving ? "保存中…" : "保存して利用開始"}
                   </button>
                 </div>
               </div>
