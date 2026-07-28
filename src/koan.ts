@@ -16,6 +16,7 @@ export const COURSES_REFRESH_TTL_MS = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 15 * 1000;
 const BOARD_REQUEST_GAP_MS = 750;
 const MAX_BOARD_PAGES_PER_GENRE = 12;
+const MAX_BOARD_TRAVERSE_PAGES_PER_GENRE = 100;
 const SCHEDULE_RANGE_WEEKS = 8;
 const MAX_SCHEDULE_MONTH_PAGES = 4;
 const SNAPSHOT_MAX_DURATION_MS = 3 * 60 * 1000;
@@ -91,6 +92,9 @@ export type KoanData = {
   noticesUpdatedAt: string | null;
   snapshotVersion?: number;
   snapshotGenreSyncAt?: Record<string, string>;
+  snapshotGenreVersions?: Record<string, number>;
+  snapshotComplete?: boolean;
+  warnings?: string[];
 };
 export type GradeHistoryItem = {
   code: string;
@@ -228,10 +232,10 @@ function requireRetryAvailable(key: string, label: string) {
   throw new Error(`${label}は失敗後の待機中です。${seconds}秒後に再試行できます。`);
 }
 
-function recordFailure(key: string) {
+function recordFailure(key: string, maxDelay = 60 * 60 * 1000) {
   const previous = readFailureState(key);
   const count = previous.count + 1;
-  const delay = Math.min(60 * 60 * 1000, 60 * 1000 * (2 ** Math.min(count - 1, 6)));
+  const delay = Math.min(maxDelay, 60 * 1000 * (2 ** Math.min(count - 1, 6)));
   localStorage.setItem(key, JSON.stringify({
     count,
     nextRetryAt: Date.now() + delay,
@@ -427,6 +431,12 @@ function requireLogin(doc: Document) {
   }
 }
 
+function requireElement(doc: Document, selector: string, label: string) {
+  if (!doc.querySelector(selector)) {
+    throw new Error(`${label}の画面構造を確認できませんでした。以前のデータを保持します。`);
+  }
+}
+
 function parseSchedule(doc: Document): ScheduleItem[] {
   const list = doc.querySelector(".mysch-portlet-list");
   if (!list) return [];
@@ -500,9 +510,13 @@ async function fetchScheduleRange(includeFuture: boolean) {
   let page = await fetchHtml(SCHEDULE_URL);
   const horizon = addDays(new Date(), SCHEDULE_RANGE_WEEKS * 7).getTime();
   for (let index = 0; index < MAX_SCHEDULE_MONTH_PAGES; index += 1) {
+    requireElement(page.doc, "#schedule-calender", "時間割");
     pages.push(page.doc);
     if (!includeFuture || maxCalendarDate(page.doc) >= horizon) break;
     page = await submitScheduleEvent(page.doc, "setNextMonth");
+  }
+  if (includeFuture && maxCalendarDate(pages[pages.length - 1]) < horizon) {
+    throw new Error("時間割を8週間先まで取得できませんでした。以前のデータを保持します。");
   }
   return pages;
 }
@@ -552,6 +566,10 @@ function parseSyllabusCall(value: string) {
 
 function parseCourseRegistrations(doc: Document): CourseRegistration[] {
   const table = doc.querySelector("table.rishu-koma");
+  const intensiveTable = doc.querySelector("table.rishu-etc");
+  if (!table && !intensiveTable) {
+    throw new Error("履修授業の表を確認できませんでした。以前のデータを保持します。");
+  }
   const weekdays = ["月", "火", "水", "木", "金", "土"];
   const courses: CourseRegistration[] = [];
   if (table) {
@@ -584,7 +602,6 @@ function parseCourseRegistrations(doc: Document): CourseRegistration[] {
     }
   }
 
-  const intensiveTable = doc.querySelector("table.rishu-etc");
   for (const row of intensiveTable?.querySelectorAll(":scope > tbody > tr") || []) {
     const cells = [...row.children].filter((cell) => cell.tagName === "TD");
     if (cells.length < 7) continue;
@@ -671,7 +688,9 @@ function parseCellCourse(cell: Element) {
 
 function parseChanges(doc: Document): ChangeItem[] {
   const timetable = doc.querySelector("table.kyuko-kyukohoko");
-  if (!timetable) return [];
+  if (!timetable) {
+    throw new Error("休講・補講の表を確認できませんでした。以前のデータを保持します。");
+  }
   const dates = [...timetable.querySelectorAll("tr:first-child th")]
     .map((item) => normalize(item.textContent))
     .filter(Boolean);
@@ -753,13 +772,30 @@ function parseNotices(doc: Document, responseUrl: string, unread = false): Notic
     .filter((notice): notice is Notice => Boolean(notice));
 }
 
+function requireBoardRoot(doc: Document) {
+  const genreCount = GENRES.filter((genre) =>
+    [...doc.querySelectorAll("a")].some((item) => normalize(item.textContent) === genre)
+  ).length;
+  if (!findBoardTable(doc, true) && genreCount < Math.ceil(GENRES.length / 2)) {
+    throw new Error("掲示板の画面構造を確認できませんでした。以前のデータを保持します。");
+  }
+}
+
+function isEmptyNoticePage(doc: Document) {
+  const text = normalize(doc.body?.textContent);
+  return /(?:該当|掲示|検索結果).*(?:ありません|0件)/.test(text);
+}
+
 export function noticeKey(notice: Notice) {
   const url = new URL(notice.href);
-  return [
+  const parts = [
     url.searchParams.get("keijitype"),
     url.searchParams.get("genrecd"),
     url.searchParams.get("seqNo"),
-  ].join(":");
+  ];
+  return parts.every(Boolean)
+    ? parts.join(":")
+    : `${url.pathname}${url.search}`;
 }
 
 export function mergeNotices(notices: Notice[]) {
@@ -799,7 +835,7 @@ export async function refreshLight(
   },
 ) {
   const force = Boolean(options?.force);
-  requireRetryAvailable(LIGHT_FAILURE_KEY, "KOAN通常更新");
+  if (!force) requireRetryAvailable(LIGHT_FAILURE_KEY, "KOAN通常更新");
   if (!force) {
     requireCooldown(LIGHT_ATTEMPT_KEY, 60 * 1000, "通常更新の再試行は1分後にできます。");
   }
@@ -809,9 +845,15 @@ export async function refreshLight(
     const onProgress = options?.onProgress;
     onProgress?.("KOANキャッシュを確認中");
     const completed = new Set<string>();
+    const warnings: string[] = [];
     const markDone = (label: string) => {
       completed.add(label);
       onProgress?.(`${[...completed].join(" / ")} 取得済み`);
+    };
+    const keepCached = (label: string, error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`${label}: ${message}`);
+      markDone(`${label}キャッシュ`);
     };
     const now = new Date().toISOString();
     const changesFresh = !force &&
@@ -856,8 +898,8 @@ export async function refreshLight(
                 : koanPartUpdatedAt(previous, "futureScheduleUpdatedAt"),
             };
           })
-          .catch(() => {
-            markDone("時間割キャッシュ");
+          .catch((error) => {
+            keepCached("時間割", error);
             return {
               pages: [] as Document[],
               updatedAt: koanPartUpdatedAt(previous, "scheduleUpdatedAt"),
@@ -877,8 +919,8 @@ export async function refreshLight(
             markDone("履修授業");
             return { courses: mergeCourses(parseCourseRegistrations(result.doc)), updatedAt: now };
           })
-          .catch(() => {
-            markDone("履修授業キャッシュ");
+          .catch((error) => {
+            keepCached("履修授業", error);
             return {
               courses: previous.courses,
               updatedAt: koanPartUpdatedAt(previous, "coursesUpdatedAt"),
@@ -895,8 +937,8 @@ export async function refreshLight(
         : fetchHtml(CHANGES_URL).then((result) => {
           markDone("休講補講");
           return { changes: parseChanges(result.doc), updatedAt: now };
-        }).catch(() => {
-          markDone("休講補講キャッシュ");
+        }).catch((error) => {
+          keepCached("休講補講", error);
           return {
             changes: previous.changes,
             updatedAt: koanPartUpdatedAt(previous, "changesUpdatedAt"),
@@ -911,10 +953,11 @@ export async function refreshLight(
           return result;
         })
         : fetchHtml(BOARD_URL).then((board) => {
+          requireBoardRoot(board.doc);
           markDone("新着掲示");
           return { board, updatedAt: now };
-        }).catch(() => {
-          markDone("新着掲示キャッシュ");
+        }).catch((error) => {
+          keepCached("新着掲示", error);
           return {
             board: null,
             updatedAt: koanPartUpdatedAt(previous, "noticesUpdatedAt"),
@@ -965,6 +1008,7 @@ export async function refreshLight(
       coursesUpdatedAt: coursesResult.updatedAt,
       changesUpdatedAt: changesResult.updatedAt,
       noticesUpdatedAt: boardResult.updatedAt,
+      warnings,
     };
     localStorage.removeItem(LIGHT_FAILURE_KEY);
     return result;
@@ -981,32 +1025,50 @@ async function fetchGenre(
   root: { doc: Document; url: string },
   genre: string,
   deadline: number,
+  knownKeys: Set<string>,
+  stopAtKnown: boolean,
 ) {
   requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
   const link = [...root.doc.querySelectorAll("a")].find(
     (item) => normalize(item.textContent) === genre,
   );
-  if (!link) return [];
+  if (!link) {
+    throw new Error(`${genre}の掲示リンクを確認できませんでした。`);
+  }
   await pause(BOARD_REQUEST_GAP_MS);
   requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
   let page = await fetchHtml(new URL(link.getAttribute("href") || "", root.url).href);
   const notices: Notice[] = [];
   const visited = new Set<string>();
-  for (let index = 0; index < MAX_BOARD_PAGES_PER_GENRE; index += 1) {
+  let knownOnlyPages = 0;
+  let newPages = 0;
+  for (let index = 0; index < MAX_BOARD_TRAVERSE_PAGES_PER_GENRE; index += 1) {
+    if (!findBoardTable(page.doc, false) && !isEmptyNoticePage(page.doc)) {
+      throw new Error(`${genre}の掲示一覧を確認できませんでした。`);
+    }
     const pageNotices = parseNotices(page.doc, page.url);
     notices.push(...pageNotices);
+    const onlyKnown = pageNotices.length > 0 &&
+      pageNotices.every((notice) => knownKeys.has(noticeKey(notice)));
+    knownOnlyPages = onlyKnown ? knownOnlyPages + 1 : 0;
+    if (!onlyKnown) newPages += 1;
     const next = [...page.doc.querySelectorAll("a")].find(
       (item) => normalize(item.textContent) === "次へ >>",
     );
-    if (!next || index === MAX_BOARD_PAGES_PER_GENRE - 1) break;
+    if (!next || (stopAtKnown && knownOnlyPages >= 2)) {
+      return { notices, complete: true };
+    }
+    if (newPages >= MAX_BOARD_PAGES_PER_GENRE) {
+      return { notices, complete: false };
+    }
     const nextUrl = new URL(next.getAttribute("href") || "", page.url).href;
-    if (visited.has(nextUrl)) break;
+    if (visited.has(nextUrl)) return { notices, complete: false };
     visited.add(nextUrl);
     await pause(BOARD_REQUEST_GAP_MS);
     requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
     page = await fetchHtml(nextUrl);
   }
-  return notices;
+  return { notices, complete: false };
 }
 
 export async function refreshSnapshot(
@@ -1025,28 +1087,75 @@ export async function refreshSnapshot(
     if (new URL(root.url).origin !== "https://koan.osaka-u.ac.jp") {
       throw new Error("KOANにログインしてから更新してください。");
     }
+    requireBoardRoot(root.doc);
     localStorage.setItem(SNAPSHOT_ATTEMPT_KEY, String(Date.now()));
     const syncAt = new Date().toISOString();
     const snapshotGenreSyncAt = { ...(previous.snapshotGenreSyncAt || {}) };
+    const snapshotGenreVersions = { ...(previous.snapshotGenreVersions || {}) };
+    const warnings: string[] = [];
+    let complete = true;
     for (const [index, genre] of GENRES.entries()) {
       onProgress?.(`${index + 1}/${GENRES.length} ${genre}`);
-      notices.push(...(await fetchGenre(root, genre, deadline)));
-      snapshotGenreSyncAt[genre] = syncAt;
+      const canResume =
+        previous.snapshotVersion === NOTICE_SNAPSHOT_VERSION ||
+        previous.snapshotComplete === false;
+      const genreCompleteForCurrentVersion =
+        (previous.snapshotVersion === NOTICE_SNAPSHOT_VERSION &&
+          previous.snapshotComplete !== false) ||
+        snapshotGenreVersions[genre] === NOTICE_SNAPSHOT_VERSION;
+      const knownKeys = new Set(
+        (canResume ? previous.notices : [])
+          .filter((notice) => notice.genre === genre)
+          .map(noticeKey),
+      );
+      let genreResult: Awaited<ReturnType<typeof fetchGenre>>;
+      try {
+        genreResult = await fetchGenre(
+          root,
+          genre,
+          deadline,
+          knownKeys,
+          genreCompleteForCurrentVersion,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("3分で中断")) throw error;
+        complete = false;
+        warnings.push(`${genre}: 制限時間に達したため次回へ継続します`);
+        break;
+      }
+      notices.push(...genreResult.notices);
+      if (genreResult.complete) {
+        snapshotGenreSyncAt[genre] = syncAt;
+        snapshotGenreVersions[genre] = NOTICE_SNAPSHOT_VERSION;
+      } else {
+        complete = false;
+        warnings.push(`${genre}: ${MAX_BOARD_PAGES_PER_GENRE}ページで中断しました`);
+      }
       await pause(BOARD_REQUEST_GAP_MS);
-      requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
+      if (Date.now() >= deadline) {
+        complete = false;
+        warnings.push("制限時間に達したため次回へ継続します");
+        break;
+      }
     }
-    localStorage.setItem(SNAPSHOT_COMPLETED_KEY, String(Date.now()));
+    if (complete) {
+      localStorage.setItem(SNAPSHOT_COMPLETED_KEY, String(Date.now()));
+    }
     onProgress?.("");
     const result = {
       notices: mergeNotices(notices),
-      snapshotUpdatedAt: syncAt,
-      snapshotVersion: NOTICE_SNAPSHOT_VERSION,
+      snapshotUpdatedAt: complete ? syncAt : previous.snapshotUpdatedAt,
+      snapshotVersion: complete ? NOTICE_SNAPSHOT_VERSION : previous.snapshotVersion,
       snapshotGenreSyncAt,
+      snapshotGenreVersions,
+      snapshotComplete: complete,
+      warnings,
     };
     localStorage.removeItem(SNAPSHOT_FAILURE_KEY);
     return result;
   } catch (error) {
-    recordFailure(SNAPSHOT_FAILURE_KEY);
+    recordFailure(SNAPSHOT_FAILURE_KEY, 10 * 60 * 1000);
     throw error;
   } finally {
     release();
@@ -1296,8 +1405,14 @@ export async function refreshGrades(
   // KOAN stores these old Web Flow screens in a shared session. Keep them sequential.
   onProgress?.("履修成績を取得中");
   const gradeHistory = await submitFullRangeFlow(GRADE_HISTORY_URL, tabId);
+  if (!findTable(gradeHistory.doc, ["時間割コード", "開講科目名", "教員氏名", "評語", "合否"])) {
+    throw new Error("履修成績の表を確認できませんでした。以前の成績データを保持します。");
+  }
   onProgress?.("単位修得状況を取得中");
   const creditStatus = await submitFullRangeFlow(CREDIT_STATUS_URL, gradeHistory.tabId);
+  if (!findTable(creditStatus.doc, ["科目詳細区分", "科目小区分", "科目名", "単位数", "合否"])) {
+    throw new Error("単位修得状況の表を確認できませんでした。以前の成績データを保持します。");
+  }
   const courses = parseCreditCourses(creditStatus.doc).filter(isEarnedCredit);
   return {
     creditsTotal: parseCreditsTotal(creditStatus.doc),

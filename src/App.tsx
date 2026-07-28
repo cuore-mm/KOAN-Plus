@@ -192,8 +192,53 @@ function Modal({
 
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    dialogRef.current?.focus();
-    return () => previous?.focus?.();
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    const focusableElements = () =>
+      [...dialog.querySelectorAll<HTMLElement>(
+        [
+          "a[href]",
+          "button:not([disabled])",
+          "input:not([disabled])",
+          "select:not([disabled])",
+          "textarea:not([disabled])",
+          '[tabindex]:not([tabindex="-1"])',
+        ].join(","),
+      )].filter((element) =>
+        element.getClientRects().length > 0 &&
+        element.getAttribute("aria-hidden") !== "true",
+      );
+
+    const initialFocus = focusableElements()[0] || dialog;
+    initialFocus.focus();
+
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const focusable = focusableElements();
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    dialog.addEventListener("keydown", trapFocus);
+    return () => {
+      dialog.removeEventListener("keydown", trapFocus);
+      if (previous?.isConnected) previous.focus();
+    };
   }, []);
 
   useEscapeKey(onDismiss);
@@ -260,7 +305,6 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [authChecking, setAuthChecking] = useState(false);
   const [showManualLoginModal, setShowManualLoginModal] = useState(false);
   const [pendingAction, setPendingAction] = useState<"dashboard" | "grades" | null>(null);
-  const [refreshBlockedUntil, setRefreshBlockedUntil] = useState(0);
   const [authSettings, setAuthSettings] = useState<AuthSettings | null>(null);
   const [freshnessClock, setFreshnessClock] = useState(Date.now());
   const [selectedAnnouncement, setSelectedAnnouncement] = useState<CleAnnouncement | null>(null);
@@ -287,13 +331,13 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     return () => window.removeEventListener("focus", refreshAuthSettings);
   }, []);
 
-  const updateKoan = async (force = false) => {
+  const updateKoan = async (force = false): Promise<KoanData | null> => {
     setLoading(true);
     setStatus("ログイン状態を確認しています");
     try {
       if (!force && isKoanCacheFresh(data)) {
         setStatus(`キャッシュ表示中 / 更新 ${fmtTime(data.lightUpdatedAt)}`);
-        return true;
+        return data;
       }
       const auth = await ensureKoanLogin();
       if (auth.loginStarted) setStatus("自動ログイン完了 / データを取得しています");
@@ -306,22 +350,30 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
           if (value) setStatus(value);
         },
       });
+      const refreshedData = { ...data, ...result };
       setData((current) => {
         const next = { ...current, ...result };
         saveCache(next);
         return next;
       });
-      setStatus("更新しました");
-      return true;
+      setStatus(
+        result.warnings?.length
+          ? `一部を以前のデータで表示しています: ${result.warnings.join(" / ")}`
+          : "更新しました",
+      );
+      return refreshedData;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
-      return false;
+      return null;
     } finally {
       setLoading(false);
     }
   };
 
-  const updateCle = async (force = false) => {
+  const updateCle = async (
+    force = false,
+    activeCoursesTask: Promise<CourseRegistration[]> = Promise.resolve(data.courses),
+  ) => {
     setCleLoading(true);
     setCleStatus("ログイン状態を確認しています");
     try {
@@ -329,7 +381,10 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
         return true;
       }
-      const auth = await ensureCleLogin();
+      const [auth, activeCourses] = await Promise.all([
+        ensureCleLogin(),
+        activeCoursesTask,
+      ]);
       if (auth.loginStarted) setCleStatus("自動ログイン完了 / データを取得しています");
       else setCleStatus("データを取得しています");
       let next;
@@ -337,7 +392,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         next = await refreshCle(cleData, auth.tabId, (value) => {
           if (value) setCleStatus(value);
         }, force, {
-          activeCourses: data.courses.map((course) => ({
+          activeCourses: activeCourses.map((course) => ({
             code: course.code,
             title: course.title,
             year: course.year,
@@ -353,7 +408,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         next = await refreshCle(cleData, refreshedAuth.tabId, (value) => {
           if (value) setCleStatus(value);
         }, force, {
-          activeCourses: data.courses.map((course) => ({
+          activeCourses: activeCourses.map((course) => ({
             code: course.code,
             title: course.title,
             year: course.year,
@@ -364,7 +419,11 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       }
       setCleData(next);
       saveCleCache(next);
-      setCleStatus("更新しました");
+      setCleStatus(
+        next.warnings?.length
+          ? `一部未取得です: ${next.warnings.join(" / ")}`
+          : "更新しました",
+      );
       return true;
     } catch (error) {
       setCleStatus(error instanceof Error ? error.message : String(error));
@@ -374,7 +433,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     }
   };
 
-  const openMaterials = async (course: CourseSummary) => {
+  const openMaterials = async (course: CourseSummary, force = false) => {
     if (!course.cleCourse) return;
     setMaterialCourse(course);
     setMaterialList(null);
@@ -383,8 +442,11 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     setMaterialLoading(true);
     try {
       const auth = await ensureCleLogin();
-      const result = await fetchCourseMaterials(course.cleCourse.courseId, auth.tabId);
+      const result = await fetchCourseMaterials(course.cleCourse.courseId, auth.tabId, force);
       setMaterialList(result);
+      if (result.complete === false) {
+        setMaterialError(result.warnings?.join(" / ") || "資料一覧の一部を取得できませんでした。");
+      }
     } catch (error) {
       setMaterialError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -452,7 +514,6 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     updateLock.current = true;
     try {
       const claim = await claimDashboardRefresh();
-      setRefreshBlockedUntil(Date.now() + claim.retryAfterMs);
       if (!claim.allowed) {
         setStatus("更新の再試行は1分後にできます");
         setCleStatus("更新の再試行は1分後にできます");
@@ -460,14 +521,21 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       }
       if (sequential) {
         setCleStatus("KOANログイン完了後に更新します");
-        const koanUpdated = await updateKoan(force);
-        if (!koanUpdated) {
+        const refreshedKoan = await updateKoan(force);
+        if (!refreshedKoan) {
           setCleStatus("KOANログインが完了しなかったため、CLE更新を中止しました");
           return;
         }
-        await updateCle(force);
+        await updateCle(force, Promise.resolve(refreshedKoan.courses));
       } else {
-        await Promise.all([updateKoan(force), updateCle(force)]);
+        const koanTask = updateKoan(force);
+        const activeCoursesTask = koanTask.then(
+          (refreshedKoan) => refreshedKoan?.courses || data.courses,
+        );
+        await Promise.all([
+          koanTask,
+          updateCle(force, activeCoursesTask),
+        ]);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -564,7 +632,11 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         saveCache(next);
         return next;
       });
-      setSnapshotStatus("更新しました");
+      setSnapshotStatus(
+        snapshot.snapshotComplete === false
+          ? `一部未取得です: ${snapshot.warnings?.join(" / ") || "次回の同期で続きを取得します"}`
+          : "更新しました",
+      );
     } catch (error) {
       setSnapshotStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -674,10 +746,20 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     });
   };
 
-  const updateTimes = [data.lightUpdatedAt, cleData.updatedAt]
-    .filter((value): value is string => Boolean(value))
-    .sort();
-  const latestUpdatedAt = updateTimes[updateTimes.length - 1] || null;
+  const updateTimes = [
+    data.scheduleUpdatedAt,
+    data.futureScheduleUpdatedAt,
+    data.coursesUpdatedAt,
+    data.changesUpdatedAt,
+    data.noticesUpdatedAt,
+    cleData.coursesUpdatedAt,
+    cleData.tasksUpdatedAt,
+    cleData.messagesUpdatedAt,
+    cleData.taskStatusesUpdatedAt,
+  ];
+  const latestUpdatedAt = updateTimes.every(Boolean)
+    ? (updateTimes as string[]).sort()[0]
+    : null;
   const viewTitle = {
     dashboard: "ホーム",
     courses: "授業",
@@ -695,8 +777,6 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const showUpdateError = hasKoanError || hasCleError;
   const snapshotError = !isBenign(snapshotStatus) && !snapshotLoading;
 
-  const cacheFresh = isKoanCacheFresh(data) && isCleCacheFresh(cleData);
-  const refreshCoolingDown = refreshBlockedUntil > Date.now();
   const autoLoginActive = Boolean(authSettings?.configured && authSettings.enabled);
 
   // One vocabulary for the update control on every page: the button always says
@@ -727,9 +807,9 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         ? gradesStatus
         : `最終更新 ${fmtTime(gradesData?.updatedAt ?? null)}`,
   } : {
-    // Fresh cache means a plain click would be a no-op, so force the refresh and
-    // let the 60s claim decide - the user asked for new data, not for a shrug.
-    action: () => runUpdate(cacheFresh || refreshCoolingDown),
+    // An explicit click requests fresh data. The serialized 60-second claim still
+    // protects KOAN and CLE from repeated or cross-tab requests.
+    action: () => runUpdate(true),
     busy: loading || cleLoading || authChecking,
     label: loading || cleLoading || authChecking ? "更新中…" : "更新",
     status: loading || cleLoading || authChecking
@@ -937,18 +1017,28 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
                 ? `${materialList.materials.length}件 / 取得 ${fmtTime(materialList.updatedAt)}`
                 : "授業を開いた時だけCLEへアクセスします"}
             </small>
-            <button
-              className="modal-btn primary"
-              disabled={
-                materialLoading ||
-                !materialList?.materials.length ||
-                Boolean(materialDownloadingId || materialBatchProgress)
-              }
-              onClick={() => void downloadAllMaterials()}
-              type="button"
-            >
-              {materialBatchProgress ? `一括取得中 ${materialBatchProgress}` : "すべてダウンロード"}
-            </button>
+            <div className="modal-actions">
+              <button
+                className="modal-btn cancel"
+                disabled={materialLoading || materialsBusy}
+                onClick={() => void openMaterials(materialCourse, true)}
+                type="button"
+              >
+                再取得
+              </button>
+              <button
+                className="modal-btn primary"
+                disabled={
+                  materialLoading ||
+                  !materialList?.materials.length ||
+                  Boolean(materialDownloadingId || materialBatchProgress)
+                }
+                onClick={() => void downloadAllMaterials()}
+                type="button"
+              >
+                {materialBatchProgress ? `一括取得中 ${materialBatchProgress}` : "すべてダウンロード"}
+              </button>
+            </div>
           </footer>
         </Modal>
       )}
@@ -1020,7 +1110,14 @@ function AuthenticatedLink({
   const [error, setError] = useState("");
   const handleClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
     onClick?.(event);
-    if (event.defaultPrevented || event.button !== 0) return;
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) return;
     event.preventDefault();
     setError("");
     void openAuthenticatedUrl(href).catch((cause) => {

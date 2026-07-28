@@ -1452,7 +1452,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
             }
           };
-          await Promise.all(Array.from({ length: Math.min(6, targetUrls.length) }, worker));
+          await Promise.all(Array.from({ length: Math.min(3, targetUrls.length) }, worker));
           return heads;
         },
         args: [urls],

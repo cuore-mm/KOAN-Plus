@@ -86,19 +86,23 @@ actions.
   Assignment status enrichment uses status-aware intervals because it costs
   additional per-assignment requests.
 - CLE assignment status enrichment prioritizes nearby unfinished assignments.
-  Graded items are not rechecked; submitted and expired items use longer
-  intervals.
+  Graded, submitted, and expired items are rechecked after seven days, six
+  hours, and 24 hours respectively. The cache is not marked complete while
+  assignment statuses remain unchecked.
 - CLE announcements are fetched progressively for currently enrolled courses.
   The selected and recently used courses are prioritized, with at most four
   courses fetched per refresh and a separate two-hour cache per course.
+  Remaining courses continue on later refreshes.
 - Bulletin snapshot sync runs only when the user presses **掲示を同期**. The
-  first run builds the snapshot; later runs stop paging per genre when a
-  previously known bulletin is reached.
+  first run builds the snapshot; later runs stop paging per genre after two
+  consecutive pages contain only previously known bulletins. Hitting a page
+  limit leaves the snapshot marked partial.
 - Bulletin bodies are not prefetched because opening a detail page may change
   unread state.
 - Expired cached data remains visible while refreshes run. Identical in-flight
   URL requests are shared, and repeated failures use per-target exponential
-  backoff.
+  backoff. Unexpected response shapes and incomplete pagination preserve the
+  previous cache and are reported as partial refreshes instead of empty data.
 - Grade data is fetched only when the user opens the grade tab and presses
   **成績を取得**.
 

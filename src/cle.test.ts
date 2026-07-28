@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  EMPTY_CLE_DATA,
+  fetchAllResults,
   gradebookColumnsToTasks,
+  isCleCacheFresh,
   resolveActiveCleCourses,
   resolveTaskStatus,
   resolveTaskStatusEvidence,
@@ -8,6 +11,90 @@ import {
   type CleCourse,
   type CleTask,
 } from "./cle";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("fetchAllResults", () => {
+  it("follows paging.nextPage instead of silently keeping the first page", async () => {
+    vi.stubGlobal("window", globalThis);
+    const sendMessage = vi.fn(async (message: any) => {
+      const offset = new URL(message.request.url).searchParams.get("offset");
+      const payload = offset === "2"
+        ? { results: [{ id: "third" }], paging: {} }
+        : {
+          results: [{ id: "first" }, { id: "second" }],
+          paging: { nextPage: "/learn/api/public/v1/example?offset=2&limit=2" },
+        };
+      return {
+        ok: true,
+        response: {
+          ok: true,
+          status: 200,
+          text: JSON.stringify(payload),
+        },
+      };
+    });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    const records = await fetchAllResults(
+      "https://www.cle.osaka-u.ac.jp/learn/api/public/v1/example?offset=0&limit=2",
+    );
+
+    expect(records.map((record) => record.id)).toEqual(["first", "second", "third"]);
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a successful response whose list shape is missing", async () => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn(async () => ({
+          ok: true,
+          response: {
+            ok: true,
+            status: 200,
+            text: JSON.stringify({ unexpected: [] }),
+          },
+        })),
+      },
+    });
+
+    await expect(fetchAllResults(
+      "https://www.cle.osaka-u.ac.jp/learn/api/public/v1/example?limit=100",
+      undefined,
+      "テスト一覧",
+    )).rejects.toThrow("応答形式");
+  });
+});
+
+describe("isCleCacheFresh", () => {
+  it("keeps a cache stale while announcement or task-status batches remain", () => {
+    const now = new Date().toISOString();
+    const base = {
+      ...EMPTY_CLE_DATA,
+      coursesUpdatedAt: now,
+      tasksUpdatedAt: now,
+      messagesUpdatedAt: now,
+      taskStatusesUpdatedAt: now,
+    };
+
+    expect(isCleCacheFresh({
+      ...base,
+      announcementsPendingCount: 1,
+    })).toBe(false);
+    expect(isCleCacheFresh({
+      ...base,
+      taskStatusPendingCount: 1,
+    })).toBe(false);
+    expect(isCleCacheFresh({
+      ...base,
+      announcementsPendingCount: 0,
+      taskStatusPendingCount: 0,
+    })).toBe(true);
+  });
+});
 
 describe("gradebookColumnsToTasks", () => {
   const course = {
@@ -126,6 +213,21 @@ describe("resolveActiveCleCourses", () => {
       ].map((course) =>
         course.courseId === "child" ? { ...course, available: false } : course,
       ),
+      [{ code: "123456", title: "情報社会基礎", year: "2026" }],
+    );
+
+    expect(resolved.map((course) => course.courseId)).toEqual(["parent"]);
+  });
+
+  it("keeps a same-year parent course even when it has no timetable code", () => {
+    const resolved = resolveActiveCleCourses(
+      [{
+        courseId: "parent",
+        displayId: "2026-01-PARENT-01",
+        timetableCode: "",
+        name: "情報社会基礎",
+        available: true,
+      }],
       [{ code: "123456", title: "情報社会基礎", year: "2026" }],
     );
 

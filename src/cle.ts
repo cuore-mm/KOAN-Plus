@@ -12,6 +12,8 @@ const MATERIALS_CACHE_KEY = "koan-plus-cle-materials-v14";
 const MATERIALS_CACHE_TTL_MS = 30 * 60 * 1000;
 const MATERIALS_PAGE_SIZE = 100;
 const MAX_MATERIAL_FOLDER_DEPTH = 8;
+const MAX_API_PAGES = 100;
+const MATERIAL_FETCH_CONCURRENCY = 3;
 const CLE_LEASE_KEY = "koan-plus-cle-refresh-lease-v1";
 const CLE_ATTEMPT_KEY = "koan-plus-cle-refresh-attempt-v1";
 const CLE_FAILURE_KEY = "koan-plus-cle-refresh-failure-v1";
@@ -96,6 +98,8 @@ export type CleMaterialList = {
   courseId: string;
   materials: CleMaterial[];
   updatedAt: string;
+  complete?: boolean;
+  warnings?: string[];
 };
 
 export type CleData = {
@@ -113,6 +117,9 @@ export type CleData = {
   taskStatusCursor?: number;
   announcementsUpdatedAt?: string | null;
   announcementCourses?: Record<string, CleAnnouncementCourseCache>;
+  announcementsPendingCount?: number;
+  taskStatusPendingCount?: number;
+  warnings?: string[];
 };
 
 export const EMPTY_CLE_DATA: CleData = {
@@ -130,6 +137,9 @@ export const EMPTY_CLE_DATA: CleData = {
   taskStatusCursor: 0,
   announcementsUpdatedAt: null,
   announcementCourses: {},
+  announcementsPendingCount: 0,
+  taskStatusPendingCount: 0,
+  warnings: [],
 };
 
 type CleTabResponse = {
@@ -213,7 +223,9 @@ export function isCleCacheFresh(data: CleData) {
     isFresh(clePartUpdatedAt(data, "coursesUpdatedAt"), CLE_COURSES_TTL_MS) &&
     isFresh(clePartUpdatedAt(data, "tasksUpdatedAt"), CLE_TASKS_TTL_MS) &&
     isFresh(clePartUpdatedAt(data, "messagesUpdatedAt"), CLE_MESSAGES_TTL_MS) &&
-    isFresh(clePartUpdatedAt(data, "taskStatusesUpdatedAt"), CLE_TASK_STATUSES_TTL_MS)
+    isFresh(clePartUpdatedAt(data, "taskStatusesUpdatedAt"), CLE_TASK_STATUSES_TTL_MS) &&
+    (data.taskStatusPendingCount || 0) === 0 &&
+    data.announcementsPendingCount === 0
   );
 }
 
@@ -303,6 +315,14 @@ function asBoolean(value: unknown) {
 function results(value: unknown) {
   const items = asRecord(value).results;
   return Array.isArray(items) ? items.map(asRecord) : [];
+}
+
+function requiredResults(value: unknown, label: string) {
+  const items = asRecord(value).results;
+  if (!Array.isArray(items)) {
+    throw new Error(`${label}の応答形式を確認できませんでした。以前のデータを保持します。`);
+  }
+  return items.map(asRecord);
 }
 
 function pagingNextUrl(value: unknown) {
@@ -437,7 +457,11 @@ function saveMaterialCache(cache: Record<string, CleMaterialList>) {
 }
 
 function isMaterialCacheFresh(value: CleMaterialList | undefined) {
-  return Boolean(value?.updatedAt && isFresh(value.updatedAt, MATERIALS_CACHE_TTL_MS));
+  return Boolean(
+    value?.complete !== false &&
+    value?.updatedAt &&
+    isFresh(value.updatedAt, MATERIALS_CACHE_TTL_MS),
+  );
 }
 
 function contentHandlerId(item: JsonRecord) {
@@ -599,28 +623,31 @@ function extractFileIdentifier(value: string) {
 async function fetchFileMetadataBatch(urls: string[], tabId?: number) {
   const metadataByUrl = new Map<string, { fileName: string; mimeType: string }>();
   if (!urls.length) return metadataByUrl;
-  try {
-    const result = await withTimeout(
-      chrome.runtime.sendMessage({
-        type: "cle-head-batch",
-        urls,
-        tabId,
-      }) as Promise<CleTabMessage>,
-      Math.max(REQUEST_TIMEOUT_MS, urls.length * 2000),
-    );
-    const heads = result?.ok && Array.isArray(result.heads) ? result.heads : [];
-    for (const head of heads) {
-      if (!head.ok) continue;
-      const id = extractFileIdentifier(head.url);
-      if (id) {
-        metadataByUrl.set(id, {
-          fileName: contentDispositionFileName(head.contentDisposition || ""),
-          mimeType: head.contentType || "",
-        });
+  for (let start = 0; start < urls.length; start += 100) {
+    const batch = urls.slice(start, start + 100);
+    try {
+      const result = await withTimeout(
+        chrome.runtime.sendMessage({
+          type: "cle-head-batch",
+          urls: batch,
+          tabId,
+        }) as Promise<CleTabMessage>,
+        Math.max(REQUEST_TIMEOUT_MS, batch.length * 4000),
+      );
+      const heads = result?.ok && Array.isArray(result.heads) ? result.heads : [];
+      for (const head of heads) {
+        if (!head.ok) continue;
+        const id = extractFileIdentifier(head.url);
+        if (id) {
+          metadataByUrl.set(id, {
+            fileName: contentDispositionFileName(head.contentDisposition || ""),
+            mimeType: head.contentType || "",
+          });
+        }
       }
+    } catch {
+      // Continue with the other batches and slower name resolution paths.
     }
-  } catch {
-    // Fall through to slower name resolution paths.
   }
   return metadataByUrl;
 }
@@ -646,20 +673,25 @@ async function fetchDocumentFileNames(
   tabId?: number,
 ) {
   if (!contentIds.length) return [];
-  try {
-    const result = await withTimeout(
-      chrome.runtime.sendMessage({
-        type: "cle-document-files",
-        courseId,
-        contentIds,
-        tabId,
-      }) as Promise<CleTabMessage>,
-      Math.max(REQUEST_TIMEOUT_MS, contentIds.length * 30 * 1000),
-    );
-    return result?.ok && Array.isArray(result.files) ? result.files : [];
-  } catch {
-    return [];
+  const files: Array<{ url: string; fileName: string; contentId?: string }> = [];
+  for (let start = 0; start < contentIds.length; start += 30) {
+    const batch = contentIds.slice(start, start + 30);
+    try {
+      const result = await withTimeout(
+        chrome.runtime.sendMessage({
+          type: "cle-document-files",
+          courseId,
+          contentIds: batch,
+          tabId,
+        }) as Promise<CleTabMessage>,
+        Math.max(REQUEST_TIMEOUT_MS, batch.length * 30 * 1000),
+      );
+      if (result?.ok && Array.isArray(result.files)) files.push(...result.files);
+    } catch {
+      // Keep names from successful batches; unresolved files receive fallback names.
+    }
   }
+  return files;
 }
 
 function normalizedFileUrl(value: string) {
@@ -857,24 +889,66 @@ function collectEmbeddedMaterials(
   return materials;
 }
 
-async function fetchAllResults(url: string, tabId?: number) {
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  task: (item: T) => Promise<R>,
+) {
+  const output = new Array<R>(items.length);
+  let index = 0;
+  async function worker() {
+    while (index < items.length) {
+      const current = index++;
+      output[current] = await task(items[current]);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker),
+  );
+  return output;
+}
+
+export async function fetchAllResults(url: string, tabId?: number, label = "CLE一覧") {
   const collected: JsonRecord[] = [];
   let nextUrl = url;
-  for (let page = 0; page < 20 && nextUrl; page += 1) {
+  const visited = new Set<string>();
+  let previousPageSignature = "";
+  for (let page = 0; page < MAX_API_PAGES && nextUrl; page += 1) {
+    if (visited.has(nextUrl)) {
+      throw new Error(`${label}のページングが循環しました。以前のデータを保持します。`);
+    }
+    visited.add(nextUrl);
     const response = await fetchJson(nextUrl, tabId);
-    const items = results(response);
+    const items = requiredResults(response, label);
+    const pageSignature = JSON.stringify(items);
+    if (page > 0 && items.length && pageSignature === previousPageSignature) {
+      throw new Error(`${label}が同じページを繰り返しました。以前のデータを保持します。`);
+    }
+    previousPageSignature = pageSignature;
     collected.push(...items);
     const next = pagingNextUrl(response);
+    const paging = asRecord(asRecord(response).paging);
     if (next) {
       nextUrl = next.startsWith("http") ? next : `${CLE_ORIGIN}${next}`;
-    } else if (items.length >= MATERIALS_PAGE_SIZE) {
+    } else if ("nextPage" in paging) {
+      nextUrl = "";
+    } else {
       const parsed = new URL(nextUrl);
+      const limit = Number.parseInt(
+        parsed.searchParams.get("limit") || String(MATERIALS_PAGE_SIZE),
+        10,
+      );
+      if (items.length < limit || items.length === 0) {
+        nextUrl = "";
+        continue;
+      }
       const offset = Number.parseInt(parsed.searchParams.get("offset") || "0", 10);
       parsed.searchParams.set("offset", String(offset + items.length));
       nextUrl = parsed.toString();
-    } else {
-      nextUrl = "";
     }
+  }
+  if (nextUrl) {
+    throw new Error(`${label}は${MAX_API_PAGES}ページを超えたため中断しました。以前のデータを保持します。`);
   }
   return collected;
 }
@@ -882,9 +956,9 @@ async function fetchAllResults(url: string, tabId?: number) {
 async function fetchContentChildren(courseId: string, contentId: string, tabId?: number) {
   const suffix = `/courses/${encodeURIComponent(courseId)}/contents/${encodeURIComponent(contentId)}/children?limit=${MATERIALS_PAGE_SIZE}`;
   try {
-    return await fetchAllResults(`${API_ORIGIN}/public/v1${suffix}`, tabId);
+    return await fetchAllResults(`${API_ORIGIN}/public/v1${suffix}`, tabId, "資料フォルダ");
   } catch {
-    return fetchAllResults(`${API_ORIGIN}/v1${suffix}`, tabId);
+    return fetchAllResults(`${API_ORIGIN}/v1${suffix}`, tabId, "資料フォルダ");
   }
 }
 
@@ -903,6 +977,7 @@ async function fetchContentAttachments(
   content: JsonRecord,
   folderPath: string[],
   tabId?: number,
+  warnings: string[] = [],
 ): Promise<CleMaterial[]> {
   const contentId = asString(content.id);
   if (!contentId || !contentMayHaveFiles(content)) return [];
@@ -919,6 +994,9 @@ async function fetchContentAttachments(
       attachmentsBase = `${API_ORIGIN}/v1`;
       attachments = await fetchAllResults(`${attachmentsBase}${attachmentsSuffix}?limit=${MATERIALS_PAGE_SIZE}`, tabId);
     } catch {
+      warnings.push(
+        `${materialFolderName(content) || contentId}: 添付資料を取得できませんでした`,
+      );
       attachments = [];
     }
   }
@@ -969,6 +1047,7 @@ async function fetchMaterialChildren(
   depth: number,
   tabId?: number,
   documents?: Map<string, CleDocumentStub>,
+  warnings: string[] = [],
 ) {
   if (!contentHasChildren(content)) return [];
   try {
@@ -979,8 +1058,14 @@ async function fetchMaterialChildren(
       depth + 1,
       tabId,
       documents,
+      warnings,
     );
-  } catch {
+  } catch (error) {
+    warnings.push(
+      `${materialFolderName(content) || asString(content.id)}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     return [];
   }
 }
@@ -992,13 +1077,18 @@ async function fetchMaterialFolder(
   depth: number,
   tabId?: number,
   documents?: Map<string, CleDocumentStub>,
+  warnings: string[] = [],
 ): Promise<CleMaterial[]> {
-  if (depth > MAX_MATERIAL_FOLDER_DEPTH) return [];
+  if (depth > MAX_MATERIAL_FOLDER_DEPTH) {
+    warnings.push(`資料フォルダが${MAX_MATERIAL_FOLDER_DEPTH}階層を超えたため省略しました`);
+    return [];
+  }
   const contents = parentContentId
     ? await fetchContentChildren(courseId, parentContentId, tabId)
     : await fetchAllResults(
       `${API_ORIGIN}/public/v1/courses/${encodeURIComponent(courseId)}/contents?limit=${MATERIALS_PAGE_SIZE}`,
       tabId,
+      "資料一覧",
     );
   if (documents && parentContentId) {
     for (const content of contents) {
@@ -1007,13 +1097,16 @@ async function fetchMaterialFolder(
       documents.set(contentId, { contentId, parentId: parentContentId });
     }
   }
-  const directMaterials = await Promise.all(
-    contents.map((content) => fetchContentAttachments(courseId, content, folderPath, tabId)),
+  const directMaterials = await mapWithConcurrency(
+    contents,
+    MATERIAL_FETCH_CONCURRENCY,
+    (content) => fetchContentAttachments(courseId, content, folderPath, tabId, warnings),
   );
-  const childMaterials = await Promise.all(
-    contents
-      .filter(contentHasChildren)
-      .map((content) => fetchMaterialChildren(courseId, content, folderPath, depth, tabId, documents)),
+  const childMaterials = await mapWithConcurrency(
+    contents.filter(contentHasChildren),
+    MATERIAL_FETCH_CONCURRENCY,
+    (content) =>
+      fetchMaterialChildren(courseId, content, folderPath, depth, tabId, documents, warnings),
   );
   return [...directMaterials, ...childMaterials].flat();
 }
@@ -1028,8 +1121,18 @@ export async function fetchCourseMaterials(
   const existing = materialRequests.get(courseId);
   if (existing) return existing;
   const documents = new Map<string, CleDocumentStub>();
-  const request = fetchMaterialFolder(courseId, null, [], 0, tabId, documents)
-    .then(async (materials) => {
+  const warnings: string[] = [];
+  const request = (async () => {
+    try {
+      const materials = await fetchMaterialFolder(
+        courseId,
+        null,
+        [],
+        0,
+        tabId,
+        documents,
+        warnings,
+      );
       const namedMaterials = await resolveMaterialNames(courseId, materials, tabId, documents);
       const uniqueByResource = new Map<string, CleMaterial>();
       namedMaterials.forEach((material) => {
@@ -1048,10 +1151,22 @@ export async function fetchCourseMaterials(
         courseId,
         materials: unique,
         updatedAt: new Date().toISOString(),
+        complete: warnings.length === 0,
+        warnings: [...new Set(warnings)],
       };
       saveMaterialCache({ ...cache, [courseId]: result });
       return result;
-    });
+    } catch (error) {
+      const cached = cache[courseId];
+      if (!cached) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ...cached,
+        complete: false,
+        warnings: [`最新の資料一覧を取得できませんでした: ${message}`],
+      };
+    }
+  })();
   materialRequests.set(courseId, request);
   try {
     return await request;
@@ -1309,6 +1424,7 @@ async function fetchGradebookTasks(courses: CleCourse[], tabId?: number) {
   const candidates = courses.filter((course) => course.available !== false);
   const tasks: CleTask[] = [];
   const successfulCourseIds = new Set<string>();
+  const failedCourseNames: string[] = [];
   let nextIndex = 0;
   const worker = async () => {
     while (nextIndex < candidates.length) {
@@ -1322,19 +1438,21 @@ async function fetchGradebookTasks(courses: CleCourse[], tabId?: number) {
         const columns = await fetchAllResults(
           `${API_ORIGIN}/public/v2/courses/${encodeURIComponent(course.courseId)}/gradebook/columns?${params}`,
           tabId,
+          `${course.name}の課題`,
         );
         tasks.push(...gradebookColumnsToTasks(course, columns));
         successfulCourseIds.add(course.courseId);
       } catch (error) {
         if (isCleAuthenticationError(error)) throw error;
         // Keep the previous cached items for a course when its gradebook is temporarily unavailable.
+        failedCourseNames.push(course.name);
       }
     }
   };
   await Promise.all(
     Array.from({ length: Math.min(4, candidates.length) }, worker),
   );
-  return { tasks, successfulCourseIds };
+  return { tasks, successfulCourseIds, failedCourseNames };
 }
 
 function compareTaskDueAt(left: CleTask, right: CleTask) {
@@ -1357,8 +1475,13 @@ async function fetchTasks(
     until,
     fields: "id,type,calendarId,calendarName,title,start,end,dynamicCalendarItemProps",
   });
+  params.set("limit", String(MATERIALS_PAGE_SIZE));
   const [calendarResult, gradebookResult] = await Promise.all([
-    fetchJson(`${API_ORIGIN}/public/v1/calendars/items?${params}`, tabId)
+    fetchAllResults(
+      `${API_ORIGIN}/public/v1/calendars/items?${params}`,
+      tabId,
+      "CLEカレンダー",
+    )
       .then((value) => ({ ok: true as const, value }))
       .catch((error) => {
         if (isCleAuthenticationError(error)) throw error;
@@ -1367,7 +1490,7 @@ async function fetchTasks(
     fetchGradebookTasks(courses, tabId),
   ]);
   const activeCourseIds = new Set(courses.map((course) => course.courseId));
-  const calendarTasks = results(calendarResult.value)
+  const calendarTasks = (calendarResult.value || [])
     .filter((item) => asString(item.type) === "GradebookColumn")
     .map((item): CleTask => ({
       id: asString(item.id),
@@ -1395,6 +1518,9 @@ async function fetchTasks(
     successful:
       calendarResult.ok ||
       gradebookResult.successfulCourseIds.size > 0,
+    warnings: gradebookResult.failedCourseNames.length
+      ? [`課題を取得できない科目が${gradebookResult.failedCourseNames.length}件あります`]
+      : [],
   };
 }
 
@@ -1506,6 +1632,10 @@ async function refreshTaskStatuses(
     nextCursor: selection.nextCursor,
     targetCount: selection.targets.length,
     verifiedCount,
+    pendingCount: Math.max(
+      0,
+      selection.candidateCount - verifiedCount,
+    ),
   };
 }
 
@@ -1517,7 +1647,7 @@ async function fetchMessages(tabId?: number) {
       `${API_ORIGIN}/v1/messages/summary?offset=${offset}&limit=${MESSAGE_PAGE_SIZE}`,
       tabId,
     );
-    const items = results(response);
+    const items = requiredResults(response, "CLEメッセージ");
     for (const item of items) {
       const courseId = asString(item.courseId);
       const unreadCount = asNumber(item.numUnreadMessages);
@@ -1529,21 +1659,24 @@ async function fetchMessages(tabId?: number) {
       });
     }
     const paging = asRecord(asRecord(response).paging);
-    if ("nextPage" in paging ? !asString(paging.nextPage) : items.length < MESSAGE_PAGE_SIZE) break;
+    if ("nextPage" in paging ? !asString(paging.nextPage) : items.length < MESSAGE_PAGE_SIZE) {
+      return [...messages.values()].sort(
+        (left, right) => right.unreadCount - left.unreadCount,
+      );
+    }
     if (!items.length) break;
     offset += items.length;
   }
-  return [...messages.values()].sort(
-    (left, right) => right.unreadCount - left.unreadCount,
-  );
+  throw new Error(`CLEメッセージは${MAX_MESSAGE_PAGES * MESSAGE_PAGE_SIZE}件を超えたため中断しました。`);
 }
 
 async function fetchCourses(tabId?: number) {
-  const response = await fetchJson(
+  const items = await fetchAllResults(
     `${API_ORIGIN}/public/v1/users/me/courses?limit=100&expand=course`,
     tabId,
+    "CLEコース",
   );
-  return results(response)
+  return items
     .map((item): CleCourse => {
       const course = asRecord(item.course);
       const courseId = asString(item.courseId) || asString(course.id);
@@ -1553,7 +1686,9 @@ async function fetchCourses(tabId?: number) {
         asString(item.courseId);
       const itemAvailability = asRecord(item.availability).available;
       const courseAvailability = course.availability ? asRecord(course.availability).available : undefined;
-      const isAvailable = isYes(itemAvailability) && (courseAvailability === undefined || isYes(courseAvailability));
+      const isAvailable =
+        (itemAvailability === undefined || isYes(itemAvailability)) &&
+        (courseAvailability === undefined || isYes(courseAvailability));
       return {
         courseId,
         displayId,
@@ -1562,16 +1697,17 @@ async function fetchCourses(tabId?: number) {
         available: isAvailable,
       };
     })
-    .filter((course) => course.courseId && course.timetableCode)
+    .filter((course) => course.courseId && course.name)
     .sort((left, right) => left.displayId.localeCompare(right.displayId));
 }
 
 async function fetchAnnouncements(course: CleCourse, tabId?: number): Promise<CleAnnouncement[]> {
-  const response = await fetchJson(
-    `${API_ORIGIN}/public/v1/courses/${encodeURIComponent(course.courseId)}/announcements`,
+  const items = await fetchAllResults(
+    `${API_ORIGIN}/public/v1/courses/${encodeURIComponent(course.courseId)}/announcements?limit=${MATERIALS_PAGE_SIZE}`,
     tabId,
+    `${course.name}の連絡事項`,
   );
-  return results(response).map((item): CleAnnouncement => ({
+  return items.map((item): CleAnnouncement => ({
     id: asString(item.id),
     courseId: asString(item.courseId) || course.courseId,
     courseName: course.name,
@@ -1651,7 +1787,10 @@ async function refreshAnnouncements(
   const updatedAt = latestTimestamp(
     courses.map((course) => cache[course.courseId]?.updatedAt),
   );
-  return { announcements, cache, updatedAt };
+  const pendingCount = courses.filter((course) =>
+    !isFresh(cache[course.courseId]?.updatedAt, CLE_ANNOUNCEMENTS_TTL_MS)
+  ).length;
+  return { announcements, cache, updatedAt, pendingCount };
 }
 
 export async function refreshCle(
@@ -1661,7 +1800,7 @@ export async function refreshCle(
   force = false,
   options: CleRefreshOptions = {},
 ): Promise<CleData> {
-  if (!options.bypassBackoff) requireRetryAvailable(CLE_FAILURE_KEY, "CLE更新");
+  if (!options.bypassBackoff && !force) requireRetryAvailable(CLE_FAILURE_KEY, "CLE更新");
   if (!force) {
     requireCooldown(CLE_ATTEMPT_KEY, 60 * 1000, "CLE更新の再試行は1分後にできます。");
   }
@@ -1670,6 +1809,7 @@ export async function refreshCle(
   try {
     onProgress?.("CLEキャッシュを確認中");
     const completed = new Set<string>();
+    const warnings: string[] = [];
     const markDone = (label: string) => {
       completed.add(label);
       onProgress?.(`${[...completed].join(" / ")} 取得済み`);
@@ -1688,11 +1828,12 @@ export async function refreshCle(
     const taskStatusesFresh = !force &&
       isFresh(clePartUpdatedAt(previous, "taskStatusesUpdatedAt"), CLE_TASK_STATUSES_TTL_MS);
     const activeCourses = options.activeCourses || [];
-    const coursesPromise = coursesFresh || !retryAvailable(CLE_COURSES_FAILURE_KEY)
+    const coursesPromise = coursesFresh || (!force && !retryAvailable(CLE_COURSES_FAILURE_KEY))
       ? Promise.resolve({
         courses: previous?.courses || [],
         updatedAt: clePartUpdatedAt(previous, "coursesUpdatedAt"),
       }).then((result) => {
+        if (!coursesFresh) warnings.push("コース: 再試行待機中のため以前のデータを使用");
         markDone("コースキャッシュ");
         return result;
       })
@@ -1705,6 +1846,7 @@ export async function refreshCle(
         .catch((error) => {
           if (isCleAuthenticationError(error)) throw error;
           recordFailure(CLE_COURSES_FAILURE_KEY);
+          warnings.push(`コース: ${error instanceof Error ? error.message : String(error)}`);
           markDone("コースキャッシュ");
           return {
             courses: previous?.courses || [],
@@ -1712,17 +1854,21 @@ export async function refreshCle(
           };
         });
     const [taskResult, messagesResult, coursesResult] = await Promise.all([
-      tasksFresh || !retryAvailable(CLE_TASKS_FAILURE_KEY)
+      tasksFresh || (!force && !retryAvailable(CLE_TASKS_FAILURE_KEY))
         ? Promise.resolve({
           tasks: previous?.tasks || [],
           updatedAt: clePartUpdatedAt(previous, "tasksUpdatedAt"),
         }).then((result) => {
+          if (!tasksFresh) warnings.push("課題: 再試行待機中のため以前のデータを使用");
           markDone("課題キャッシュ");
           return result;
         })
         : coursesPromise
           .then(({ courses }) => {
             const resolvedCourses = resolveActiveCleCourses(courses, activeCourses);
+            if (activeCourses.length && courses.length && !resolvedCourses.length) {
+              throw new Error("KOANの履修科目とCLEコースを対応付けできませんでした。");
+            }
             return fetchTasks(
               resolvedCourses,
               previous?.tasks || [],
@@ -1731,7 +1877,16 @@ export async function refreshCle(
             );
           })
           .then((result) => {
+            warnings.push(...result.warnings);
             if (result.successful) {
+              if (result.warnings.length) {
+                recordFailure(CLE_TASKS_FAILURE_KEY);
+                markDone("課題一部");
+                return {
+                  tasks: result.tasks,
+                  updatedAt: clePartUpdatedAt(previous, "tasksUpdatedAt"),
+                };
+              }
               localStorage.removeItem(CLE_TASKS_FAILURE_KEY);
               markDone("課題");
               return { tasks: result.tasks, updatedAt: now };
@@ -1746,17 +1901,19 @@ export async function refreshCle(
           .catch((error) => {
             if (isCleAuthenticationError(error)) throw error;
             recordFailure(CLE_TASKS_FAILURE_KEY);
+            warnings.push(`課題: ${error instanceof Error ? error.message : String(error)}`);
             markDone("課題キャッシュ");
             return {
               tasks: previous?.tasks || [],
               updatedAt: clePartUpdatedAt(previous, "tasksUpdatedAt"),
             };
           }),
-      messagesFresh || !retryAvailable(CLE_MESSAGES_FAILURE_KEY)
+      messagesFresh || (!force && !retryAvailable(CLE_MESSAGES_FAILURE_KEY))
         ? Promise.resolve({
           messages: previous?.messages || [],
           updatedAt: clePartUpdatedAt(previous, "messagesUpdatedAt"),
         }).then((result) => {
+          if (!messagesFresh) warnings.push("メッセージ: 再試行待機中のため以前のデータを使用");
           markDone("メッセージキャッシュ");
           return result;
         })
@@ -1767,6 +1924,7 @@ export async function refreshCle(
         }).catch((error) => {
           if (isCleAuthenticationError(error)) throw error;
           recordFailure(CLE_MESSAGES_FAILURE_KEY);
+          warnings.push(`メッセージ: ${error instanceof Error ? error.message : String(error)}`);
           markDone("メッセージキャッシュ");
           return {
             messages: previous?.messages || [],
@@ -1802,6 +1960,10 @@ export async function refreshCle(
     } else {
       markDone("状態キャッシュ");
     }
+    if (statusResult.pendingCount > 0) {
+      warnings.push(`課題状態: 残り${statusResult.pendingCount}件`);
+      taskStatusesUpdatedAt = clePartUpdatedAt(previous, "taskStatusesUpdatedAt");
+    }
 
     const recentCourseIds = new Set([
       ...tasks.map((task) => task.courseId),
@@ -1816,15 +1978,26 @@ export async function refreshCle(
         : recentCourseIds.has(course.courseId),
     );
     onProgress?.("連絡事項を取得中");
-    const announcementResult = await refreshAnnouncements(
-      announcementCourses,
-      previous?.announcementCourses || {},
-      recentCourseIds,
-      options.priorityCourseCode || "",
-      tabId,
-    );
+    const announcementResult =
+      activeCourses.length && courses.length && !resolvedActiveIds.size
+        ? {
+          announcements: previous?.announcements || [],
+          cache: previous?.announcementCourses || {},
+          updatedAt: clePartUpdatedAt(previous, "announcementsUpdatedAt"),
+          pendingCount: Math.max(1, activeCourses.length),
+        }
+        : await refreshAnnouncements(
+          announcementCourses,
+          previous?.announcementCourses || {},
+          recentCourseIds,
+          options.priorityCourseCode || "",
+          tabId,
+        );
     const announcements = announcementResult.announcements;
     const announcementsUpdatedAt = announcementResult.updatedAt;
+    if (announcementResult.pendingCount > 0) {
+      warnings.push(`連絡事項: 残り${announcementResult.pendingCount}科目`);
+    }
     markDone("連絡事項");
 
     onProgress?.("取得結果を整理中");
@@ -1846,6 +2019,9 @@ export async function refreshCle(
       taskStatusCursor: statusResult.nextCursor,
       announcementsUpdatedAt,
       announcementCourses: announcementResult.cache,
+      announcementsPendingCount: announcementResult.pendingCount,
+      taskStatusPendingCount: statusResult.pendingCount,
+      warnings,
     };
   } catch (error) {
     recordFailure(CLE_FAILURE_KEY);

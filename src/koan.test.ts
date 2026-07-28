@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeCourses, type CourseRegistration } from "./koan";
+import { mergeCourses, noticeKey, type CourseRegistration, type Notice } from "./koan";
 
 function course(
   code: string,
@@ -40,5 +40,24 @@ describe("mergeCourses", () => {
 
     expect(merged.isIntensive).toBe(false);
     expect(merged.period).toBe("月1");
+  });
+});
+
+describe("noticeKey", () => {
+  it("does not collapse notices when KOAN changes its query parameter names", () => {
+    const notice = (href: string): Notice => ({
+      title: href,
+      href,
+      genre: "授業",
+      priority: "",
+      unread: false,
+      department: "",
+      author: "",
+      period: "",
+      live: true,
+    });
+
+    expect(noticeKey(notice("https://koan.osaka-u.ac.jp/notice?id=1")))
+      .not.toBe(noticeKey(notice("https://koan.osaka-u.ac.jp/notice?id=2")));
   });
 });
