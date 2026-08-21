@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Firefox 用成果物を生成する
-システムは既存 Chrome build を維持しながら、Firefox 最新版と現行 ESR で読み込める Firefox 用成果物を生成できることを SHALL とする。
+システムは既存Chrome buildを維持しながら、Firefox Release最新版で読み込めるFirefox用成果物を生成できることをSHALLとする。
 
 #### Scenario: 既存 Chrome build を維持する
 - **WHEN** 開発者が `npm run build` を実行する
@@ -13,7 +13,7 @@
 
 #### Scenario: Firefox manifest を生成する
 - **WHEN** Firefox 用成果物が生成される
-- **THEN** 成果物の `manifest.json` は `background.scripts: ["background.js"]`、Gecko ID `koan-plus@cuore-mm`、`strict_min_version: "140.0"`、permissions `scripting` / `storage` / `tabs` / `downloads`、host permissions `https://koan.osaka-u.ac.jp/*` / `https://www.cle.osaka-u.ac.jp/*` / `https://ou-idp.auth.osaka-u.ac.jp/*` / `https://auth-mfa.auth.osaka-u.ac.jp/*` を含み、`background.service_worker` と `downloads.ui` を含まない
+- **THEN** 成果物の `manifest.json` は `background.scripts: ["background.js"]`、Gecko ID `koan-plus@cuore-mm`、permissions `scripting` / `storage` / `tabs` / `downloads`、host permissions `https://koan.osaka-u.ac.jp/*` / `https://www.cle.osaka-u.ac.jp/*` / `https://ou-idp.auth.osaka-u.ac.jp/*` / `https://auth-mfa.auth.osaka-u.ac.jp/*` を含み、`background.service_worker` と `downloads.ui` を含まない
 
 #### Scenario: manifest metadata を同期する
 - **WHEN** `package.json` の version または description が変更された後にChrome build、Firefox build、またはversion hookが実行される
@@ -39,15 +39,15 @@
 - **THEN** コマンドはerrorなしで終了する
 
 ### Requirement: Firefox サポート対象を限定する
-システムは Firefox 最新版と現行 Firefox ESR をサポート対象とし、最低サポートバージョンを Firefox ESR 140 とすることを SHALL とする。旧 ESR 専用の互換処理を追加しないことを MUST とする。
+システムはFirefox Release最新版をサポート対象とすることをSHALLとする。最新版より古いFirefox専用の互換処理を追加しないことをMUSTとする。
 
 #### Scenario: 対象Firefoxに既存APIが存在する
-- **WHEN** ESR 140以降が既存コードの `chrome.*`、`storage.session`、または `scripting.executeScript({ world: "MAIN" })` をサポートする
+- **WHEN** Firefox Release最新版が既存コードの `chrome.*`、`storage.session`、または `scripting.executeScript({ world: "MAIN" })` をサポートする
 - **THEN** システムはそのAPIのためだけの独自互換レイヤー、fallback、page bridgeを追加せず既存処理を利用する
 
-#### Scenario: 旧FirefoxだけでAPIが不足する
-- **WHEN** API不足がESR 140より古いFirefoxでのみ発生する
-- **THEN** システムは旧Firefox専用分岐を追加せずサポート対象外として扱う
+#### Scenario: 古いFirefoxだけでAPIが不足する
+- **WHEN** API不足がFirefox Release最新版より古いFirefoxでのみ発生する
+- **THEN** システムは古いFirefox専用分岐を追加せずサポート対象外として扱う
 
 ### Requirement: Firefox 拡張ページsenderを検証する
 システムはChromeとFirefoxの拡張ページidentity差異を考慮し、同一拡張機能からのmessageだけを許可することを MUST とする。

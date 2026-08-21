@@ -1,6 +1,6 @@
 ## 1. 対応範囲と必須差分の確定
 
-- [x] 1.1 Firefox 最新版と現行 ESR 140 が、既存コードで利用する `chrome.*` 互換 API、`storage.session`、`scripting.executeScript({ world: "MAIN" })` をサポートすることを確認する。
+- [x] 1.1 Firefox Release最新版が、既存コードで利用する `chrome.*` 互換API、`storage.session`、`scripting.executeScript({ world: "MAIN" })` をサポートすることを確認する。
 - [x] 1.2 Firefox 実機で拡張機能を一時ロードし、`background.service_worker` ではなく `background.scripts` が必要であることを確認する。
 - [x] 1.3 Firefox の `runtime.id` / `sender.id` は Gecko ID、`moz-extension:` URL host は内部 UUID になり得ることを確認し、sender検証に必要な差分を特定する。
 - [x] 1.4 自動ログインが既存content scriptと `world: "MAIN"` のままFirefoxで動作することを確認し、page bridge前提を撤回する。
@@ -10,7 +10,7 @@
 
 - [x] 2.1 [requires source inspection] `src/platform/browser.ts`、`runtime.ts`、`tabs.ts`、`index.ts` を削除し、それらのimportと利用に直接対応する `src/App.tsx` / `src/auth.ts` の変更だけを既存API呼び出しへ戻す。branchやcommit全体をrevertせず、Firefoxでも正確なユーザー向け表現と無関係な変更を保持する。
 - [x] 2.2 [requires source inspection] platform wrapperのためだけに追加した `src/vite-env.d.ts` の型定義を戻し、TypeScript buildに必要な既存型だけを残す。
-- [x] 2.3 [requires source inspection] `public/background.js` の `sessionFallback`、`hasSessionApi`、`sessionGet`、`sessionSet`、`sessionRemove` と、それらへの置換だけを戻し、ESR 140で利用可能な既存 `chrome.storage.session` 処理を復元する。sender検証修正と無関係な処理は保持する。
+- [x] 2.3 [requires source inspection] `public/background.js` の `sessionFallback`、`hasSessionApi`、`sessionGet`、`sessionSet`、`sessionRemove` と、それらへの置換だけを戻し、Firefox最新版で利用可能な既存 `chrome.storage.session` 処理を復元する。sender検証修正と無関係な処理は保持する。
 - [x] 2.4 Firefox対応前から存在した `downloads.setUiOptions` feature detectionは保持し、今回追加した説明だけの変更は差分から除く。
 - [x] 2.5 `detectBrowser()`、汎用 `promisify()`、その他Firefox対応に使われないhelperや型が残っていないことを確認する。
 
@@ -25,7 +25,7 @@
 
 ## 4. 必須Firefox差分の保持
 
-- [x] 4.1 Firefox manifestで `background.scripts: ["background.js"]`、`browser_specific_settings.gecko.id: "koan-plus@cuore-mm"`、`strict_min_version: "140.0"`、permissions `scripting` / `storage` / `tabs` / `downloads`、host permissions `https://koan.osaka-u.ac.jp/*` / `https://www.cle.osaka-u.ac.jp/*` / `https://ou-idp.auth.osaka-u.ac.jp/*` / `https://auth-mfa.auth.osaka-u.ac.jp/*` を使用し、`background.service_worker` と `downloads.ui` を含めない。
+- [x] 4.1 Firefox manifestで `background.scripts: ["background.js"]`、`browser_specific_settings.gecko.id: "koan-plus@cuore-mm"`、permissions `scripting` / `storage` / `tabs` / `downloads`、host permissions `https://koan.osaka-u.ac.jp/*` / `https://www.cle.osaka-u.ac.jp/*` / `https://ou-idp.auth.osaka-u.ac.jp/*` / `https://auth-mfa.auth.osaka-u.ac.jp/*` を使用し、`background.service_worker` と `downloads.ui` を含めない。
 - [x] 4.2 `isExtensionPageSender` で `chrome-extension:` と `moz-extension:` を許可し、`new URL(chrome.runtime.getURL("")).host` を使ってFirefox内部UUIDを検証する。
 - [ ] 4.3 任意実装の巻き戻し後も、オンボーディングの資格情報保存を含む拡張ページ限定messageがFirefoxで許可されることを確認する。sender ID欠落、URL欠落・parse不能、未対応protocol、ID不一致、host不一致は例外でbackground全体を停止させずfail closedで拒否されることを確認する。
 - [x] 4.4 production fileを変更せず `/tmp/opencode` 配下に非commit Node harnessを作り、Chrome sender正例、Firefox Gecko ID/内部UUID正例、ID欠落、URL欠落・parse不能、未対応protocol、ID不一致、host不一致を実行する。期待どおり許可・拒否され、拒否後も後続caseが実行されることを確認する。
@@ -41,8 +41,8 @@
 
 ## 6. Firefox実機確認
 
-- [ ] 6.1 Firefox最新版と現行ESR 140で `dist-firefox/manifest.json` を一時ロードし、manifest errorがないことを確認する。各環境についてFirefoxの完全なversion、OS、実施日、6.2〜6.6のpass/failをPR説明またはcommitされないverification memoへ記録する。
-- [ ] 6.2 両Firefoxでオンボーディングの「保存して利用開始」を実行し、資格情報保存後にダッシュボードへ進めることを確認する。
+- [ ] 6.1 Firefox最新版で `dist-firefox/manifest.json` を一時ロードし、manifest errorがないことを確認する。Firefoxの完全なversion、OS、実施日、6.2〜6.6のpass/failをPR説明またはcommitされないverification memoへ記録する。
+- [ ] 6.2 Firefox最新版でオンボーディングの「保存して利用開始」を実行し、資格情報保存後にダッシュボードへ進めることを確認する。
 - [ ] 6.3 保存済みデータ表示とKOAN/CLEデータ更新を確認する。
 - [ ] 6.4 未ログイン状態からID・パスワードの自動入力・送信が完了することを確認する。
 - [ ] 6.5 所有者が明示的に許可したtest accountと確認済み復旧手順を用意し、現在のMFA状態を確認してからTOTPコードの自動入力とMFA自動登録をそれぞれ確認する。実施後は意図したMFA状態へ復元する。資格情報、TOTP secret、cancel codeをcommit、PR、verification memo、console logへ残さない。安全なaccountまたは復旧手順を用意できない場合は実行せず、本changeをblockedとして扱う。
@@ -57,7 +57,7 @@
 
 ## 8. ドキュメントと最終確認
 
-- [x] 8.1 `docs/browser-support.md` にChrome/Firefox build、Firefox package、一時ロード、最低サポートESR 140、確認済み機能を記録する。
-- [x] 8.2 `docs/browser-support.md` の `world: "MAIN"` 分類とFirefox MVP制限の節に、Firefox 128以降対応済みでESR 140向けpage bridgeが不要であることを反映する。
+- [x] 8.1 `docs/browser-support.md` にChrome/Firefox build、Firefox package、一時ロード、Firefox最新版、確認済み機能を記録する。
+- [x] 8.2 `docs/browser-support.md` の `world: "MAIN"` 分類とFirefox MVP制限の節に、Firefox 128以降対応済みで最新版向けpage bridgeが不要であることを反映する。
 - [x] 8.3 `docs/browser-support.md` の自動ログイン、MFA、CLE資料ダウンロードを未対応・延期とする記述だけを、6章の実機確認結果に合わせて修正する。
 - [ ] 8.4 最終差分が本changeの必須対象だけで構成され、OpenSpec要件を満たすことを確認する。

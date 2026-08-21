@@ -1,6 +1,6 @@
 # ブラウザ対応
 
-KOAN Plus は Chrome MV3 に加えて、Firefox 最新版と Firefox ESR 140 以降をサポート対象とする。旧 ESR 専用の互換分岐は追加しない。
+KOAN Plus は Chrome MV3 に加えて、Firefox Releaseの最新版だけをサポート対象とする。最新版より古いFirefox専用の互換分岐は追加しない。
 
 ## サポート対象
 
@@ -8,7 +8,6 @@ KOAN Plus は Chrome MV3 に加えて、Firefox 最新版と Firefox ESR 140 以
 | --- | --- | --- |
 | Chrome / Chromium | 現行版 | 既存 MV3 build と機能を維持する |
 | Firefox Release | 最新版 | 実機確認では完全なversion、OS、実施日を記録する |
-| Firefox ESR | ESR 140以降 | manifestに `strict_min_version: "140.0"` を指定する |
 
 ## Build と package
 
@@ -47,14 +46,13 @@ Firefox manifestはChrome manifestと次の点が異なる。
 
 - `background.scripts: ["background.js"]` を使用する。
 - `browser_specific_settings.gecko.id` は `koan-plus@cuore-mm`。
-- `browser_specific_settings.gecko.strict_min_version` は `140.0`。
 - permissionsは `scripting`、`storage`、`tabs`、`downloads`。
 - Firefoxに存在しない `downloads.ui` permissionを含めない。
 - KOAN、CLE、OU IdP、MFAの既存HTTPS host permissionsを維持する。
 
 ## Firefox API対応方針
 
-Firefox ESR 140は、この拡張が利用する以下のAPI・実行形態をサポートする。
+Firefox最新版は、この拡張が利用する以下のAPI・実行形態をサポートする。
 
 - Firefoxの `chrome.*` 互換API。
 - `chrome.storage.session`。
@@ -66,7 +64,7 @@ Firefox ESR 140は、この拡張が利用する以下のAPI・実行形態を�
 
 ### `world: "MAIN"` を使う既存機能
 
-以下はFirefox ESR 140で既存処理をそのまま検証する。
+以下はFirefox最新版で既存処理をそのまま検証する。
 
 - CLE資料のDOM抽出とHEAD/GET確認。
 - CLE API ready probe。
@@ -105,7 +103,7 @@ IDやURLの欠落、parse不能URL、未対応protocol、IDまたはhost不一�
 - MFA自動登録。
 - CLE資料ダウンロード。
 
-2026-07-16までの開発中確認では、Firefox成果物の一時ロードと自動ログインの動作が報告されている。最終完了には、整理後の成果物をFirefox最新版とESR 140の両方で再確認し、完全なbrowser version、OS、実施日、各機能のpass/failを秘密情報なしで記録する必要がある。
+2026-07-16までの開発中確認では、Firefox成果物の一時ロードと自動ログインの動作が報告されている。最終完了には、整理後の成果物をFirefox最新版で再確認し、完全なbrowser version、OS、実施日、各機能のpass/failを秘密情報なしで記録する必要がある。
 
 MFA登録は、所有者が許可したtest accountと確認済みの復旧手順がある場合だけ実施する。資格情報、TOTP secret、cancel codeはcommit、PR、console log、verification memoへ記録しない。
 
