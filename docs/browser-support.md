@@ -103,7 +103,27 @@ IDやURLの欠落、parse不能URL、未対応protocol、IDまたはhost不一�
 - MFA自動登録。
 - CLE資料ダウンロード。
 
-2026-07-16までの開発中確認では、Firefox成果物の一時ロードと自動ログインの動作が報告されている。最終完了には、整理後の成果物をFirefox最新版で再確認し、完全なbrowser version、OS、実施日、各機能のpass/failを秘密情報なしで記録する必要がある。
+### 実機検証結果
+
+2026-08-25、Windowsで以下の環境を確認した。Firefox最新版とChromeの主要ワークフローはすべて問題なく完了した。
+
+| ブラウザ | version | build | 結果 |
+| --- | --- | --- | --- |
+| Firefox Release | 153.0.4 | — | pass |
+| Chrome | 151.0.7922.170 | 公式ビルド | pass |
+
+確認項目:
+
+- Firefox成果物の一時ロード。
+- オンボーディングと資格情報保存。
+- 保存済みデータ表示。
+- KOAN/CLEデータ更新。
+- ID・パスワードの自動入力と送信。
+- TOTPコードの自動入力。
+- MFA自動登録。
+- CLE資料ダウンロード。
+
+実機確認では資格情報、TOTP secret、cancel codeを記録していない。
 
 MFA登録は、所有者が許可したtest accountと確認済みの復旧手順がある場合だけ実施する。資格情報、TOTP secret、cancel codeはcommit、PR、console log、verification memoへ記録しない。
 
