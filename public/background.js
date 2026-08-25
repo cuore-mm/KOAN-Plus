@@ -79,11 +79,23 @@ function senderUrl(sender) {
   }
 }
 
+// ---- ブラウザ互換 helper ----
+
+/** 拡張ページ由来の sender かどうか (Chrome/Firefox 両対応) */
 function isExtensionPageSender(sender) {
   const url = senderUrl(sender);
-  return sender.id === chrome.runtime.id &&
-    url?.protocol === "chrome-extension:" &&
-    url.host === chrome.runtime.id;
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+  // Firefox では runtime.id (gecko.id) と拡張ページ URL の host (内部 UUID) が
+  // 一致しないため、chrome.runtime.getURL("") から実際の host を取得して比較する
+  if (!url?.host) return false;
+  let extensionHost;
+  try {
+    extensionHost = new URL(chrome.runtime.getURL("")).host;
+  } catch {
+    return false;
+  }
+  if (url.host !== extensionHost) return false;
+  return url.protocol === "chrome-extension:" || url.protocol === "moz-extension:";
 }
 
 function isIdpSender(sender) {

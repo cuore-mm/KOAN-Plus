@@ -9,10 +9,12 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/sync-manifest.mjs && tsc -b && vite build",
+    "build": "node scripts/sync-manifest.mjs && tsc -b && vite build && node -e \"import('node:fs/promises').then(fs=>fs.rm('dist/manifest.firefox.json',{force:true}))\"",
+    "build:firefox": "node scripts/sync-manifest.mjs && tsc -b && vite build --outDir dist-firefox && node scripts/prepare-firefox-build.mjs",
     "preview": "vite preview",
     "zip": "npm run build && node scripts/build-zip.mjs",
-    "version": "node scripts/sync-manifest.mjs && git add manifest.json public/manifest.json"
+    "zip:firefox": "npm run build:firefox && node scripts/build-zip.mjs dist-firefox koan-plus-firefox.zip",
+    "version": "node scripts/sync-manifest.mjs && git add manifest.json public/manifest.json public/manifest.firefox.json"
   },
   "dependencies": {
     "dompurify": "^3.4.8",

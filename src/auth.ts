@@ -20,7 +20,7 @@ type AuthResponse = AuthSettings & {
 
 async function sendAuthMessage(message: unknown): Promise<AuthResponse> {
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
-    throw new Error("自動ログイン設定はChrome拡張機能から開いてください。");
+    throw new Error("自動ログイン設定はブラウザ拡張機能から開いてください。");
   }
   const response = await chrome.runtime.sendMessage(message) as AuthResponse;
   if (!response.ok) throw new Error(response.error || "自動ログイン設定の更新に失敗しました。");
