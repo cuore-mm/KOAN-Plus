@@ -5,7 +5,7 @@ Firefoxの組み込みデータ同意とKOAN Plusの実際の外部送信を一�
 ## ADDED Requirements
 
 ### Requirement: Firefox用manifestでデータ型を宣言する
-システムはFirefox用manifestで最低Firefox versionを140.0とし、`authenticationInfo` と `technicalAndInteraction` をoptionalなデータ収集permissionとして宣言することをMUSTとする。optionalデータ型と `required: ["none"]` を併用してはならない。
+システムはFirefox用manifestで最低Firefox versionを140.0とし、必須のデータ収集がないことを示す `required: ["none"]` と、`authenticationInfo` および `technicalAndInteraction` をoptionalなデータ収集permissionとして宣言することをMUSTとする。`none` はrequired配列内の他のデータ型と併用してはならない。
 
 #### Scenario: Firefox成果物を生成する
 - **WHEN** 開発者がFirefox用buildを実行する

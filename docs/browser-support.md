@@ -45,7 +45,9 @@ npm run zip:firefox
 Firefox manifestはChrome manifestと次の点が異なる。
 
 - `background.scripts: ["background.js"]` を使用する。
-- `browser_specific_settings.gecko.id` は `koan-plus@cuore-mm`。
+- `browser_specific_settings.gecko.id` は `@koan-plus.haze-355`。
+- `browser_specific_settings.gecko.strict_min_version` は `140.0`。
+- `data_collection_permissions` は `required: ["none"]` とし、`authenticationInfo`、`technicalAndInteraction` をoptionalに宣言する。
 - permissionsは `scripting`、`storage`、`tabs`、`downloads`。
 - Firefoxに存在しない `downloads.ui` permissionを含めない。
 - KOAN、CLE、OU IdP、MFAの既存HTTPS host permissionsを維持する。
@@ -135,11 +137,11 @@ MFA登録は、所有者が許可したtest accountと確認済みの復旧手�
 npx web-ext lint --source-dir dist-firefox
 ```
 
-2026-07-16の検証結果はerrors 0、warnings 7。warningの内訳と判断は次のとおり。
+2026-08-26の検証結果はerrors 0、warnings 7。warningの内訳と判断は次のとおり。
 
 | warning | 件数 | 判断 |
 | --- | ---: | --- |
-| `MISSING_DATA_COLLECTION_PERMISSIONS` | 1 | AMO提出・署名は本changeの範囲外。ZIP生成と一時ロードを妨げないため現時点では許容し、AMO対応時に申告内容を決定する |
+| `KEY_FIREFOX_ANDROID_UNSUPPORTED_BY_MIN_VERSION` | 1 | `strict_min_version: 140.0` とデータ同意機能をFirefox for Androidへ適用する場合の注意。対象はFirefox Releaseデスクトップ最新版のみでAndroidをサポートしないため許容する |
 | `downloads.setUiOptions is not supported` | 3 | 呼び出しは既存のfeature detectionで保護され、FirefoxではUI抑制だけを省略してdownloadを継続するため許容する |
 | `UNSAFE_VAR_ASSIGNMENT` | 3 | Vite生成bundle内の既存コードに対する警告。Firefox対応で新規導入された処理ではなく、lint errorではないため本changeでは許容する |
 

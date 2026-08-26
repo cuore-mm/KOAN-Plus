@@ -79,6 +79,36 @@ function senderUrl(sender) {
   }
 }
 
+const AUTHENTICATION_PERMISSION_ERROR = "Firefoxで自動ログインまたはMFAを使用するには認証情報の利用許可が必要です。設定画面から再許可してください。";
+
+function isFirefoxDataConsentEnv() {
+  try {
+    return new URL(chrome.runtime.getURL("")).protocol === "moz-extension:";
+  } catch {
+    return false;
+  }
+}
+
+async function hasDataCollectionPermission(type) {
+  const firefox = isFirefoxDataConsentEnv();
+  if (typeof chrome.permissions?.getAll !== "function") return !firefox;
+  try {
+    const permissions = await chrome.permissions.getAll();
+    if (!Object.prototype.hasOwnProperty.call(permissions, "data_collection")) return !firefox;
+    return Array.isArray(permissions.data_collection) && permissions.data_collection.includes(type);
+  } catch {
+    return !firefox;
+  }
+}
+
+async function requireAuthenticationInfoPermission() {
+  if (!await hasDataCollectionPermission("authenticationInfo")) {
+    const error = new Error(AUTHENTICATION_PERMISSION_ERROR);
+    error.permissionRequired = true;
+    throw error;
+  }
+}
+
 // ---- ブラウザ互換 helper ----
 
 /** 拡張ページ由来の sender かどうか (Chrome/Firefox 両対応) */
@@ -626,6 +656,7 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
       tabId: tab?.id,
     };
   }
+  if (record?.enabled && record.payload) await requireAuthenticationInfoPermission();
   if (koanLoginTask) {
     const result = await koanLoginTask;
     if (!requireTab || result.tabId) return result;
@@ -772,6 +803,7 @@ async function ensureCleLogin(record, sender, force = false) {
     return { ok: true, loginStarted: false, tabId: tab.id };
   }
   if (!tab?.id) tab = await findCleTab();
+  if (record?.enabled && record.payload) await requireAuthenticationInfoPermission();
   if (cleLoginTask) return cleLoginTask;
 
   cleLoginTask = (async () => {
@@ -856,6 +888,7 @@ async function authResponse(message, sender) {
     if (!isMfaRegistrationSender(sender) || !Number.isInteger(sender.tab?.id)) {
       throw new Error("MFA登録画面以外からは登録情報を仮保存できません。");
     }
+    await requireAuthenticationInfoPermission();
     const { secret, temporaryCancelCode } = message;
     if (!secret || !temporaryCancelCode) {
       throw new Error("シークレットまたは一時解除コードが指定されていません。");
@@ -921,6 +954,7 @@ async function authResponse(message, sender) {
     if (!isMfaRegistrationSender(sender) || !Number.isInteger(sender.tab?.id)) {
       throw new Error("MFA登録画面以外からは登録を確定できません。");
     }
+    await requireAuthenticationInfoPermission();
     const savedPendingMfa = await readPendingMfa();
     if (!savedPendingMfa) {
       return { ok: false, error: "仮保存されたMFA情報がありません。" };
@@ -997,6 +1031,7 @@ async function authResponse(message, sender) {
     } else if (!isMfaRegistrationSender(sender)) {
       throw new Error("MFA登録画面以外からは自動取得タブを登録できません。");
     }
+    await requireAuthenticationInfoPermission();
     const tabId = requestedTabId || sender.tab?.id;
     if (tabId) {
       await addAutoCollectTabId(tabId);
@@ -1128,6 +1163,12 @@ async function authResponse(message, sender) {
       }
       return { ok: true, configured: false, enabled: false, autoSubmit: true, mfaEnabled: false, idHint: "" };
     }
+    const enablingAutoLogin = record?.enabled !== true;
+    const updatingSecrets = Boolean(values.id || values.password || values.totpSecret);
+    const enablingMfa = values.mfaEnabled === true && record?.mfaEnabled !== true;
+    if (enablingAutoLogin || updatingSecrets || enablingMfa) {
+      await requireAuthenticationInfoPermission();
+    }
     if (!values.id || !values.password) {
       if (!record?.payload) throw new Error("ID とパスワードを入力してください。");
     }
@@ -1184,6 +1225,7 @@ async function authResponse(message, sender) {
     if (!isIdpSender(sender) && !isCleLoginSender(sender)) {
       throw new Error("認証画面以外には自動ログイン状態を渡しません。");
     }
+    await requireAuthenticationInfoPermission();
     const settings = await readAuthSettings(record);
     return {
       ok: true,
@@ -1196,6 +1238,7 @@ async function authResponse(message, sender) {
     if (!isIdpSender(sender) && !isCleLoginSender(sender)) {
       throw new Error("認証画面以外には認証情報を渡しません。");
     }
+    await requireAuthenticationInfoPermission();
     if (!record?.enabled) return { ok: true };
     const credentials = await decryptCredentials(record);
     if (!credentials.id || !credentials.password) {
@@ -1206,6 +1249,7 @@ async function authResponse(message, sender) {
 
   if (message.type === "auth-submit-idp") {
     if (!isIdpSender(sender)) throw new Error("認証基盤以外ではログイン送信を実行しません。");
+    await requireAuthenticationInfoPermission();
     if (!sender.tab?.id) throw new Error("認証基盤のタブを特定できませんでした。");
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: sender.tab.id },
@@ -1239,6 +1283,7 @@ async function authResponse(message, sender) {
     if (!isMfaSender(sender) && !isIdpSender(sender)) {
       throw new Error("MFA認証画面以外には認証コードを渡しません。");
     }
+    await requireAuthenticationInfoPermission();
     if (!record?.enabled) return { ok: true };
     if (!record.mfaEnabled) {
       if (sender.tab?.id) {
@@ -1261,6 +1306,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(sendResponse)
       .catch((error) => sendResponse({
         ok: false,
+        permissionRequired: error?.permissionRequired === true,
         error: error instanceof Error ? error.message : String(error),
       }));
     return true;

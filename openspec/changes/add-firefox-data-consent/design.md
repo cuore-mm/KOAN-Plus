@@ -31,6 +31,9 @@ See `proposal.md` - Why. 現在のFirefox manifestはGecko IDを持つが、`dat
 
 ```json
 {
+  "required": [
+    "none"
+  ],
   "strict_min_version": "140.0",
   "data_collection_permissions": {
     "optional": [
@@ -41,7 +44,7 @@ See `proposal.md` - Why. 現在のFirefox manifestはGecko IDを持つが、`dat
 }
 ```
 
-`required: ["none"]` はoptional型と排他的であるため追加しない。Chrome用 `public/manifest.json` は変更しない。
+`required: ["none"]` は必須のデータ収集がないことを示すために追加し、optional型と併用する。`none` はrequired配列内の他のデータ型とは併用しない。Chrome用 `public/manifest.json` は変更しない。
 
 理由: 認証情報の利用は任意機能でありopt-inが必要である。User-Agentは技術情報であり、Firefoxのinstall/add-on settingsでoptional選択できる。Firefox 140未満をinstall不可にすることで、古いFirefox専用の独自同意fallbackを避ける。
 
@@ -53,7 +56,7 @@ See `proposal.md` - Why. 現在のFirefox manifestはGecko IDを持つが、`dat
 - `chrome.permissions.getAll()` を呼び、`data_collection` key有無とpermission配列を確認する。
 - Chromeのように `data_collection` keyがない環境は既存動作を許可する。
 - Firefoxで取得失敗、key欠落、対象permission未許可の場合は対象データを送信不可とする。
-- `requestAuthenticationInfoPermission()` は、既に許可済みなら即時成功し、未許可なら `permissions.request({ data_collection: ["authenticationInfo"] })` を実行する。
+- `requestAuthenticationInfoPermission()` はFirefoxのユーザー操作から `permissions.request({ data_collection: ["authenticationInfo"] })` を直接呼び、そのboolean結果を返す。既に許可済みの場合はFirefox APIがpromptなしで成功し、初回要求でもuser activationを失わない。送信直前の厳密な確認はbackground側helperが担う。
 
 `src/vite-env.d.ts` は `chrome.permissions.getAll()` / `request()` と `data_collection?: string[]` に必要な最小型だけを追加する。汎用WebExtensions型やpolyfillは追加しない。
 
@@ -138,7 +141,7 @@ Rollbackはmanifestの `data_collection_permissions` / `strict_min_version`、pe
 
 - `npm run build`、`npm run build:firefox`、`npm run zip:firefox` を実行する。
 - `npx web-ext lint --source-dir dist-firefox` でデータ収集permission未宣言warningが解消し、error 0であることを確認する。
-- 生成Firefox manifestにID、`strict_min_version: "140.0"`、optionalな2データ型があり、`required: ["none"]` がないことを確認する。
+- 生成Firefox manifestにID、`strict_min_version: "140.0"`、`required: ["none"]`、optionalな2データ型があり、required配列に `none` 以外がないことを確認する。
 - Firefoxで `authenticationInfo` の許可、拒否、取消、再許可を確認する。
 - Firefoxで未許可時にID/password/TOTP/MFA secretが認証ページへ渡らず、削除・無効化は実行できることを確認する。
 - Firefoxで `technicalAndInteraction` のon/offそれぞれについて、お問い合わせURLにversionがあり、User-Agent parameterが許可時だけ存在することを確認する。

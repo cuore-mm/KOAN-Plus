@@ -5,7 +5,7 @@ Firefox 140以降の組み込みデータ同意では、拡張機能がブラウ
 ## What Changes
 
 - Firefox用manifestに `strict_min_version: "140.0"` とoptionalな `authenticationInfo` / `technicalAndInteraction` を宣言する。
-- `required: ["none"]` はoptionalデータ型と併用しない。
+- `required: ["none"]` で必須のデータ収集がないことを示し、optionalなデータ型と併用する。
 - FirefoxでID・パスワードを保存して自動ログイン/MFAを有効化するユーザー操作時に、`permissions.request({ data_collection: ["authenticationInfo"] })` を実行する。
 - `authenticationInfo` が未許可または後から取り消された場合、backgroundはID・パスワード、TOTPコード、MFA登録情報を認証ページへ渡さず、明示的なエラーを返す。暗号化済みローカル資格情報は自動削除しない。
 - お問い合わせURLには拡張versionを常に付加する。User-Agentは `technicalAndInteraction` が許可されている場合だけ付加し、未許可時は該当query parameter自体を省略する。
@@ -23,7 +23,7 @@ Firefox 140以降の組み込みデータ同意では、拡張機能がブラウ
 
 ## Impact
 
-- 影響対象: `public/manifest.firefox.json`、`src/auth.ts`、`src/Onboarding.tsx`、`src/App.tsx`、`public/background.js`、`src/vite-env.d.ts`。
+- 影響対象: `public/manifest.firefox.json`、`src/auth.ts`、`src/Onboarding.tsx`、`src/App.tsx`、`public/background.js`、`public/auth-content.js`、`src/vite-env.d.ts`。
 - Firefox API: `chrome.permissions.getAll()`、`chrome.permissions.request()`。
 - 外部送信先: 大阪大学IdP/CLE/MFAサービス、ユーザー操作で開くGoogle Forms。
 - Chrome用manifestにはFirefox固有の `data_collection_permissions` を追加しない。
