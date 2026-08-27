@@ -906,6 +906,7 @@ function Sidebar({
   const handleContactClick = (event: MouseEvent<HTMLAnchorElement>) => {
     if (!firefox) return;
     event.preventDefault();
+    // permission確認後ではpopupが遮断され得るため、Firefoxのuser activation中に空タブを確保する。
     const contactWindow = window.open("about:blank", "_blank");
     if (contactWindow) contactWindow.opener = null;
     void hasDataCollectionPermission("technicalAndInteraction").then((includeUserAgent) => {

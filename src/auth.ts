@@ -42,6 +42,7 @@ export async function requestAuthenticationInfoPermission(): Promise<boolean> {
   if (!isFirefoxDataConsentEnv()) return true;
   if (typeof chrome.permissions?.request !== "function") return false;
   try {
+    // 事前確認をawaitするとuser activationを失う可能性があるため、Firefoxではrequestを最初に呼ぶ。
     return await chrome.permissions.request({ data_collection: ["authenticationInfo"] });
   } catch {
     return false;

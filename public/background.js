@@ -1163,6 +1163,7 @@ async function authResponse(message, sender) {
       }
       return { ok: true, configured: false, enabled: false, autoSubmit: true, mfaEnabled: false, idHint: "" };
     }
+    // permissionなしでも無効化できるよう、新規有効化またはsecret更新時だけ許可を要求する。
     const enablingAutoLogin = record?.enabled !== true;
     const updatingSecrets = Boolean(values.id || values.password || values.totpSecret);
     const enablingMfa = values.mfaEnabled === true && record?.mfaEnabled !== true;

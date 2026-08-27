@@ -64,6 +64,7 @@
     const form = loginSubmit.form || loginSubmit.closest("form");
     let submissionObserved = false;
     let permissionBlocked = false;
+    // Chromeの既存fallbackは維持する一方、Firefoxではbackgroundの同意確認を迂回する直接送信を許可しない。
     const firefoxDataConsent = isFirefoxDataConsentEnv();
     const markSubmitted = () => {
       submissionObserved = true;
@@ -251,6 +252,7 @@
           return response;
         })
         .catch(() => {
+          // Firefoxでは失敗後にこのフラグを残すと次ページで自動登録が再開するため、同意を確認できない場合は破棄する。
           if (isFirefoxDataConsentEnv()) {
             autoCollectPermissionBlocked = true;
             sessionStorage.removeItem("koan-plus-mfa-auto-collect");
