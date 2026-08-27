@@ -4,7 +4,17 @@
   "version": "1.3.0",
   "browser_specific_settings": {
     "gecko": {
-      "id": "@koan-plus.haze-355"
+      "id": "@koan-plus.haze-355",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ],
+        "optional": [
+          "authenticationInfo",
+          "technicalAndInteraction"
+        ]
+      }
     }
   },
   "icons": {
