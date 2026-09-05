@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import privacyDocument from "../PRIVACY.md?raw";
 import termsDocument from "../TERMS.md?raw";
 import { loadAuthSettings, saveAuthSettings } from "./auth";
-import ThemeToggle, { loadTheme } from "./ThemeToggle";
+import ThemeToggle, { loadTheme, saveTheme } from "./ThemeToggle";
 import { useEscapeKey } from "./useEscapeKey";
 
 type OnboardingProps = {
-  onComplete: (openSettings: boolean) => void;
+  onComplete: (openSettings: boolean) => boolean;
 };
 
 type Step = "welcome" | "credentials";
@@ -29,6 +29,8 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
   const [existingCredentials, setExistingCredentials] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState("");
+  const legalDialogRef = useRef<HTMLElement | null>(null);
+  const legalReturnFocus = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     void loadAuthSettings()
@@ -38,7 +40,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("koan-plus-theme", theme);
+    if (!saveTheme(theme)) {
+      setStatus("表示設定をこの端末に保存できませんでした。ライトテーマで続行します。");
+    }
   }, [theme]);
 
   const saveCredentials = async () => {
@@ -54,8 +58,8 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
         mfaConsent: false,
         mfaEnabled: false,
       });
+      if (!finish(false)) return;
       setPassword("");
-      onComplete(false);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -64,10 +68,56 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
   };
 
   const finish = (openSettings: boolean) => {
-    onComplete(openSettings);
+    if (!onComplete(openSettings)) {
+      setStatus("この端末に同意状態を保存できませんでした。ストレージを確認して再試行してください。");
+      return false;
+    }
+    return true;
   };
 
+  useEffect(() => {
+    if (!legalDocument) return;
+    const dialog = legalDialogRef.current;
+    if (!dialog) return;
+    const focusableElements = () => [...dialog.querySelectorAll<HTMLElement>(
+      "button:not([disabled]), a[href], [tabindex]:not([tabindex=\"-1\"])"
+    )].filter((element) => element.getClientRects().length > 0);
+    const focusable = focusableElements();
+    (focusable[0] || dialog).focus();
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const current = focusableElements();
+      if (!current.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = current[0];
+      const last = current[current.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    dialog.addEventListener("keydown", trapFocus);
+    return () => {
+      dialog.removeEventListener("keydown", trapFocus);
+      if (legalReturnFocus.current?.isConnected) legalReturnFocus.current.focus();
+      legalReturnFocus.current = null;
+    };
+  }, [legalDocument]);
+
   useEscapeKey(legalDocument ? () => setLegalDocument(null) : undefined);
+
+  const openLegalDocument = (value: LegalDocument) => {
+    legalReturnFocus.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setLegalDocument(value);
+  };
 
   const stepNumber = step === "welcome" ? 1 : 2;
   const privacyJapanese = privacyDocument.includes("## 日本語")
@@ -93,7 +143,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           <div className="onboarding-progress" aria-label={`全2ステップ中${stepNumber}ステップ目`}>
             {["利用規約", "ログイン設定"].map((label, index) => (
               <div className={stepNumber >= index + 1 ? "active" : ""} key={label}>
-                <span />
+                <span aria-current={stepNumber === index + 1 ? "step" : undefined} />
                 <small>{label}</small>
               </div>
             ))}
@@ -111,9 +161,11 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
               </div>
 
               <div className="onboarding-legal-links">
-                <button onClick={() => setLegalDocument("terms")} type="button">利用規約を読む</button>
-                <button onClick={() => setLegalDocument("privacy")} type="button">プライバシーポリシーを読む</button>
+                <button onClick={() => openLegalDocument("terms")} type="button">利用規約を読む</button>
+                <button onClick={() => openLegalDocument("privacy")} type="button">プライバシーポリシーを読む</button>
               </div>
+
+              {status && <p className="settings-status onboarding-status" role="alert">{status}</p>}
 
               <label className="onboarding-consent">
                 <input checked={accepted} onChange={(event) => setAccepted(event.target.checked)} type="checkbox" />
@@ -136,11 +188,17 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
           )}
 
           {step === "credentials" && (
-            <div className="settings-form-block">
+            <form
+              className="settings-form-block"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveCredentials();
+              }}
+            >
               <div className="section-heading compact">
                 <div>
                   <h2 id="onboarding-title">自動ログインを設定</h2>
-                  <p>個人IDとパスワードを保存すると、KOAN/CLEのログイン画面へ自動入力できます。設定は任意です。</p>
+                  <p>個人IDとパスワードを保存すると、KOAN/CLEへ自動ログインし、画面を開いている間は成績・掲示を含む学務情報を自動同期します。設定は任意です。</p>
                 </div>
               </div>
 
@@ -164,21 +222,29 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                 </div>
                 <div className="onboarding-actions-right">
                   <button className="subtle-action" disabled={saving} onClick={() => finish(false)} type="button">あとで設定</button>
-                  <button className="primary-action" disabled={saving || !id.trim() || !password} onClick={() => void saveCredentials()} type="button">
+                  <button className="primary-action" disabled={saving || !id.trim() || !password} type="submit">
                     {saving ? "保存中…" : "保存して利用開始"}
                   </button>
                 </div>
               </div>
-            </div>
+            </form>
           )}
         </div>
       </section>
 
       {legalDocument && (
         <div className="onboarding-modal-overlay" onMouseDown={() => setLegalDocument(null)}>
-          <section className="onboarding-legal-modal" aria-modal="true" role="dialog" onMouseDown={(event) => event.stopPropagation()}>
+          <section
+            aria-labelledby={`legal-${legalDocument}-title`}
+            aria-modal="true"
+            className="onboarding-legal-modal"
+            ref={legalDialogRef}
+            role="dialog"
+            tabIndex={-1}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
             <header>
-              <h2>{legalDocument === "terms" ? "利用規約" : "プライバシーポリシー"}</h2>
+              <h2 id={`legal-${legalDocument}-title`}>{legalDocument === "terms" ? "利用規約" : "プライバシーポリシー"}</h2>
               <button aria-label="閉じる" onClick={() => setLegalDocument(null)} type="button">閉じる</button>
             </header>
             <pre>{plainLegalText(legalDocument === "terms" ? termsDocument : privacyJapanese)}</pre>

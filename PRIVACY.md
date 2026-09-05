@@ -1,6 +1,6 @@
 # Privacy Policy / プライバシーポリシー
 
-Last updated / 最終更新日: 2026-06-12
+Last updated / 最終更新日: 2026-09-05
 
 ## English
 
@@ -16,8 +16,9 @@ operation, except for the optional Google Forms contact flow described below.
 
 KOAN Plus may process and store:
 
-- KOAN schedules, course registrations, class changes, bulletin metadata,
-  grades, credits, GPA data, and update timestamps;
+- KOAN schedules, course registrations, class changes, survey titles,
+  response states and periods, bulletin metadata, grades, credits, GPA data,
+  and update timestamps;
 - CLE course mappings, assignment titles, due dates, submission or grading
   status, unread message counts, course material file names and download
   URLs, and update timestamps;
@@ -47,6 +48,11 @@ domains:
 
 Requests use the user's existing browser session. Chrome manages the session
 cookies; KOAN Plus does not request the cookies permission.
+
+When auto-login is enabled, a visible, online dashboard automatically refreshes
+expired academic data, including grades and bulletin metadata. Cached results
+are reused across tabs. Hidden or offline dashboards start no automatic sync.
+Manual refresh remains available; disabling auto-login stops periodic sync.
 
 The sidebar's **Contact** link opens a Google Form at `docs.google.com`.
 Opening the link sends the KOAN Plus version and browser User-Agent to Google
@@ -99,8 +105,8 @@ KOAN Plus は、ユーザーがローカルにインストールする Chrome �
 
 KOAN Plus は、次のデータを処理・保存する場合があります。
 
-- KOANの時間割、履修科目、休講・教室変更、掲示メタデータ、成績、単位、GPA、
-  更新日時
+- KOANの時間割、履修科目、休講・教室変更、アンケート名・回答状態・実施期間、
+  掲示メタデータ、成績、単位、GPA、更新日時
 - CLEの科目対応、課題名、期限、提出・採点状態、未読メッセージ数、
   配布資料のファイル名・取得用URL、更新日時
 - 表示設定、更新制御用のタイムスタンプ
@@ -127,6 +133,11 @@ IndexedDB に保存されます。タブと更新の制御に使う一時情報�
 
 通信にはブラウザの既存セッションを利用します。セッションクッキーは Chrome が管理し、
 KOAN Plus は Cookie API の権限を要求しません。
+
+自動ログインが有効な場合、表示中かつオンラインのダッシュボードは、成績と掲示
+メタデータを含む保存期限切れの学務情報を自動同期します。取得結果はタブ間で
+再利用します。非表示・オフライン中は新しい自動同期を開始しません。手動更新も
+利用でき、自動ログインを停止すると定期的な自動同期も停止します。
 
 サイドバーの「お問い合わせ」は `docs.google.com` の Google Forms を開きます。
 リンクを開くと、KOAN Plus のバージョンとブラウザの User-Agent がフォームの

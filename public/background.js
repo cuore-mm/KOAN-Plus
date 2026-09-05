@@ -11,8 +11,10 @@ const KOAN_PORTAL_URL = "https://koan.osaka-u.ac.jp/campusweb/campusportal.do?pa
 const CLE_ORIGIN = "https://www.cle.osaka-u.ac.jp";
 const CLE_HOME_URL = `${CLE_ORIGIN}/ultra`;
 const CLE_PROBE_URL = `${CLE_ORIGIN}/learn/api/v1/messages/summary?offset=0&limit=1`;
+const MAX_CLE_RESPONSE_TEXT_LENGTH = 10 * 1024 * 1024;
 const MFA_REGISTRATION_PATH = "/AttributeRegistSite/MfaInfoServlet";
 const MFA_PENDING_TTL_MS = 10 * 60 * 1000;
+const MFA_AUTO_FLOW_TTL_MS = 2 * 60 * 1000;
 const EXTENSION_ONLY_AUTH_TYPES = new Set([
   "auth-check-login",
   "auth-claim-startup-refresh",
@@ -21,6 +23,7 @@ const EXTENSION_ONLY_AUTH_TYPES = new Set([
   "auth-get-secrets",
   "auth-focus-pending-mfa",
   "auth-mfa-registration-result",
+  "auth-mfa-cancel-auto-tab",
   "auth-delete",
   "auth-delete-mfa",
   "auth-save",
@@ -38,6 +41,8 @@ let pendingMfa = null;
 const PENDING_MFA_KEY = "authPendingMfa";
 const AUTO_COLLECT_TAB_IDS_KEY = "authAutoCollectTabIds";
 const MFA_AUTO_FLOW_KEY_PREFIX = "authMfaAutoFlow:";
+const MANUAL_FLOW_KEY_PREFIX = "authManualFlow:";
+const MANUAL_FLOW_TTL_MS = 5 * 60 * 1000;
 const STARTUP_REFRESH_CLAIMED_KEY = "startupRefreshClaimed";
 const DASHBOARD_REFRESH_ATTEMPT_KEY = "dashboardRefreshAttempt";
 const autoCollectTabIds = new Set();
@@ -45,10 +50,13 @@ let startupRefreshClaimTask = Promise.resolve();
 let dashboardRefreshClaimTask = Promise.resolve();
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  autoCollectTabIds.delete(tabId);
-  void persistAutoCollectTabIds();
+  // Reload the session-backed set first. The worker may have restarted since
+  // the tab was registered, so deleting from an empty in-memory Set would
+  // otherwise erase registrations for every other tab.
+  void removeAutoCollectTabId(tabId).catch(() => {});
+  void clearManualFlow(tabId).catch(() => {});
   void readMfaAutoFlow(tabId).then((flow) => {
-    if (flow && flow.status !== "saved") {
+    if (flow?.status === "pending") {
       return writeMfaAutoFlow(tabId, {
         status: "cancelled",
         error: "MFA登録が完了する前に画面が閉じられました。",
@@ -323,12 +331,124 @@ async function readMfaAutoFlow(tabId) {
   if (!chrome.storage?.session) return null;
   const key = mfaAutoFlowKey(tabId);
   const stored = await chrome.storage.session.get(key);
-  return stored[key] || null;
+  const flow = stored[key] || null;
+  const completedAt = Number(flow?.completedAt || 0);
+  if (
+    flow &&
+    (flow.status === "saved" || flow.status === "cancelled") &&
+    completedAt > 0 &&
+    Date.now() - completedAt > MFA_AUTO_FLOW_TTL_MS
+  ) {
+    await chrome.storage.session.remove(key);
+    return null;
+  }
+  return flow;
 }
 
 async function writeMfaAutoFlow(tabId, value) {
   if (!chrome.storage?.session) return;
   await chrome.storage.session.set({ [mfaAutoFlowKey(tabId)]: value });
+}
+
+async function cleanupExpiredMfaAutoFlows() {
+  if (!chrome.storage?.session) return;
+  const stored = await chrome.storage.session.get();
+  const now = Date.now();
+  const expiredKeys = Object.entries(stored)
+    .filter(([key, value]) => {
+      const flow = value && typeof value === "object" ? value : null;
+      const completedAt = Number(flow?.completedAt || 0);
+      return key.startsWith(MFA_AUTO_FLOW_KEY_PREFIX) &&
+        (flow?.status === "saved" || flow?.status === "cancelled") &&
+        completedAt > 0 &&
+        now - completedAt > MFA_AUTO_FLOW_TTL_MS;
+    })
+    .map(([key]) => key);
+  if (expiredKeys.length) await chrome.storage.session.remove(expiredKeys);
+}
+
+chrome.runtime.onStartup?.addListener(() => {
+  void Promise.all([
+    cleanupExpiredMfaAutoFlows(),
+    cleanupExpiredManualFlows(),
+  ]).catch(() => {});
+});
+
+function manualFlowKey(tabId) {
+  return `${MANUAL_FLOW_KEY_PREFIX}${tabId}`;
+}
+
+async function readManualFlow(tabId) {
+  const cached = manualFlows.get(tabId);
+  if (cached) {
+    const createdAt = Number(cached.createdAt || 0);
+    if (createdAt <= 0 || Date.now() - createdAt <= MANUAL_FLOW_TTL_MS) return cached;
+    manualFlows.delete(tabId);
+    if (chrome.storage?.session) {
+      await chrome.storage.session.remove(manualFlowKey(tabId)).catch(() => {});
+    }
+    return null;
+  }
+  if (!chrome.storage?.session) return null;
+  const key = manualFlowKey(tabId);
+  let stored;
+  try {
+    stored = await chrome.storage.session.get(key);
+  } catch {
+    return null;
+  }
+  const flow = stored[key] || null;
+  const createdAt = Number(flow?.createdAt || 0);
+  if (flow && createdAt > 0 && Date.now() - createdAt > MANUAL_FLOW_TTL_MS) {
+    await chrome.storage.session.remove(key).catch(() => {});
+    return null;
+  }
+  if (flow) manualFlows.set(tabId, flow);
+  return flow;
+}
+
+async function writeManualFlow(tabId, value) {
+  const flow = {
+    returnTabId: Number.isInteger(value?.returnTabId) ? value.returnTabId : null,
+    createdAt: Number.isFinite(value?.createdAt) ? value.createdAt : Date.now(),
+  };
+  manualFlows.set(tabId, flow);
+  if (chrome.storage?.session) {
+    try {
+      await chrome.storage.session.set({ [manualFlowKey(tabId)]: flow });
+    } catch {
+      // Keep the in-memory fallback; storage.session may be unavailable in a
+      // restricted profile or while the worker is shutting down.
+    }
+  }
+  return flow;
+}
+
+async function clearManualFlow(tabId) {
+  manualFlows.delete(tabId);
+  if (chrome.storage?.session) {
+    try {
+      await chrome.storage.session.remove(manualFlowKey(tabId));
+    } catch {
+      // The tab is already gone; an unavailable session store needs no retry.
+    }
+  }
+}
+
+async function cleanupExpiredManualFlows() {
+  if (!chrome.storage?.session) return;
+  const stored = await chrome.storage.session.get();
+  const now = Date.now();
+  const expiredKeys = Object.entries(stored)
+    .filter(([key, value]) => {
+      const flow = value && typeof value === "object" ? value : null;
+      const createdAt = Number(flow?.createdAt || 0);
+      return key.startsWith(MANUAL_FLOW_KEY_PREFIX) &&
+        createdAt > 0 &&
+        now - createdAt > MANUAL_FLOW_TTL_MS;
+    })
+    .map(([key]) => key);
+  if (expiredKeys.length) await chrome.storage.session.remove(expiredKeys);
 }
 
 async function beginMfaAutoFlow(tabId) {
@@ -381,6 +501,31 @@ async function clearPendingMfa() {
   if (chrome.storage?.session) {
     await chrome.storage.session.remove(PENDING_MFA_KEY);
   }
+}
+
+async function cancelMfaAutoTab(tabId) {
+  await removeAutoCollectTabId(tabId);
+
+  // Keep the cancellation result in session storage until the extension page
+  // asks for auth-mfa-registration-result. This survives a service-worker
+  // restart and prevents a user-initiated close from being reported as an
+  // ambiguous registration failure.
+  const currentFlow = await readMfaAutoFlow(tabId);
+  if (currentFlow?.status !== "saved") {
+    await writeMfaAutoFlow(tabId, {
+      status: "cancelled",
+      error: "MFA登録をキャンセルしました。",
+      completedAt: Date.now(),
+    });
+  }
+
+  const currentPendingMfa = await readPendingMfa();
+  if (currentPendingMfa?.tabId === tabId) await clearPendingMfa();
+
+  return {
+    ok: true,
+    status: currentFlow?.status === "saved" ? "saved" : "cancelled",
+  };
 }
 
 async function withTimeout(task, milliseconds) {
@@ -584,9 +729,9 @@ async function focusTab(tabId) {
 }
 
 async function returnToDashboard(flowTabId) {
-  const flow = manualFlows.get(flowTabId);
+  const flow = await readManualFlow(flowTabId);
   if (!flow) return;
-  manualFlows.delete(flowTabId);
+  await clearManualFlow(flowTabId);
   await focusTab(flow.returnTabId);
   await chrome.tabs.remove(flowTabId).catch(() => {});
 }
@@ -599,7 +744,7 @@ async function openLoginTab(url, record, sender, activeWhenManual = true) {
     active: manual ? activeWhenManual : false,
   });
   if ((manual || guideMfa) && tab.id) {
-    manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
+    await writeManualFlow(tab.id, { returnTabId: sender?.tab?.id });
   }
   return { manual, tab };
 }
@@ -635,11 +780,11 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
         const probe = await probeKoanLogin();
         if (probe.ok) {
           if (tab.id) {
-            const shouldReturn = manualFlows.has(tab.id);
+            const flow = await readManualFlow(tab.id);
+            const shouldReturn = Boolean(flow);
             if (requireTab) {
               if (shouldReturn) {
-                const flow = manualFlows.get(tab.id);
-                manualFlows.delete(tab.id);
+                await clearManualFlow(tab.id);
                 await focusTab(flow?.returnTabId);
               }
               await waitForTabComplete(tab.id);
@@ -662,7 +807,7 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
         ? "認証が完了していません。開いた認証画面でログインしてください。"
         : "KOANの自動ログインが完了しませんでした。開いた認証画面を確認してから、もう一度更新してください。");
     } finally {
-      if (tab.id) manualFlows.delete(tab.id);
+      if (tab.id) await clearManualFlow(tab.id);
       koanLoginTask = undefined;
     }
   })();
@@ -770,7 +915,9 @@ async function ensureCleLogin(record, sender, force = false) {
     if (!tab?.id) {
       ({ tab } = await openLoginTab(CLE_HOME_URL, record, sender));
     } else {
-      if (manual || guideMfa) manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
+      if (manual || guideMfa) {
+        await writeManualFlow(tab.id, { returnTabId: sender?.tab?.id });
+      }
       await chrome.tabs.update(tab.id, { url: CLE_HOME_URL, active: manual });
     }
     try {
@@ -781,9 +928,9 @@ async function ensureCleLogin(record, sender, force = false) {
           throw new Error("CLE認証画面が閉じられたため、更新を中止しました。");
         }
         if (tab.id && await cleApiReady(tab.id)) {
-          if (manualFlows.has(tab.id)) {
-            const flow = manualFlows.get(tab.id);
-            manualFlows.delete(tab.id);
+          const flow = await readManualFlow(tab.id);
+          if (flow) {
+            await clearManualFlow(tab.id);
             await focusTab(flow?.returnTabId);
           }
           return { ok: true, loginStarted: true, tabId: tab.id };
@@ -793,7 +940,7 @@ async function ensureCleLogin(record, sender, force = false) {
         ? "CLEの認証が完了していません。開いた認証画面でログインしてください。"
         : "CLEの自動再認証が完了しませんでした。CLEタブを確認してください。");
     } finally {
-      if (tab?.id) manualFlows.delete(tab.id);
+      if (tab?.id) await clearManualFlow(tab.id);
       cleLoginTask = undefined;
     }
   })();
@@ -1034,6 +1181,13 @@ async function authResponse(message, sender) {
       await beginMfaAutoFlow(tabId);
     }
     return { ok: true };
+  }
+
+  if (message.type === "auth-mfa-cancel-auto-tab") {
+    if (!Number.isInteger(message.tabId)) {
+      throw new Error("MFA登録タブを特定できませんでした。");
+    }
+    return cancelMfaAutoTab(message.tabId);
   }
 
   if (message.type === "auth-mfa-check-auto-tab") {
@@ -1563,7 +1717,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       world: "MAIN",
-      func: async (request, label) => {
+      func: async (request, label, maxResponseTextLength) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 15000);
         try {
@@ -1573,10 +1727,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ...request.options,
             signal: controller.signal,
           });
+
+          const declaredLength = Number(response.headers.get("content-length"));
+          if (Number.isFinite(declaredLength) && declaredLength > maxResponseTextLength) {
+            controller.abort();
+            throw new Error(`${label}の応答が大きすぎるため、取得を中止しました。`);
+          }
+
+          let text = "";
+          if (response.body) {
+            const reader = response.body.getReader?.();
+            if (!reader) {
+              controller.abort();
+              throw new Error(`${label}の応答ストリームを利用できません。`);
+            }
+            const chunks = [];
+            let totalBytes = 0;
+            try {
+              while (true) {
+                const part = await reader.read();
+                if (part.done) break;
+                const chunk = part.value instanceof Uint8Array
+                  ? part.value
+                  : new Uint8Array(part.value || 0);
+                totalBytes += chunk.byteLength;
+                if (totalBytes > maxResponseTextLength) {
+                  await reader.cancel().catch(() => {});
+                  controller.abort();
+                  throw new Error(`${label}の応答が大きすぎるため、取得を中止しました。`);
+                }
+                chunks.push(chunk);
+              }
+            } finally {
+              reader.releaseLock?.();
+            }
+            const bytes = new Uint8Array(totalBytes);
+            let offset = 0;
+            for (const chunk of chunks) {
+              bytes.set(chunk, offset);
+              offset += chunk.byteLength;
+            }
+            text = new TextDecoder().decode(bytes);
+          }
           return {
             ok: response.ok,
             status: response.status,
-            text: await response.text(),
+            text,
+            retryAfter: response.headers.get("retry-after") || "",
             contentDisposition: response.headers.get("content-disposition") || "",
             contentType: response.headers.get("content-type") || "",
             url: response.url,
@@ -1591,11 +1788,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           clearTimeout(timeout);
         }
       },
-      args: [message.request, target.label],
+      args: [message.request, target.label, MAX_CLE_RESPONSE_TEXT_LENGTH],
     });
     if (!execution.result) {
       throw new Error(`${target.label}タブから応答を取得できませんでした。`);
     }
+    const responseUrl = new URL(execution.result.url || requestUrl.href);
+    if (responseUrl.protocol !== "https:" || responseUrl.origin !== target.origin) {
+      throw new Error(`${target.label}以外へリダイレクトされたため、取得を中止しました。`);
+    }
+    execution.result.url = responseUrl.href;
     sendResponse({ ok: true, response: execution.result, tabId: tab.id });
   })().catch((error) => {
     sendResponse({

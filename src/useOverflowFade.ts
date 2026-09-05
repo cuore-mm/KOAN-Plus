@@ -25,9 +25,15 @@ export function useOverflowFade<T extends HTMLElement>() {
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     for (const child of node.children) observer.observe(child);
+    const mutations = new MutationObserver(() => {
+      for (const child of node.children) observer.observe(child);
+      measure();
+    });
+    mutations.observe(node, { childList: true });
     node.addEventListener("scroll", measure, { passive: true });
     return () => {
       observer.disconnect();
+      mutations.disconnect();
       node.removeEventListener("scroll", measure);
     };
   }, [measure]);

@@ -1,24 +1,91 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-// package.json を読み込む
-const pkg = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
-const { version, description } = pkg;
+// These fields intentionally differ because the root manifest is a development
+// loader while public/manifest.json is the installable production extension.
+// All other shared fields are checked after every sync so new manifest drift
+// fails the build instead of waiting for a release review to notice it.
+export const INTENTIONAL_MANIFEST_DIFFERENCE_PATHS = [
+  "description",
+  "icons",
+  "action.default_title",
+  "action.default_icon",
+  "background.service_worker",
+  "permissions",
+  "host_permissions",
+  "content_scripts",
+  "minimum_chrome_version",
+];
 
-// manifest.json (開発用) のバージョンを更新
-const devManifestPath = join(projectRoot, "manifest.json");
-const devManifest = JSON.parse(await readFile(devManifestPath, "utf8"));
-devManifest.version = version;
-await writeFile(devManifestPath, JSON.stringify(devManifest, null, 2) + "\n");
+function flatten(value, prefix = "", output = {}) {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    output[prefix || "<root>"] = value;
+    return output;
+  }
+  for (const key of Object.keys(value).sort()) {
+    flatten(value[key], prefix ? `${prefix}.${key}` : key, output);
+  }
+  return output;
+}
 
-// public/manifest.json (本番用) のバージョンと説明文を更新
-const prodManifestPath = join(projectRoot, "public/manifest.json");
-const prodManifest = JSON.parse(await readFile(prodManifestPath, "utf8"));
-prodManifest.version = version;
-prodManifest.description = description;
-await writeFile(prodManifestPath, JSON.stringify(prodManifest, null, 2) + "\n");
+function isIntentionalPath(path) {
+  return INTENTIONAL_MANIFEST_DIFFERENCE_PATHS.some((allowed) =>
+    path === allowed || path.startsWith(`${allowed}.`)
+  );
+}
 
-console.log(`Synced version ${version} and description to manifest files.`);
+export function manifestParityDiff(devManifest, productionManifest) {
+  const dev = flatten(devManifest);
+  const production = flatten(productionManifest);
+  const paths = [...new Set([...Object.keys(dev), ...Object.keys(production)])].sort();
+  return paths
+    .filter((path) => !isIntentionalPath(path))
+    .filter((path) => JSON.stringify(dev[path]) !== JSON.stringify(production[path]))
+    .map((path) => ({
+      path,
+      development: dev[path],
+      production: production[path],
+    }));
+}
+
+export function assertManifestParity(devManifest, productionManifest) {
+  const differences = manifestParityDiff(devManifest, productionManifest);
+  if (differences.length) {
+    throw new Error(
+      `Development and production manifests drifted in non-intentional fields:\n${
+        differences.map((difference) => `- ${difference.path}`).join("\n")
+      }`,
+    );
+  }
+}
+
+export async function syncManifests(root = projectRoot) {
+  const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  const { version, description } = pkg;
+
+  const devManifestPath = join(root, "manifest.json");
+  const devManifest = JSON.parse(await readFile(devManifestPath, "utf8"));
+  devManifest.version = version;
+  await writeFile(devManifestPath, JSON.stringify(devManifest, null, 2) + "\n");
+
+  const prodManifestPath = join(root, "public/manifest.json");
+  const prodManifest = JSON.parse(await readFile(prodManifestPath, "utf8"));
+  prodManifest.version = version;
+  prodManifest.description = description;
+  await writeFile(prodManifestPath, JSON.stringify(prodManifest, null, 2) + "\n");
+
+  assertManifestParity(devManifest, prodManifest);
+  console.log(`Synced version ${version} and description to manifest files.`);
+}
+
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  await syncManifests();
+}

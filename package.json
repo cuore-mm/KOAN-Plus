@@ -10,18 +10,22 @@
   "scripts": {
     "dev": "vite",
     "build": "node scripts/sync-manifest.mjs && tsc -b && vite build",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:ui": "playwright test",
+    "test:all": "npm test && npm run test:ui",
     "preview": "vite preview",
     "zip": "npm run build && node scripts/build-zip.mjs",
     "version": "node scripts/sync-manifest.mjs && git add manifest.json public/manifest.json"
   },
   "dependencies": {
-    "dompurify": "^3.4.12",
+    "dompurify": "^3.4.14",
     "qrcode": "^1.5.4",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@types/dompurify": "^3.0.5",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.15",
