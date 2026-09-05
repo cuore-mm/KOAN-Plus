@@ -230,8 +230,23 @@ test("empty mobile dashboard keeps the deadline section reachable", async ({ pag
   await seed(page, emptyFixture());
   await page.goto("/");
 
-  await expect(page.getByText("時間割が取得されていません", { exact: true })).toBeVisible();
+  await expect(page.getByText("この期間の時間割はありません", { exact: true })).toBeVisible();
   const deadlineHeading = page.getByRole("heading", { name: "締切", exact: true });
   await expectReachable(deadlineHeading);
   await expect(page.getByText("この日の締切はありません", { exact: true })).toBeVisible();
+});
+
+test("desktop schedule rows contain room and change details without overlapping the next period", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await seed(page, specialCaseFixture());
+  await page.goto("/");
+  const bounds = await page.locator(".rail-schedule-row").evaluateAll((rows) => rows.slice(0, 3).map((row, i) => ({
+    bottom: row.getBoundingClientRect().bottom,
+    contentBottom: row.querySelector("em")?.getBoundingClientRect().bottom ?? row.querySelector("small")!.getBoundingClientRect().bottom,
+    nextTop: rows[i + 1].getBoundingClientRect().top,
+  })));
+  for (const row of bounds) {
+    expect(row.contentBottom).toBeLessThanOrEqual(row.bottom);
+    expect(row.bottom).toBeLessThanOrEqual(row.nextTop);
+  }
 });

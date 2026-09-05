@@ -180,7 +180,7 @@ test("fresh, idle and partial refresh states remain distinguishable", async ({ p
   const details = page.locator(".sync-details");
   await expect(details.locator("summary")).toContainText("同期の詳細");
   await expect(page.locator("main .page-source-status, main .source-status-strip")).toHaveCount(0);
-  await expect(page.getByText("まだ取得していません", { exact: true }).first()).toBeVisible();
+  await expect(page.locator(".collection-feedback").filter({ hasText: "はまだ取得していません" }).first()).toBeVisible();
   await details.locator("summary").click();
   await expect(details.locator(".sync-popover")).toBeVisible();
   await expect(details.locator(".source-status")).toHaveCount(4);
@@ -369,4 +369,39 @@ test("material download controls name the item and batch count", async ({ page }
   await expect(page.getByRole("button", { name: "講義資料をダウンロード", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "演習資料をダウンロード", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "2件の資料をすべてダウンロード", exact: true })).toBeVisible();
+});
+
+test("unfetched resources do not claim there are no deadlines even when other data is cached", async ({ page }) => {
+  const value = fixture();
+  value.koan.scheduleUpdatedAt = null;
+  value.koan.surveysUpdatedAt = null;
+  value.cle.tasksUpdatedAt = null;
+  await seed(page, value);
+  await page.goto("/");
+  await expect(page.locator(".next-actions .collection-feedback")).toContainText("はまだ取得していません");
+  await expect(page.locator(".selected-deadline-panel .collection-feedback")).toContainText("はまだ取得していません");
+  await expect(page.getByText("この日の締切はありません", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("直近のアクションはありません", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "時間割を取得", exact: true })).toBeVisible();
+});
+
+test("notice filters distinguish university importance and clear a zero-result search", async ({ page }) => {
+  const value = fixture();
+  Object.assign(value.koan, { notices: [
+    { title: "試験の日程変更について", priority: "", href: "https://koan.osaka-u.ac.jp/fixture1", genre: "教務", unread: true, department: "全学", author: "教務係", period: "2026/09/05", live: true },
+    { title: "登録内容のお知らせ", priority: "○", href: "https://koan.osaka-u.ac.jp/fixture2", genre: "教務", unread: false, department: "全学", author: "教務係", period: "2026/09/05", live: true },
+  ] });
+  await seed(page, value);
+  await page.goto("/");
+  await page.getByRole("button", { name: "掲示", exact: true }).click();
+  await page.getByRole("button", { name: /大学の重要指定 1/ }).click();
+  await expect(page.locator(".notice-results-summary")).toContainText("表示 1件 / 全 2件");
+  await expect(page.getByRole("heading", { name: "試験の日程変更について", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: /確認候補/ }).first().click();
+  await expect(page.getByText("候補の理由：未読・件名に「試験」を含む", { exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "掲示を検索" }).fill("一致しない語句");
+  await expect(page.locator(".notice-results-summary")).toContainText("表示 0件 / 全 2件");
+  await page.getByRole("button", { name: "条件をクリア", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "掲示を検索" })).toHaveValue("");
+  await expect(page.locator(".notice-results-summary")).toContainText("表示 2件 / 全 2件");
 });

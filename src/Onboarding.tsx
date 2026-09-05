@@ -129,9 +129,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
       <section className="onboarding-panel" aria-labelledby="onboarding-title">
         <header className="onboarding-header">
           <div>
-            <p>初回設定</p>
-            <h1>
-              {step === "welcome" ? "KOAN Plusへようこそ" : "自動ログイン設定"}
+            <p>大阪大学の学務ダッシュボード</p>
+            <h1 id={step === "welcome" ? "onboarding-title" : undefined}>
+              {step === "welcome" ? "KOAN Plus" : "自動ログイン設定"}
             </h1>
           </div>
           <div className="topbar-actions">
@@ -141,7 +141,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
 
         {existingCredentials === false && (
           <div className="onboarding-progress" aria-label={`全2ステップ中${stepNumber}ステップ目`}>
-            {["利用規約", "ログイン設定"].map((label, index) => (
+            {["はじめに", "ログイン設定（任意）"].map((label, index) => (
               <div className={stepNumber >= index + 1 ? "active" : ""} key={label}>
                 <span aria-current={stepNumber === index + 1 ? "step" : undefined} />
                 <small>{label}</small>
@@ -153,11 +153,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
         <div className="onboarding-content">
           {step === "welcome" && (
             <div className="settings-form-block">
-              <div className="section-heading compact">
-                <div>
-                  <h2 id="onboarding-title">利用規約とプライバシーポリシー</h2>
-                  <p>内容を確認してから次へ進んでください。</p>
-                </div>
+              <div className="onboarding-intro">
+                <p>KOANとCLEの情報をまとめて、今日の予定と次にやることを確認できます。</p>
+                <p className="onboarding-product-note">大学非公式の拡張機能です。取得した学務情報は、この端末内に保存します。</p>
               </div>
 
               <div className="onboarding-legal-links">
@@ -198,7 +196,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
               <div className="section-heading compact">
                 <div>
                   <h2 id="onboarding-title">自動ログインを設定</h2>
-                  <p>個人IDとパスワードを保存すると、KOAN/CLEへ自動ログインし、画面を開いている間は成績・掲示を含む学務情報を自動同期します。設定は任意です。</p>
+                  <p>画面を開いている間、KOANとCLEの情報を自動で更新します。設定せずに、手動ログインで利用することもできます。</p>
                 </div>
               </div>
 

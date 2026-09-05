@@ -89,6 +89,7 @@ import ThemeToggle, { loadTheme, saveTheme } from "./ThemeToggle";
 import { useEscapeKey } from "./useEscapeKey";
 import { useOverflowFade } from "./useOverflowFade";
 import { activityDateLabel, isRecentActivity } from "./activity";
+import { groupDeadlineActions, isUniversityImportant, noticeAttentionReason } from "./dashboard";
 import {
   coordinateSync, finishSyncAttempt, GRADES_REFRESH_TTL_MS, isSyncFresh,
   MANUAL_REFRESH_TTL_MS, startSyncAttempt, syncRetryAt, type SyncTarget,
@@ -1257,6 +1258,10 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
           <Dashboard
             cleData={cleData}
             cleLoading={cleLoading}
+            koanIssue={hasKoanError || hasKoanPartial ? status : ""}
+            cleIssue={hasCleError || hasClePartial ? cleStatus : ""}
+            onRetry={update}
+            onShowNotices={() => setView("reference")}
             data={data}
             loading={loading || authChecking}
             onOpenNotice={markNoticeRead}
@@ -3423,6 +3428,7 @@ function CourseDetail({
       <div className="course-detail-flow">
         <section className="course-detail-block course-tasks-block">
           <h3>課題</h3>
+          {!!course.tasks.length && <p className="task-link-note">CLEの成績・課題一覧で開きます</p>}
           <div className="course-line-list" data-overflowing={tasksOverflow.overflowing || undefined} ref={tasksOverflow.ref}>
             {currentTasks.map((task) => (
               <AuthenticatedLink className="course-line-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
@@ -3549,9 +3555,41 @@ function CourseDetail({
   );
 }
 
+type CollectionState = { name: string; loaded: boolean; loading: boolean; issue: string };
+
+function collectionReady(state: CollectionState) {
+  return state.loaded && !state.loading && !state.issue;
+}
+
+function CollectionFeedback({ states, onRetry, hasContent = false }: { states: CollectionState[]; onRetry: () => void; hasContent?: boolean }) {
+  // The header owns refresh status when cached content is already visible.
+  if (hasContent && states.every((state) => state.loaded)) return null;
+  const pending = states.filter((state) => !collectionReady(state));
+  if (!pending.length) return null;
+  const busy = pending.some((state) => state.loading);
+  const failed = pending.some((state) => state.issue && !state.loading);
+  return (
+    <div className="collection-feedback" role="status">
+      <div>
+        <strong>{pending.map((state) => state.name).join("・")}{busy ? "を確認しています" : failed ? "を確認できていません" : "はまだ取得していません"}</strong>
+        <p>{states.some((state) => state.loaded)
+          ? busy ? "取得済みの情報を表示しながら更新しています。" : "取得済みの情報を表示しています。最新の状態は確認できていません。"
+          : busy ? "完了すると、この場所に表示します。" : "情報を取得して、最新の状態を確認してください。"}</p>
+      </div>
+      {!busy && <button type="button" onClick={onRetry} aria-label={`${pending.map((state) => state.name).join("・")}${failed ? "を再取得" : "を取得"}`}>
+        {failed ? "再試行" : "取得する"}
+      </button>}
+    </div>
+  );
+}
+
 function Dashboard({
   cleData,
   cleLoading,
+  koanIssue,
+  cleIssue,
+  onRetry,
+  onShowNotices,
   data,
   loading,
   onOpenNotice,
@@ -3560,6 +3598,10 @@ function Dashboard({
 }: {
   cleData: CleData;
   cleLoading: boolean;
+  koanIssue: string;
+  cleIssue: string;
+  onRetry: () => void;
+  onShowNotices: () => void;
   data: KoanData;
   loading: boolean;
   onOpenNotice: (notice: Notice) => void;
@@ -3584,22 +3626,34 @@ function Dashboard({
   }, [today]);
   const selectedSchedule = data.schedule.filter((item) => (item.date || today) === selectedDate);
   const selectedChanges = changesForDate(data.changes, selectedDate, today);
-  const koanLoaded = Boolean(data.lightUpdatedAt || data.snapshotUpdatedAt || data.surveysUpdatedAt);
-  const cleLoaded = Boolean(cleData.updatedAt || cleData.messagesUpdatedAt || cleData.tasksUpdatedAt);
+  const koanState = (name: string, timestamp: string | null): CollectionState => ({
+    name, loaded: Boolean(timestamp), loading, issue: koanIssue || data.warnings?.join(" / ") || "",
+  });
+  const cleState = (name: string, timestamp: string | null): CollectionState => ({
+    name, loaded: Boolean(timestamp), loading: cleLoading, issue: cleIssue || cleData.warnings?.join(" / ") || "",
+  });
+  const tasksState = cleState("CLEの課題", cleData.tasksUpdatedAt);
+  if (cleData.taskStatusPendingCount) tasksState.issue ||= "課題の提出状況を確認中です";
+  const surveysState = koanState("KOANのアンケート", data.surveysUpdatedAt);
+  const scheduleState = koanState("時間割", data.scheduleUpdatedAt);
+  const messagesState = cleState("CLEの連絡", cleData.messagesUpdatedAt);
+  if (cleData.messagesComplete === false || cleData.announcementsPendingCount) messagesState.issue ||= "一部の連絡を確認中です";
+  const noticesState = koanState("KOANの掲示", data.noticesUpdatedAt || data.snapshotUpdatedAt);
   return (
     <>
       <section className="dashboard-main">
         <NextActions
-          cleLoaded={cleLoaded}
+          tasksState={tasksState}
+          surveysState={surveysState}
+          onRetry={onRetry}
           data={cleData}
-          koanLoaded={koanLoaded}
-          loading={loading || cleLoading}
           surveys={data.surveys}
         />
         <NewActivity
-          cleLoaded={cleLoaded}
-          koanLoaded={Boolean(data.snapshotUpdatedAt || data.noticesUpdatedAt)}
-          loading={loading || cleLoading}
+          messagesState={messagesState}
+          noticesState={noticesState}
+          onRetry={onRetry}
+          onShowNotices={onShowNotices}
           messages={cleData.messages}
           announcements={cleData.announcements}
           notices={data.notices}
@@ -3608,6 +3662,10 @@ function Dashboard({
         />
       </section>
       <DashboardRightRail
+        tasksState={tasksState}
+        surveysState={surveysState}
+        scheduleState={scheduleState}
+        onRetry={onRetry}
         changes={selectedChanges}
         onSelectDate={setSelectedDate}
         schedule={selectedSchedule}
@@ -3642,16 +3700,16 @@ function actionableSurveys(surveys: KoanSurvey[], now = Date.now()) {
 }
 
 function NextActions({
-  cleLoaded,
+  tasksState,
+  surveysState,
+  onRetry,
   data,
-  koanLoaded,
-  loading,
   surveys,
 }: {
-  cleLoaded: boolean;
+  tasksState: CollectionState;
+  surveysState: CollectionState;
+  onRetry: () => void;
   data: CleData;
-  koanLoaded: boolean;
-  loading: boolean;
   surveys: KoanSurvey[];
 }) {
   const now = Date.now();
@@ -3675,7 +3733,9 @@ function NextActions({
   const archivedExpiredCount = tasks.filter((task) =>
     task.dueAt && new Date(task.dueAt).getTime() < now - EXPIRED_TASK_VISIBLE_MS,
   ).length;
-  const sourceNotLoaded = (!cleLoaded && !data.tasks.length) || (!koanLoaded && !surveys.length);
+  const states = [tasksState, surveysState];
+  const ready = states.every(collectionReady);
+  const actionGroups = groupDeadlineActions([...upcomingTasks, ...noDueTasks], pendingSurveys, now);
   return (
     <section className="section next-actions">
       <div className="section-heading">
@@ -3686,29 +3746,33 @@ function NextActions({
         <AuthenticatedLink className="detail-link" href={CLE_CALENDAR_URL} target="_blank">CLEカレンダー</AuthenticatedLink>
       </div>
       <div className="task-list">
-        {pendingSurveys.map((survey) => (
-          <AuthenticatedLink
-            className="cle-task-row koan-survey-row"
-            href={SURVEYS_URL}
-            key={`${survey.title}-${survey.courseName}-${survey.startAt}-${survey.endAt}`}
-            target="_blank"
-          >
-            <time>{dueLabel(survey.endAt)}</time>
-            <span>
-              {survey.title}
-              <small>
-                KOANアンケート / {survey.courseName || "全学"} / {fmtDue(survey.endAt!)}まで
-              </small>
-            </span>
-          </AuthenticatedLink>
+        <CollectionFeedback states={states} onRetry={onRetry} hasContent={!!actionGroups.length || !!expiredTasks.length} />
+        {actionGroups.map((group) => (
+          <section className="deadline-group" aria-label={group.label} key={group.label}>
+            <h3>{group.label}</h3>
+            {group.actions.map((action) => action.kind === "task" ? (
+              <CleTaskRow task={action.task} key={`task-${action.task.id}`} />
+            ) : (
+              <AuthenticatedLink
+                className="cle-task-row koan-survey-row"
+                href={SURVEYS_URL}
+                key={`survey-${action.survey.title}-${action.survey.courseName}-${action.dueAt}`}
+                target="_blank"
+              >
+                <time>{dueLabel(action.dueAt)}</time>
+                <span>
+                  {action.survey.title}
+                  <small>KOANアンケート / {action.survey.courseName || "全学"} / {fmtDue(action.dueAt)}まで</small>
+                </span>
+              </AuthenticatedLink>
+            ))}
+          </section>
         ))}
-        {upcomingTasks.map((task) => <CleTaskRow task={task} key={task.id} />)}
-        {noDueTasks.map((task) => <CleTaskRow task={task} key={task.id} />)}
-        {!pendingSurveys.length && !upcomingTasks.length && !noDueTasks.length && (
+        {!actionGroups.length && ready && (
           <EmptyState
-            icon={loading ? "spinner" : "sparkles"}
-            title={loading ? "取得中です" : sourceNotLoaded ? "まだ取得していません" : "直近のアクションはありません"}
-            description={loading ? "KOANとCLEから取得しています..." : sourceNotLoaded ? "右上の更新ボタンを押すと、KOANとCLEの情報を読み込みます。" : "期限の近いアンケートや未完了課題はありません。"}
+            icon="check-circle"
+            title={expiredTasks.length ? "これから締切を迎える課題はありません" : "直近のアクションはありません"}
+            description={expiredTasks.length ? "期限を過ぎた課題は、下の一覧で確認できます。" : "期限の近いアンケートや未完了課題はありません。"}
             variant="dashboard"
           />
         )}
@@ -3718,6 +3782,7 @@ function NextActions({
             {expiredTasks.map((task) => <CleTaskRow task={task} key={task.id} />)}
           </details>
         )}
+        {!!tasks.length && <p className="task-link-note">CLE課題は、各授業の成績・課題一覧で開きます。</p>}
         {!!archivedExpiredCount && (
           <p className="archived-task-note">
             30日より前の期限切れ {archivedExpiredCount}件は授業詳細で確認できます。
@@ -3730,7 +3795,7 @@ function NextActions({
 
 function CleTaskRow({ task }: { task: CleTask }) {
   return (
-    <AuthenticatedLink className="cle-task-row" href={cleTaskUrl(task)} target="_blank">
+    <AuthenticatedLink className="cle-task-row" href={cleTaskUrl(task)} target="_blank" title="CLEの成績・課題一覧で確認">
       <time>{dueLabel(task.dueAt)}</time>
       <span>
         {task.title}
@@ -3750,8 +3815,14 @@ function noticeRecencyTime(notice: Notice) {
   return new Date(year, month - 1, day).getTime();
 }
 
+function scopeNoticeReason(notice: Notice) {
+  return attentionScore(notice) >= 120
+    ? <p className="notice-candidate-reason">候補の理由：{noticeAttentionReason(notice)}</p>
+    : null;
+}
+
 function isImportantNotice(notice: Notice) {
-  return notice.priority === "○" || /重要|要確認|締切|期限|停止|休講|変更|試験/.test(notice.title);
+  return isUniversityImportant(notice);
 }
 
 
@@ -4013,6 +4084,10 @@ function periodNumber(value: string) {
 
 
 function DashboardRightRail({
+  tasksState,
+  surveysState,
+  scheduleState,
+  onRetry,
   changes,
   onSelectDate,
   schedule,
@@ -4023,6 +4098,10 @@ function DashboardRightRail({
   courses,
   onSelectCourse,
 }: {
+  tasksState: CollectionState;
+  surveysState: CollectionState;
+  scheduleState: CollectionState;
+  onRetry: () => void;
   changes: ChangeItem[];
   onSelectDate: (date: string) => void;
   schedule: ScheduleItem[];
@@ -4101,15 +4180,15 @@ function DashboardRightRail({
             <h2>{selectedClassHeading(selectedDate)}</h2>
           </div>
         </div>
+        <CollectionFeedback states={[scheduleState]} onRetry={onRetry} hasContent={!!schedule.length} />
         <div className="rail-schedule-list">
-          {allScheduleEmpty ? (
+          {allScheduleEmpty ? (collectionReady(scheduleState) ? (
             <EmptyState
               icon="calendar"
-              title="時間割が取得されていません"
-              description="右上の更新ボタンを押すと、時間割を読み込みます。"
+              title="この期間の時間割はありません"
               variant="rail"
             />
-          ) : (
+          ) : null) : (
             <>
               {periods.map((period) => {
                 const item = schedule.find((scheduleItem) => periodNumber(scheduleItem.period) === period);
@@ -4184,6 +4263,7 @@ function DashboardRightRail({
         <div className="rail-heading">
           <h2>締切</h2>
         </div>
+        <CollectionFeedback states={[tasksState, surveysState]} onRetry={onRetry} hasContent={!!selectedDeadlines.length} />
         <div className="rail-deadline-list">
           {selectedDeadlines.length ? (
             <>
@@ -4232,13 +4312,13 @@ function DashboardRightRail({
                 </button>
               )}
             </>
-          ) : (
+          ) : [tasksState, surveysState].every(collectionReady) ? (
             <EmptyState
               icon="calendar-check"
               title="この日の締切はありません"
               variant="subtle"
             />
-          )}
+          ) : null}
         </div>
       </section>
     </aside>
@@ -4336,18 +4416,20 @@ function changeFor(schedule: ScheduleItem, changes: ChangeItem[]) {
 
 
 function NewActivity({
-  cleLoaded,
-  koanLoaded,
-  loading,
+  messagesState,
+  noticesState,
+  onRetry,
+  onShowNotices,
   messages,
   announcements = [],
   notices,
   onOpen,
   onOpenAnnouncement,
 }: {
-  cleLoaded: boolean;
-  koanLoaded: boolean;
-  loading: boolean;
+  messagesState: CollectionState;
+  noticesState: CollectionState;
+  onRetry: () => void;
+  onShowNotices: () => void;
   messages: CleData["messages"];
   announcements?: CleAnnouncement[];
   notices: Notice[];
@@ -4376,6 +4458,7 @@ function NewActivity({
           <AuthenticatedLink className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</AuthenticatedLink>
         </div>
         <div className="cle-messages-list">
+          <CollectionFeedback states={[messagesState]} onRetry={onRetry} hasContent={!!recentAnnouncements.length || !!messages.length} />
           {recentAnnouncements.length || messages.length ? (
             <>
               {recentAnnouncements.map((ann) => (
@@ -4401,14 +4484,14 @@ function NewActivity({
                 </AuthenticatedLink>
               ))}
             </>
-          ) : (
+          ) : collectionReady(messagesState) ? (
             <EmptyState
-              icon={loading ? "spinner" : "mail-open"}
-              title={loading ? "取得中です" : !cleLoaded ? "まだ取得していません" : "未読メッセージはありません"}
-              description={loading ? "CLEからメッセージを取得しています..." : !cleLoaded ? "右上の更新ボタンを押すと、CLEの情報を読み込みます。" : "すべてのCLEメッセージを確認済みです。"}
+              icon="mail-open"
+              title="新しい連絡はありません"
+              description="直近の連絡事項や未読メッセージはありません。"
               variant="dashboard"
             />
-          )}
+          ) : null}
         </div>
       </section>
 
@@ -4417,8 +4500,10 @@ function NewActivity({
           <div>
             <h2>KOAN新着掲示</h2>
           </div>
+          <button className="detail-link" type="button" onClick={onShowNotices}>掲示をすべて見る</button>
         </div>
         <div className="koan-notices-list">
+          <CollectionFeedback states={[noticesState]} onRetry={onRetry} hasContent={!!latestNotices.length} />
           {latestNotices.length ? latestNotices.map((notice) => (
             <ActivityNotice
               notice={notice}
@@ -4426,14 +4511,14 @@ function NewActivity({
               onOpen={onOpen}
               key={noticeKey(notice)}
             />
-          )) : (
+          )) : collectionReady(noticesState) ? (
             <EmptyState
               icon="inbox"
-              title={koanLoaded ? "要確認の掲示はありません" : "まだ取得していません"}
-              description={koanLoaded ? "新しいお知らせや確認が必要な掲示はありません。" : "右上の更新ボタンを押すと、KOANの掲示を読み込みます。"}
+              title="新しい掲示はありません"
+              description="過去のお知らせは掲示一覧で確認できます。"
               variant="dashboard"
             />
-          )}
+          ) : null}
         </div>
       </section>
     </>
@@ -4469,7 +4554,8 @@ function ActivityNotice({
       <div className="notice-chip-row">
         <span className="notice-chip genre-chip">{notice.genre}</span>
         {notice.unread && <span className="notice-chip state-chip">未読</span>}
-        {isImportantNotice(notice) && <span className="notice-chip state-chip important-chip">重要</span>}
+        {isImportantNotice(notice) && <span className="notice-chip state-chip important-chip">大学の重要指定</span>}
+        {!isImportantNotice(notice) && attentionScore(notice) >= 120 && <span className="notice-chip candidate-chip" title={noticeAttentionReason(notice)}>確認候補</span>}
         {opening && <span className="notice-chip state-chip">取得中</span>}
       </div>
       <h3 className="notice-title">{notice.title}</h3>
@@ -4514,9 +4600,9 @@ function ReferenceDesk({
     important: allNotices.filter(isImportantNotice).length,
   };
   const tabs = [
-    ["attention", "要確認", summary.attention],
+    ["attention", "確認候補", summary.attention],
     ["unread", "未読", summary.unread],
-    ["important", "重要", summary.important],
+    ["important", "大学の重要指定", summary.important],
     ["all", "すべて", summary.all],
   ] as const;
 
@@ -4546,6 +4632,14 @@ function ReferenceDesk({
         </div>
       </section>
 
+      <div className="notice-results-summary">
+        <p role="status" aria-live="polite">表示 {notices.length}件 / 全 {allNotices.length}件</p>
+        {(query || genre || scope !== "all") && <button type="button" onClick={() => {
+          onQueryChange(""); onGenreChange(""); onScopeChange("all");
+        }}>条件をクリア</button>}
+      </div>
+      <p className="notice-filter-help">「確認候補」は未読・新着・件名などから選んだ掲示です。「大学の重要指定」はKOANの指定を表示します。</p>
+
       <section className="notice-list-section" aria-label="掲示一覧">
         <NoticeList
           allNotices={allNotices}
@@ -4553,6 +4647,7 @@ function ReferenceDesk({
           partial={partial}
           loaded={loaded}
           loading={loading}
+          showReasons={scope === "attention"}
           notices={notices}
           onOpen={onOpen}
         />
@@ -4562,6 +4657,7 @@ function ReferenceDesk({
 }
 
 function NoticeList({
+  showReasons,
   allNotices,
   error,
   partial,
@@ -4570,6 +4666,7 @@ function NoticeList({
   notices,
   onOpen,
 }: {
+  showReasons: boolean;
   allNotices: Notice[];
   error: string;
   partial: string;
@@ -4669,12 +4766,15 @@ function NoticeList({
         <div className="notice-content">
           <div className="notice-row-meta">
             <span className="notice-chip genre-chip">{notice.genre}</span>
-            {attentionScore(notice) >= 120 && <span className="notice-chip state-chip important-chip">要確認</span>}
+            {notice.unread && <span className="notice-chip state-chip">未読</span>}
+            {isImportantNotice(notice) && <span className="notice-chip state-chip important-chip">大学の重要指定</span>}
+            {!showReasons && !isImportantNotice(notice) && attentionScore(notice) >= 120 && <span className="notice-chip candidate-chip" title={noticeAttentionReason(notice)}>確認候補</span>}
             {notice.isNew && <span className="notice-chip state-chip">新着</span>}
             {openingThis && <span className="notice-chip state-chip">取得中</span>}
           </div>
           <h3 title={notice.title}>{notice.title}</h3>
           <p>{[notice.department, notice.author].filter(Boolean).join(" / ") || "発信元未取得"}</p>
+          {showReasons && scopeNoticeReason(notice)}
         </div>
         <time>{notice.period || "期間未取得"}</time>
       </button>
@@ -4686,7 +4786,7 @@ function NoticeList({
       {showGroups ? (
         <>
           <div className="notice-group-heading">
-            <h2>重要掲示</h2>
+            <h2>大学の重要指定</h2>
             <span>{importantNotices.length}件</span>
           </div>
           {renderRows(importantNotices)}
