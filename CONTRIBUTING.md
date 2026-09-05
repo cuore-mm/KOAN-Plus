@@ -95,3 +95,18 @@ Dependabotの更新PRもlockfileを確認し、CIの完了後に手動レビュ�
 
 Pull RequestのCIは、同じブランチの新しい実行が開始されたときに古い実行をキャンセル
 します。古い実行の結果だけを根拠にマージしないでください。
+
+## 公開文書の更新
+
+画面名や操作、機能が変わる場合は、次の文書も確認してください。
+
+- [README.md](./README.md) と [README.en.md](./README.en.md)：機能、導入方法、データの扱い
+- [使い方](./docs/user-guide.md)：実際の画面ラベルと操作手順
+- [CHANGELOG.md](./CHANGELOG.md)：未公開の変更は `Unreleased` に記載
+- [デスクトップUI仕様](./docs/desktop-ui-direction.md)：画面と操作の設計
+- [同期仕様](./docs/sync-policy.md) と [英語版](./docs/sync-policy.en.md)：更新間隔、キャッシュ、再試行
+- [Chrome Web Store掲載文案](./docs/chrome-web-store.md)：次回公開するビルドと機能説明の一致
+
+掲載文に未公開の機能を混ぜず、最上級表現や保証できない取得精度をうたわないでください。
+スクリーンショットや使用例には合成データを使い、実在する認証情報や学務データを含めないでください。
+文書だけの変更でも、相対リンク、画面ラベル、コマンド、日英の説明に矛盾がないかを確認します。

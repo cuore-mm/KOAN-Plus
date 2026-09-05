@@ -573,8 +573,8 @@ async function fetchHtmlFromKoanTab(
       request: { url, options },
       tabId,
     }) as Promise<KoanTabMessage>,
-    25000,
-    "成績取得が25秒以内に完了しませんでした。KOANタブを再読み込みして再試行してください。",
+    32000,
+    "成績取得から応答がありませんでした。保存済みデータを保持し、再試行します。",
   );
   if (!result.ok || !result.response) {
     throw new Error(result.error || "KOANタブから応答を取得できませんでした。");
@@ -1921,10 +1921,24 @@ async function findNoticeUrl(
   }
 }
 
+/** Already resolved links never wait for authentication, a crawl, or its lease. */
+export function getKnownNoticeUrl(notice: Notice, snapshotNotices: Notice[] = []): string | null {
+  const key = noticeKey(notice);
+  const live = notice.live && notice.href ? notice : snapshotNotices.find(candidate =>
+    candidate.live && candidate.href && noticeKey(candidate) === key);
+  const cached = live ? undefined : readNoticeUrlCache()[key];
+  const url = live?.href || (cached && cached.expiresAt > Date.now() ? cached.url : null);
+  if (!url) return null;
+  try { requireKoanUrl(url); return url; }
+  catch { return null; }
+}
+
 export async function resolveNoticeUrl(
   notice: Notice,
   snapshotNotices: Notice[] = [],
 ): Promise<string | null> {
+  const knownUrl = getKnownNoticeUrl(notice, snapshotNotices);
+  if (knownUrl) return knownUrl;
   cleanupNoticeResolveAttempts();
   const key = noticeKey(notice);
   const cached = readNoticeUrlCache()[key];
@@ -1950,6 +1964,7 @@ export async function resolveNoticeUrl(
   );
   const request = findNoticeUrl(notice, snapshotNotices)
     .then((url) => {
+      if (url) requireKoanUrl(url);
       cacheNoticeUrl(key, url);
       return url;
     });

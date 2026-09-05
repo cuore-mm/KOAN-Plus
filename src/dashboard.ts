@@ -47,3 +47,29 @@ export function noticeAttentionReason(notice: Notice) {
   ];
   return reasons.filter(Boolean).join("・");
 }
+
+/** Resolve yearless dates near today, including the December/January boundary. */
+export function changeTimestamp(value: string, now = Date.now()) {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  if (value === "今日" || value === "今週") return today.getTime();
+  const full = value.match(/(\d{4})[\/年.-](\d{1,2})[\/月.-](\d{1,2})/);
+  const short = value.match(/(\d{1,2})[\/月.-](\d{1,2})/);
+  if (!full && !short) return null;
+  const month = Number(full ? full[2] : short![1]);
+  const day = Number(full ? full[3] : short![2]);
+  const years = full ? [Number(full[1])] : [today.getFullYear() - 1, today.getFullYear(), today.getFullYear() + 1];
+  const candidates = years.map((year) => new Date(year, month - 1, day))
+    .filter((date) => date.getMonth() === month - 1 && date.getDate() === day)
+    .sort((a, b) => Math.abs(a.getTime() - now) - Math.abs(b.getTime() - now));
+  return candidates[0]?.getTime() ?? null;
+}
+
+export function upcomingChanges<T extends { date: string }>(changes: T[], now = Date.now()) {
+  const start = new Date(now); start.setHours(0, 0, 0, 0);
+  const end = new Date(start); end.setDate(end.getDate() + 7);
+  return changes.filter((change) => {
+    const at = changeTimestamp(change.date, now);
+    return at !== null && at >= start.getTime() && at < end.getTime();
+  }).sort((a, b) => changeTimestamp(a.date, now)! - changeTimestamp(b.date, now)!);
+}

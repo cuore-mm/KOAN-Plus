@@ -420,7 +420,7 @@ describe("fetchMessages", () => {
     expect(offsets).toEqual([0, 1]);
     expect(result.complete).toBe(false);
     expect(result.reason).toBe("pagination");
-    expect(result.nextPage).toBeNull();
+    expect(result.nextPage).toContain("offset=1");
     expect(result.warning).toContain("前進しなかった");
     expect(result.messages).toEqual([{
       courseId: "course-0",
@@ -1794,4 +1794,49 @@ it("allows the post-reauthentication retry without discarding category caches", 
   const result = await refreshCle(EMPTY_CLE_DATA, 1, undefined, false, { bypassBackoff: true });
   expect(result.updatedAt).not.toBeNull();
   expect(sendMessage).toHaveBeenCalled();
+});
+
+
+describe("message terminal boundary verification", () => {
+  function server(probe: "empty" | "new" | "invalid" | "error" = "empty") {
+    stubLocalStorage();
+    vi.stubGlobal("window", globalThis);
+    const request = vi.fn(async (message: any) => {
+      const url = new URL(message.request.url);
+      const offset = Number(url.searchParams.get("offset"));
+      const limit = Number(url.searchParams.get("limit"));
+      if (offset === 2 && limit === 1 && probe === "error") {
+        return { ok: true, response: { ok: false, status: 400, text: "fixture boundary unavailable" } };
+      }
+      const rows = offset === 0 ? [0, 1] : offset === 2 && limit === 1 && probe === "new" ? [2] : [];
+      const next = offset === 0 ? 2 : rows.length ? offset + rows.length : offset;
+      return { ok: true, response: { ok: true, status: 200, text: JSON.stringify({
+        results: rows.map(id => ({ courseId: `course-${id}`, numUnreadMessages: 1 })),
+        paging: { nextPage: `/learn/api/v1/messages/summary?offset=${next}&limit=${limit}`, offset: probe === "invalid" && limit === 1 ? 999 : offset, limit: limit === 1 ? 1 : 25 },
+      }) } };
+    });
+    vi.stubGlobal("chrome", { runtime: { sendMessage: request } });
+    return request;
+  }
+  it("confirms an empty self-loop using a one-item boundary query", async () => {
+    const request = server();
+    const result = await fetchMessages();
+    expect(result.complete).toBe(true);
+    expect(result.warning).toBeUndefined();
+    expect(result.messages.map(item => item.courseId)).toEqual(["course-0", "course-1"]);
+    expect(request.mock.calls.map(([m]) => new URL(m.request.url).searchParams.get("limit"))).toEqual(["100", "100", "1"]);
+  });
+  it("continues if the boundary probe discovers another course", async () => {
+    server("new");
+    const result = await fetchMessages();
+    expect(result.complete).toBe(true);
+    expect(result.messages.map(item => item.courseId)).toEqual(["course-0", "course-1", "course-2"]);
+  });
+  it.each(["invalid", "error"] as const)("preserves cache and cursor when boundary confirmation is %s", async (mode) => {
+    server(mode);
+    const result = await fetchMessages(undefined, [{ courseId: "cached", courseName: "保存済み", unreadCount: 2 }]);
+    expect(result.complete).toBe(false);
+    expect(result.nextPage).toContain("offset=2");
+    expect(result.messages.some(item => item.courseId === "cached")).toBe(true);
+  });
 });

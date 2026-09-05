@@ -135,6 +135,7 @@ export type CleData = {
   messagesNextPage?: string | null;
   messagesComplete?: boolean;
   messagesPendingCount?: number;
+  messagesPaginationVersion?: number;
   coursesUpdatedAt: string | null;
   taskStatusesUpdatedAt: string | null;
   taskScopeVersion?: number;
@@ -2191,9 +2192,9 @@ function mergeMessages(
   return sortMessages([...byCourse.values()]);
 }
 
-function messageSummaryUrl(offset = 0) {
+function messageSummaryUrl(offset = 0, limit = MESSAGE_PAGE_SIZE) {
   return normalizePageUrl(
-    `${API_ORIGIN}/v1/messages/summary?offset=${offset}&limit=${MESSAGE_PAGE_SIZE}`,
+    `${API_ORIGIN}/v1/messages/summary?offset=${offset}&limit=${limit}`,
     CLE_ORIGIN,
   );
 }
@@ -2300,6 +2301,9 @@ export async function fetchMessages(
   const pageSignatures = new Set<string>();
   let awaitingRecovery = false;
   let recoverySourceUrl: string | null = null;
+  // Some CLE deployments return nextPage=self even at the end. Confirm that
+  // empty boundary with limit=1; never infer completion from a loop alone.
+  let terminalProbeSource: string | null = null;
 
   const partial = (
     nextPage: string | null,
@@ -2341,7 +2345,7 @@ export async function fetchMessages(
       // throwing away pages that were already verified in this run.
       if (scannedPages > 0 && error instanceof CleDeadlineError) {
         return partial(
-          awaitingRecovery ? recoverySourceUrl : nextUrl,
+          terminalProbeSource || (awaitingRecovery ? recoverySourceUrl : nextUrl),
           "budget",
           "CLEメッセージの取得時間上限に達したため、取得済み分だけを保持します。",
         );
@@ -2363,7 +2367,7 @@ export async function fetchMessages(
       if (isCleAuthenticationError(error)) throw error;
       if (scannedPages > 0) {
         return partial(
-          awaitingRecovery ? recoverySourceUrl : nextUrl,
+          terminalProbeSource || (awaitingRecovery ? recoverySourceUrl : nextUrl),
           error instanceof CleDeadlineError
             ? "budget"
             : error instanceof CleRequestError && error.status === 429
@@ -2383,7 +2387,7 @@ export async function fetchMessages(
     } catch (error) {
       if (scannedPages > 0) {
         return partial(
-          awaitingRecovery ? recoverySourceUrl : nextUrl,
+          terminalProbeSource || (awaitingRecovery ? recoverySourceUrl : nextUrl),
           "error",
           error instanceof Error ? error.message : String(error),
         );
@@ -2450,12 +2454,35 @@ export async function fetchMessages(
         "CLEメッセージの次ページ情報が不正だったため、取得済み分だけを保持しました。",
       );
     }
+    if (terminalProbeSource && !items.length) {
+      const offset = messageCursorOffset(nextUrl);
+      const returnedNext = typeof rawNextPage === "string" ? validateMessageCursor(rawNextPage) : null;
+      const verifiedBoundary = offset !== null && paging?.offset === offset && paging?.limit === 1 &&
+        (explicitEnd || (returnedNext !== null && messageCursorOffset(returnedNext) === offset));
+      if (verifiedBoundary) return complete();
+      return partial(terminalProbeSource, "pagination", "CLEメッセージの終端を確認できなかったため、取得済み分を保持しました。");
+    }
+    // A probe can reveal data that arrived during pagination. Process it and
+    // continue normally rather than skipping it or reporting a false end.
+    if (terminalProbeSource) terminalProbeSource = null;
     if (repeatedPage) {
       return partial(
         awaitingRecovery ? recoverySourceUrl : null,
         "pagination",
         "メッセージの同じ内容（科目一覧）が繰り返されたため、取得済み分だけを保持しました。",
       );
+    }
+
+    const currentOffset = messageCursorOffset(nextUrl);
+    const returnedNext = typeof rawNextPage === "string" ? validateMessageCursor(rawNextPage) : null;
+    const boundaryMatches = !items.length && currentOffset !== null &&
+      returnedNext !== null && messageCursorOffset(returnedNext) === currentOffset &&
+      paging?.offset === currentOffset && Number.isSafeInteger(paging?.limit) && Number(paging?.limit) > 0;
+    const probeUrl = boundaryMatches ? messageSummaryUrl(currentOffset!, 1) : null;
+    if (probeUrl && !visited.has(probeUrl)) {
+      terminalProbeSource = nextUrl;
+      nextUrl = probeUrl;
+      continue;
     }
 
     if (awaitingRecovery) {
@@ -2491,6 +2518,12 @@ export async function fetchMessages(
           "CLEメッセージの次ページURLが不正だったため、そこで停止しました。",
         );
       }
+      // Return to normal page size after a non-empty boundary probe.
+      if (new URL(nextUrl).searchParams.get("limit") === "1") {
+        const normalPage = new URL(pageNextUrl);
+        normalPage.searchParams.set("limit", String(MESSAGE_PAGE_SIZE));
+        pageNextUrl = validateMessageCursor(normalPage.toString())!;
+      }
       const currentOffset = messageCursorOffset(nextUrl);
       const nextOffset = pageNextUrl === null ? null : messageCursorOffset(pageNextUrl);
       if (
@@ -2511,7 +2544,7 @@ export async function fetchMessages(
           pageNextUrl = recoveryUrl;
         } else {
           return partial(
-            null,
+            nextUrl,
             "pagination",
             "CLEメッセージの次ページカーソルが前進しなかったため、取得済み分だけを保持しました。",
           );
@@ -2554,7 +2587,7 @@ export async function fetchMessages(
   }
 
   return partial(
-    awaitingRecovery ? recoverySourceUrl : nextUrl,
+    terminalProbeSource || (awaitingRecovery ? recoverySourceUrl : nextUrl),
     "budget",
     `CLEメッセージの取得上限（${MAX_MESSAGE_PAGES}ページ）に達したため、次回は続きから再開します。`,
   );
@@ -2700,6 +2733,14 @@ async function refreshAnnouncements(
   return { announcements, cache, updatedAt, pendingCount };
 }
 
+const MESSAGE_PAGINATION_VERSION = 3;
+
+export function needsMessageRecoveryUpgrade(data: CleData | null | undefined) {
+  return Boolean(data?.messagesComplete === false &&
+    data.messagesPaginationVersion !== MESSAGE_PAGINATION_VERSION &&
+    data.warnings?.some(warning => /メッセージ.*(?:次ページカーソルが前進しなかった|再試行待機中)/.test(warning)));
+}
+
 export function getCleRetryAt() {
   return Math.max(
     readTimestamp(CLE_ATTEMPT_KEY) + MANUAL_REFRESH_TTL_MS,
@@ -2748,9 +2789,14 @@ export async function refreshCle(
     const previousMessagesComplete =
       previous?.messagesComplete !== false &&
       (previous?.messagesPendingCount || 0) === 0;
+    // One bounded upgrade recovery for legacy pagination failures. Older
+    // versions replaced the cause with a generic waiting message. The global
+    // cooldown/lease still applies; a subsequent failure uses normal backoff.
+    const recoverLegacyBoundary = needsMessageRecoveryUpgrade(previous);
     const messagesFresh = !force &&
       previousMessagesComplete &&
       isFresh(clePartUpdatedAt(previous, "messagesUpdatedAt"), messagesTtl);
+    const willFetchMessages = !messagesFresh && (force || recoverLegacyBoundary || retryAvailable(CLE_MESSAGES_FAILURE_KEY));
     const taskStatusesFresh = !force &&
       isFresh(clePartUpdatedAt(previous, "taskStatusesUpdatedAt"), options.refreshRecent ? MANUAL_REFRESH_TTL_MS : CLE_TASK_STATUSES_TTL_MS);
     const activeCourses = options.activeCourses || [];
@@ -2841,7 +2887,7 @@ export async function refreshCle(
               updatedAt: clePartUpdatedAt(previous, "tasksUpdatedAt"),
             };
           }),
-      messagesFresh || (!force && !retryAvailable(CLE_MESSAGES_FAILURE_KEY))
+      !willFetchMessages
         ? Promise.resolve({
           messages: previous?.messages || [],
           updatedAt: clePartUpdatedAt(previous, "messagesUpdatedAt"),
@@ -2849,7 +2895,10 @@ export async function refreshCle(
           complete: previousMessagesComplete,
           pendingCount: previous?.messagesPendingCount || 0,
         }).then((result) => {
-          if (!messagesFresh) warnings.push("メッセージ: 再試行待機中のため以前のデータを使用");
+          if (!messagesFresh) {
+            const cause = previous?.warnings?.filter(warning => warning.startsWith("メッセージ:")) || [];
+            warnings.push(...(cause.length ? cause : ["メッセージ: 再試行待機中のため以前のデータを使用"]));
+          }
           markDone("メッセージキャッシュ");
           return result;
         })
@@ -2994,6 +3043,7 @@ export async function refreshCle(
       messagesNextPage: messagesResult.nextPage,
       messagesComplete: messagesResult.complete,
       messagesPendingCount: messagesResult.pendingCount,
+      messagesPaginationVersion: willFetchMessages ? MESSAGE_PAGINATION_VERSION : previous?.messagesPaginationVersion,
       taskStatusesUpdatedAt,
       taskScopeVersion: CLE_TASK_SCOPE_VERSION,
       taskStatusCursor: statusResult.nextCursor,

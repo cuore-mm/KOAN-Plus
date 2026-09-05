@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CleTask } from "./cle";
 import type { KoanSurvey, Notice } from "./koan";
-import { groupDeadlineActions, isUniversityImportant, noticeAttentionReason } from "./dashboard";
+import { changeTimestamp, upcomingChanges, groupDeadlineActions, isUniversityImportant, noticeAttentionReason } from "./dashboard";
 
 const task = (id: string, dueAt: string | null): CleTask => ({
   id, title: id, dueAt, courseId: "course", courseName: "授業", status: "未着手",
@@ -44,5 +44,21 @@ describe("notice provenance", () => {
     expect(noticeAttentionReason(notice)).toBe("未読・件名に「試験」を含む");
     expect(isUniversityImportant({ ...notice, priority: "○" })).toBe(true);
     expect(noticeAttentionReason({ ...notice, priority: "○" })).toContain("大学の重要指定");
+  });
+});
+
+
+describe("near-term course changes", () => {
+  const now = new Date(2026, 11, 30, 12).getTime();
+  it("resolves yearless dates across New Year and rejects invalid dates", () => {
+    expect(changeTimestamp("1/2(金)", now)).toBe(new Date(2027, 0, 2).getTime());
+    expect(changeTimestamp("12月29日", now)).toBe(new Date(2026, 11, 29).getTime());
+    expect(changeTimestamp("2026/2/30", now)).toBeNull();
+    expect(changeTimestamp("未定", now)).toBeNull();
+  });
+  it("keeps today's changes, sorts the next seven days, and excludes past/history", () => {
+    const dates = ["1/6", "2026/12/29", "1/2", "12/30", "今週", "未定"];
+    expect(upcomingChanges(dates.map(date => ({ date })), now).map(x => x.date))
+      .toEqual(["12/30", "今週", "1/2"]);
   });
 });

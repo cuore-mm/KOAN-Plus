@@ -193,16 +193,9 @@ for (const viewport of [
     await expect(page.locator(".app-sidebar").getByRole("link", { name: /KOAN.*新しいタブで開きます/ })).toBeVisible();
     await expectReachable(page.getByText("大学記念日（授業なし）", { exact: true }));
     await expectReachable(page.getByText("未登録の特別補講", { exact: true }));
-    await expectReachable(page.getByRole("heading", { name: "締切", exact: true }));
+    await expect(page.locator(".selected-deadline-panel")).toHaveCount(0);
 
-    const moreDeadlines = page.locator(".rail-more");
-    await expect(moreDeadlines).toBeVisible();
-    await expect(moreDeadlines).toHaveText("他 1 件を表示");
-    await moreDeadlines.click();
-    await expect(moreDeadlines).toHaveAttribute("aria-expanded", "true");
-    await expect(page.getByText("本日締切の授業アンケート", { exact: true })).toBeVisible();
-    await moreDeadlines.click();
-    await expect(moreDeadlines).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator(".next-actions").getByRole("link", { name: /本日締切の授業アンケート/ })).toBeVisible();
 
     const monthHeading = page.locator(".month-heading h3");
     const initialMonth = await monthHeading.textContent();
@@ -225,15 +218,14 @@ for (const viewport of [
   });
 }
 
-test("empty mobile dashboard keeps the deadline section reachable", async ({ page }) => {
+test("empty dashboard shows verified empty actions without a duplicate deadline panel", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await seed(page, emptyFixture());
   await page.goto("/");
 
   await expect(page.getByText("この期間の時間割はありません", { exact: true })).toBeVisible();
-  const deadlineHeading = page.getByRole("heading", { name: "締切", exact: true });
-  await expectReachable(deadlineHeading);
-  await expect(page.getByText("この日の締切はありません", { exact: true })).toBeVisible();
+  await expect(page.locator(".selected-deadline-panel")).toHaveCount(0);
+  await expect(page.getByText("対応が必要な課題・締切はありません", { exact: true })).toBeVisible();
 });
 
 test("desktop schedule rows contain room and change details without overlapping the next period", async ({ page }) => {

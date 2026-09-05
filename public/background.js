@@ -528,13 +528,13 @@ async function cancelMfaAutoTab(tabId) {
   };
 }
 
-async function withTimeout(task, milliseconds) {
+async function withTimeout(task, milliseconds, message = "timeout") {
   let timeoutId;
   try {
     return await Promise.race([
       task,
       new Promise((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error("timeout")), milliseconds);
+        timeoutId = setTimeout(() => reject(new Error(message)), milliseconds);
       }),
     ]);
   } finally {
@@ -1702,24 +1702,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabs = await chrome.tabs.query({
       url: `${target.origin}/*`,
     });
-    const tab = message.tabId
-      ? tabs.find((candidate) => candidate.id === message.tabId)
-      : tabs
-          .filter((candidate) => !candidate.discarded)
+    const usableTabs = tabs.filter((candidate) => !candidate.discarded && !candidate.frozen);
+    // A closed/frozen pinned tab must not permanently strand a read-only Web Flow.
+    let tab = usableTabs.find((candidate) => candidate.id === message.tabId)
+      || usableTabs
           .sort((left, right) => {
+            if (left.status !== right.status) return left.status === "complete" ? -1 : 1;
             if (left.active !== right.active) return left.active ? -1 : 1;
             return (right.lastAccessed || 0) - (left.lastAccessed || 0);
           })[0];
+    if (!tab?.id && target.label === "KOAN") {
+      tab = await chrome.tabs.create({ url: KOAN_PORTAL_URL, active: false });
+      try {
+        await waitForTabComplete(tab.id, 7000);
+      } catch (error) {
+        await chrome.tabs.remove(tab.id).catch(() => {});
+        throw error;
+      }
+    }
     if (!tab?.id) {
       throw new Error(`${target.label}をログイン済みのタブで開いてから取得してください。`);
     }
 
-    const [execution] = await chrome.scripting.executeScript({
+    const deadline = Date.now() + 20000;
+    const [execution] = await withTimeout(chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      world: "MAIN",
-      func: async (request, label, maxResponseTextLength) => {
+      // Waiting for document_idle can hang on a portal with long-lived frames.
+      injectImmediately: true,
+      world: target.label === "KOAN" ? "ISOLATED" : "MAIN",
+      func: async (request, label, maxResponseTextLength, deadline) => {
+        // Frozen tabs may execute only after the caller has already given up.
+        if (Date.now() >= deadline) throw new Error(`${label}の取得開始期限を過ぎました。`);
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000);
+        const timeout = setTimeout(() => controller.abort(), Math.min(15000, deadline - Date.now()));
         try {
           const response = await fetch(request.url, {
             credentials: "include",
@@ -1788,8 +1803,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           clearTimeout(timeout);
         }
       },
-      args: [message.request, target.label, MAX_CLE_RESPONSE_TEXT_LENGTH],
-    });
+      args: [message.request, target.label, MAX_CLE_RESPONSE_TEXT_LENGTH, deadline],
+    }), 21000, `${target.label}タブの取得が応答しませんでした。保存済みデータを保持し、再試行します。`);
     if (!execution.result) {
       throw new Error(`${target.label}タブから応答を取得できませんでした。`);
     }

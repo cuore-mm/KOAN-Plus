@@ -30,8 +30,14 @@ function readAttempt(target: SyncTarget): Attempt {
   };
 }
 
-export function syncRetryAt(target: SyncTarget) {
-  return readAttempt(target).retryAt;
+export function syncRetryAt(target: SyncTarget, explicitRetry = false) {
+  const { retryAt, failures } = readAttempt(target);
+  // A deliberate retry can resume after one minute; unattended retries still
+  // back off exponentially. Keep a minimum interval even before resource I/O.
+  if (explicitRetry && failures > 0) {
+    return retryAt - MANUAL_REFRESH_TTL_MS * 2 ** Math.min(failures, 6) + MANUAL_REFRESH_TTL_MS;
+  }
+  return retryAt;
 }
 
 function writeAttempt(target: SyncTarget, value: Attempt) {

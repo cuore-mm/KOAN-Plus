@@ -4,7 +4,7 @@ import { GENRES } from "../src/koan";
 import { SYNC_STATE_KEY } from "../src/sync";
 
 // Only synthetic records and responses. No university session is used.
-async function setup(page: Page, options: { auto?: boolean; gradesAge?: number; noticesAge?: number; recentAge?: number; hidden?: boolean; failGrades?: boolean; emptyGrades?: boolean; holdGrades?: boolean; cleMessageWarning?: boolean; cleMessageRecovery?: boolean } = {}) {
+async function setup(page: Page, options: { auto?: boolean; gradesAge?: number; noticesAge?: number; recentAge?: number; hidden?: boolean; failGrades?: boolean; emptyGrades?: boolean; holdGrades?: boolean; cleMessageWarning?: boolean; cleMessageRecovery?: boolean; cleTerminalLoop?: boolean } = {}) {
   await page.addInitScript(({ keys, options, versions }) => {
     const now = new Date().toISOString();
     const before = (age = 0) => new Date(Date.now() - age).toISOString();
@@ -53,6 +53,14 @@ async function setup(page: Page, options: { auto?: boolean; gradesAge?: number; 
       }
       if (message.type === "cle-fetch") {
         const url = new URL(message.request.url);
+        if (options.cleTerminalLoop && url.pathname.includes("/messages/summary")) {
+          const offset = Number(url.searchParams.get("offset") || 0);
+          const limit = Number(url.searchParams.get("limit") || 100);
+          return { ok: true, response: { ok: true, status: 200, text: JSON.stringify({
+            results: offset === 0 ? [{ courseId: "terminal-course", courseName: "終端検証科目", numUnreadMessages: 2 }] : [],
+            paging: { offset, limit: limit === 1 ? 1 : 25, nextPage: `/learn/api/v1/messages/summary?offset=1&limit=${limit}` },
+          }) } };
+        }
         if (options.cleMessageRecovery && url.pathname.includes("/messages/summary")) {
           const offset = Number(url.searchParams.get("offset") || 0);
           return { ok: true, response: { ok: true, status: 200, text: JSON.stringify({
@@ -326,4 +334,52 @@ test("disabling auto-login during a sync stops the remaining automatic jobs", as
   await page.evaluate(() => { (window as any).holdGrades = false; (window as any).releaseGrades(); });
   await expect.poll(() => gradesCredits(page)).toBe(48);
   expect(requests).toEqual([]);
+});
+
+
+test("a verified terminal self-loop recovers messages and clears only that collection's warning", async ({ page }) => {
+  await setup(page, { auto: false, cleTerminalLoop: true });
+  await page.addInitScript((key) => {
+    const data = JSON.parse(localStorage.getItem(key)!);
+    data.messagesComplete = false;
+    data.messagesPendingCount = 1;
+    data.warnings = ["メッセージ: CLEメッセージの次ページカーソルが前進しなかったため、取得済み分だけを保持しました。"];
+    localStorage.setItem("koan-plus-cle-messages-failure-v1", JSON.stringify({ count: 6, nextRetryAt: Date.now() + 3600_000 }));
+    localStorage.setItem("koan-plus-sync-state-v1", JSON.stringify({ dashboard: { failures: 6, retryAt: Date.now() + 3600_000 } }));
+    localStorage.setItem(key, JSON.stringify(data));
+  }, CLE_CACHE_KEY);
+  await page.goto("/");
+  await expect(page.locator(".next-actions")).not.toContainText("CLEの課題を確認できていません");
+  await page.locator(".sync-details summary").click();
+  await expect(page.locator(".sync-popover .source-status-partial")).toContainText("次ページカーソル");
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "更新", exact: true }).click();
+  await expect.poll(async () => page.evaluate(key => JSON.parse(localStorage.getItem(key)!).messagesComplete, CLE_CACHE_KEY)).toBe(true);
+  await expect(page.getByText("終端検証科目", { exact: true })).toBeVisible();
+  await expect(page.locator(".sync-details summary")).not.toContainText("一部の情報を更新できませんでした");
+});
+
+test("a failed manual refresh stays queued with automatic login disabled", async ({ page }) => {
+  await page.clock.install();
+  await setup(page, { auto: false, gradesAge: 7 * 3600_000, failGrades: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "成績", exact: true }).click();
+  await page.getByRole("button", { name: "更新", exact: true }).click();
+  await page.locator(".sync-details summary").click();
+  await expect(page.getByText(/fixture grade unavailable/).first()).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => { (window as any).failGrades = false; });
+  await page.clock.fastForward(150_000);
+  await expect.poll(() => gradesCredits(page)).toBe(48);
+});
+
+test("explicit grade retry escapes an old failure backoff while automatic retries remain bounded", async ({ page }) => {
+  await setup(page, { auto: false, gradesAge: 7 * 3600_000 });
+  await page.goto("/");
+  await page.evaluate((key) => localStorage.setItem(key, JSON.stringify({ grades: { retryAt: Date.now() + 62 * 60_000, failures: 6 } })), SYNC_STATE_KEY);
+  await page.getByRole("button", { name: "成績", exact: true }).click();
+  expect(await calls(page, "koan-fetch")).toBe(0);
+  await page.getByRole("button", { name: "更新", exact: true }).click();
+  await expect.poll(() => gradesCredits(page)).toBe(48);
+  expect(await calls(page, "koan-fetch")).toBe(4);
 });

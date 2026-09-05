@@ -76,6 +76,16 @@ export function refreshCleLogin() {
   return sendAuthMessage({ type: "auth-refresh-cle" });
 }
 
+/** Validate navigation locally instead of waiting for a login readiness probe. */
+export function academicLinkUrl(rawUrl: string): string | null {
+  try {
+    const url = new URL(rawUrl);
+    if ((url.origin === "https://koan.osaka-u.ac.jp" && url.pathname.startsWith("/campusweb/")) ||
+        url.origin === "https://www.cle.osaka-u.ac.jp") return url.href;
+  } catch { /* An invalid destination is not navigable. */ }
+  return null;
+}
+
 export function openAuthenticatedUrl(url: string) {
   return sendAuthMessage({ type: "auth-open-url", url });
 }

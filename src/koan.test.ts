@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   acquireLease,
+  getKnownNoticeUrl,
   cleanupNoticeResolveAttempts,
   mergeCourses,
   mergeNotices,
@@ -403,5 +404,30 @@ describe("notice cache retention", () => {
 
     expect(merged).toHaveLength(NOTICE_CACHE_MAX_ITEMS);
     expect(warnings.length).toBeGreaterThan(0);
+  });
+});
+
+
+describe("immediate notice links", () => {
+  it("opens a known live URL even while the bulletin crawler owns its lease", async () => {
+    const values = stubLocalStorage();
+    const target = notice("direct", { live: true });
+    values.set("koan-plus-snapshot-lease-v1", JSON.stringify({ owner: "crawler", expiresAt: Date.now() + 60_000 }));
+    values.set("koan-plus-notice-resolve-failure-v1", JSON.stringify({ retryAt: Date.now() + 60_000 }));
+    const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+    expect(getKnownNoticeUrl(target)).toBe(target.href);
+    await expect(resolveNoticeUrl(target)).resolves.toBe(target.href);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(values.has("koan-plus-notice-resolve-lease-v1")).toBe(false);
+  });
+  it("reuses resolved links but rejects foreign destinations and expired cache entries", () => {
+    const values = stubLocalStorage();
+    const target = notice("cached");
+    values.set("koan-plus-notice-url-cache-v1", JSON.stringify({ [noticeKey(target)]: { url: target.href, expiresAt: Date.now() + 60_000 } }));
+    expect(getKnownNoticeUrl(target)).toBe(target.href);
+    values.set("koan-plus-notice-url-cache-v1", JSON.stringify({ [noticeKey(target)]: { url: target.href, expiresAt: Date.now() - 1 } }));
+    expect(getKnownNoticeUrl(target)).toBeNull();
+    expect(getKnownNoticeUrl({ ...target, live: true, href: "https://example.org/" })).toBeNull();
+    expect(getKnownNoticeUrl({ ...target, live: true, href: "javascript:alert(1)" })).toBeNull();
   });
 });
