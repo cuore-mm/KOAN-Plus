@@ -14,6 +14,14 @@ expensive synchronization tasks.
   CLE assignment-list, and message data while preserving longer-lived caches.
   Deferred requests retry automatically while visible and online. Web Locks
   serialize synchronization across tabs; completed cache writes are shared.
+- Concurrent KOAN portal authentication checks share an active request. CLE
+  readiness checks do the same for each tab. Completed authentication results
+  are not cached.
+- KOAN checks the current login state immediately. While awaiting login, it
+  checks the portal every five seconds for up to 90 seconds. Completion may be
+  detected up to approximately four seconds later than with the previous
+  one-second interval. Local tab-close checks still run every second. Academic
+  data refresh intervals and CLE authentication polling are unchanged.
 - Dashboard refresh fetches only the categories whose cache lifetime has expired.
 - KOAN refreshes reuse category caches: this week's class changes and unread
   bulletins use a short interval, survey listings and the current schedule use
@@ -51,6 +59,12 @@ expensive synchronization tasks.
 
 Bulletin crawls retain page, runtime, and request-gap limits. Disabling auto-login
 also stops periodic automatic synchronization; manual refresh remains available.
+
+When a bulletin crawl hits its time limit or encounters a network or page-shape
+failure, it retains bulletins already parsed and completed genres while marking
+the snapshot partial. Retries can skip completed genres; unfinished genres still
+start at their first page. Schedule and bulletin crawls do not request a page
+that would be discarded immediately after reaching the traversal limit.
 
 ## Explicit retries
 

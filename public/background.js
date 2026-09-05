@@ -262,7 +262,20 @@ async function readAuthSettings(record) {
   };
 }
 
-async function probeKoanLogin() {
+let koanProbeTask;
+
+// Share only an active request. A later check must still observe session expiry
+// immediately instead of reusing a cached authentication decision.
+function probeKoanLogin() {
+  if (koanProbeTask) return koanProbeTask;
+  const task = probeKoanLoginOnce().finally(() => {
+    if (koanProbeTask === task) koanProbeTask = undefined;
+  });
+  koanProbeTask = task;
+  return task;
+}
+
+async function probeKoanLoginOnce() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
@@ -749,6 +762,8 @@ async function openLoginTab(url, record, sender, activeWhenManual = true) {
   return { manual, tab };
 }
 
+const KOAN_LOGIN_POLL_INTERVAL_MS = 5 * 1000;
+
 async function ensureKoanLogin(record, sender, requireTab = false) {
   const initialProbe = await probeKoanLogin();
   if (initialProbe.ok) {
@@ -772,12 +787,17 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
     const { manual, tab } = await openLoginTab(KOAN_PORTAL_URL, record, sender);
     try {
       const deadline = Date.now() + 90 * 1000;
+      let nextProbeAt = Date.now() + KOAN_LOGIN_POLL_INTERVAL_MS;
       while (Date.now() < deadline) {
+        // Keep local tab-close detection responsive; only the network probe
+        // waits five seconds between attempts.
         await wait(1000);
         if (tab.id && !await tabExists(tab.id)) {
           throw new Error("認証画面が閉じられたため、更新を中止しました。");
         }
+        if (Date.now() < nextProbeAt) continue;
         const probe = await probeKoanLogin();
+        nextProbeAt = Date.now() + KOAN_LOGIN_POLL_INTERVAL_MS;
         if (probe.ok) {
           if (tab.id) {
             const flow = await readManualFlow(tab.id);
@@ -814,7 +834,19 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
   return koanLoginTask;
 }
 
-async function cleApiReady(tabId) {
+const cleProbeTasks = new Map();
+
+function cleApiReady(tabId) {
+  const existing = cleProbeTasks.get(tabId);
+  if (existing) return existing;
+  const task = cleApiReadyOnce(tabId).finally(() => {
+    if (cleProbeTasks.get(tabId) === task) cleProbeTasks.delete(tabId);
+  });
+  cleProbeTasks.set(tabId, task);
+  return task;
+}
+
+async function cleApiReadyOnce(tabId) {
   try {
     const [execution] = await withTimeout(chrome.scripting.executeScript({
       target: { tabId },

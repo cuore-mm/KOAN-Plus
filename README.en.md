@@ -7,6 +7,7 @@
 KOAN Plus is an **unofficial Chrome extension for viewing Osaka University's KOAN and CLE information together**. Check assignment deadlines, class cancellations, room changes, announcements, and grades in a desktop dashboard.
 
 It leaves the ordinary KOAN and CLE page designs unchanged. The source code is available under the MIT license. This README describes the latest repository implementation; changes not yet published to the store are listed under [Unreleased](./CHANGELOG.md#unreleased).
+The repository version is **1.5.0**; the published store version may differ.
 
 ## What you can do
 
@@ -91,3 +92,5 @@ The development server alone cannot reproduce all extension authentication and t
 ## License and terms
 
 The code is licensed under [MIT](./LICENSE). Use of the extension is subject to [TERMS.md](./TERMS.md). KOAN Plus is not provided, endorsed, or guaranteed by Osaka University. Changes to KOAN, CLE, or the authentication services may stop features from working.
+
+See [Third-party notices](./THIRD_PARTY_NOTICES.md) for dependency and icon attribution. Builds and distribution ZIPs include the project license and full third-party license texts.

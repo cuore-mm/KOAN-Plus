@@ -10,6 +10,9 @@ dist/
 
 # Local environment
 .env
+.env.*
+!.env.example
+!.env.*.example
 
 # Logs
 *.log
@@ -38,4 +41,3 @@ Thumbs.db
 /*.jpeg
 /*.webp
 /scratch/
-/*.zip

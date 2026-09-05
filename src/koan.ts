@@ -729,7 +729,8 @@ async function fetchScheduleRange(includeFuture: boolean) {
   for (let index = 0; index < MAX_SCHEDULE_MONTH_PAGES; index += 1) {
     requireElement(page.doc, "#schedule-calender", "時間割");
     pages.push(page.doc);
-    if (!includeFuture || maxCalendarDate(page.doc) >= horizon) break;
+    if (!includeFuture || maxCalendarDate(page.doc) >= horizon ||
+        index === MAX_SCHEDULE_MONTH_PAGES - 1) break;
     page = await submitScheduleEvent(page.doc, "setNextMonth");
   }
   if (includeFuture && maxCalendarDate(pages[pages.length - 1]) < horizon) {
@@ -1642,13 +1643,21 @@ export async function refreshLight(
   }
 }
 
+type GenreResult = {
+  notices: Notice[];
+  complete: boolean;
+  warning?: string;
+  failed?: boolean;
+  stop?: boolean;
+};
+
 async function fetchGenre(
   root: { doc: Document; url: string },
   genre: string,
   deadline: number,
   knownKeys: Set<string>,
   stopAtKnown: boolean,
-) {
+): Promise<GenreResult> {
   requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
   const link = [...root.doc.querySelectorAll("a")].find(
     (item) => normalize(item.textContent) === genre,
@@ -1665,7 +1674,10 @@ async function fetchGenre(
   let newPages = 0;
   for (let index = 0; index < MAX_BOARD_TRAVERSE_PAGES_PER_GENRE; index += 1) {
     if (!findBoardTable(page.doc, false) && !isEmptyNoticePage(page.doc)) {
-      throw new Error(`${genre}の掲示一覧を確認できませんでした。`);
+      return {
+        notices, complete: false, failed: true, stop: true,
+        warning: "掲示一覧を確認できませんでした。",
+      };
     }
     const pageNotices = parseNotices(page.doc, page.url);
     notices.push(...pageNotices);
@@ -1679,15 +1691,26 @@ async function fetchGenre(
     if (!next || (stopAtKnown && knownOnlyPages >= 2)) {
       return { notices, complete: true };
     }
-    if (newPages >= MAX_BOARD_PAGES_PER_GENRE) {
-      return { notices, complete: false };
+    if (newPages >= MAX_BOARD_PAGES_PER_GENRE || index === MAX_BOARD_TRAVERSE_PAGES_PER_GENRE - 1) {
+      return { notices, complete: false, warning: `${index + 1}ページで中断しました` };
     }
     const nextUrl = new URL(next.getAttribute("href") || "", page.url).href;
-    if (visited.has(nextUrl)) return { notices, complete: false };
+    if (visited.has(nextUrl)) {
+      return { notices, complete: false, warning: "ページ送りが循環したため中断しました", failed: true };
+    }
     visited.add(nextUrl);
     await pause(BOARD_REQUEST_GAP_MS);
-    requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
-    page = await fetchHtml(nextUrl);
+    if (Date.now() >= deadline) {
+      return { notices, complete: false, warning: "制限時間に達したため次回へ継続します", stop: true };
+    }
+    try {
+      page = await fetchHtml(nextUrl);
+    } catch (error) {
+      return {
+        notices, complete: false, failed: true, stop: true,
+        warning: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
   return { notices, complete: false };
 }
@@ -1715,6 +1738,7 @@ export async function refreshSnapshot(
     const snapshotGenreVersions = { ...(previous.snapshotGenreVersions || {}) };
     const warnings: string[] = [];
     let complete = true;
+    let failed = false;
     for (const [index, genre] of GENRES.entries()) {
       onProgress?.(`${index + 1}/${GENRES.length} ${genre}`);
       // Resume interrupted crawls at unfinished genres. Re-reading completed
@@ -1745,9 +1769,10 @@ export async function refreshSnapshot(
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!message.includes("3分で中断")) throw error;
+        const genreFailed = !message.includes("3分で中断");
+        failed ||= genreFailed;
         complete = false;
-        warnings.push(`${genre}: 制限時間に達したため次回へ継続します`);
+        warnings.push(`${genre}: ${genreFailed ? message : "制限時間に達したため次回へ継続します"}`);
         break;
       }
       notices.push(...genreResult.notices);
@@ -1756,8 +1781,10 @@ export async function refreshSnapshot(
         snapshotGenreVersions[genre] = NOTICE_SNAPSHOT_VERSION;
       } else {
         complete = false;
-        warnings.push(`${genre}: ${MAX_BOARD_PAGES_PER_GENRE}ページで中断しました`);
+        warnings.push(`${genre}: ${genreResult.warning || "一部未取得です"}`);
       }
+      failed ||= Boolean(genreResult.failed);
+      if (genreResult.stop) break;
       await pause(BOARD_REQUEST_GAP_MS);
       if (Date.now() >= deadline) {
         complete = false;
@@ -1782,7 +1809,8 @@ export async function refreshSnapshot(
       snapshotComplete: complete,
       warnings,
     };
-    safeStorageRemove(SNAPSHOT_FAILURE_KEY);
+    if (failed) recordFailure(SNAPSHOT_FAILURE_KEY, 10 * 60 * 1000);
+    else safeStorageRemove(SNAPSHOT_FAILURE_KEY);
     return result;
   } catch (error) {
     recordFailure(SNAPSHOT_FAILURE_KEY, 10 * 60 * 1000);

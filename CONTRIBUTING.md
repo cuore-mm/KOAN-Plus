@@ -92,6 +92,7 @@ Dependabotの更新PRもlockfileを確認し、CIの完了後に手動レビュ�
 - `npm run typecheck`、`npm test`、`npm run build` の結果を記載する
 - UI変更では、必要に応じてChromium E2Eの結果と失敗時のスクリーンショットを確認する
 - 生成物（`dist/`、`playwright-report/`、`test-results/`、zip、trace）をコミットしない
+- 第三者のコード・アイコン・素材を追加する場合は、出典とライセンスを [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) に記録する。`npm run build` は依存関係のライセンス原文を配布物へ同梱し、原文が欠けている場合は失敗する
 
 Pull RequestのCIは、同じブランチの新しい実行が開始されたときに古い実行をキャンセル
 します。古い実行の結果だけを根拠にマージしないでください。

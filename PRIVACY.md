@@ -20,11 +20,16 @@ KOAN Plus may process and store:
   response states and periods, bulletin metadata, grades, credits, GPA data,
   and update timestamps;
 - CLE course mappings, assignment titles, due dates, submission or grading
-  status, unread message counts, course material file names and download
+  status, unread message counts, course announcement titles, bodies and dates,
+  course material file names and download
   URLs, and update timestamps;
 - display preferences and refresh coordination timestamps;
 - when auto-login is enabled, the university ID, password, TOTP secret,
   temporary cancellation code, and MFA consent state.
+
+Course announcements are separate from CLE messages. Their bodies are retrieved
+and cached for display; CLE message bodies and KOAN bulletin bodies are not
+prefetched.
 
 Dashboard data and preferences are stored in the extension origin's
 `localStorage`. Credentials and MFA data are encrypted with AES-GCM-256 and
@@ -107,11 +112,14 @@ KOAN Plus は、次のデータを処理・保存する場合があります。
 
 - KOANの時間割、履修科目、休講・教室変更、アンケート名・回答状態・実施期間、
   掲示メタデータ、成績、単位、GPA、更新日時
-- CLEの科目対応、課題名、期限、提出・採点状態、未読メッセージ数、
+- CLEの科目対応、課題名、期限、提出・採点状態、未読メッセージ数、授業の連絡事項の件名・本文・日時、
   配布資料のファイル名・取得用URL、更新日時
 - 表示設定、更新制御用のタイムスタンプ
 - 自動ログインを有効にした場合の学内個人ID、パスワード、TOTPシークレット、
   一時解除コード、MFA同意状態
+
+CLEの授業の連絡事項はメッセージとは別の情報で、表示のために本文も取得・保存します。
+CLEメッセージ本文とKOAN掲示本文の事前取得は行いません。
 
 ダッシュボードデータと表示設定は、拡張機能オリジンの `localStorage` に保存されます。
 認証情報とMFA情報は AES-GCM（256-bit）で暗号化され、非エクスポート鍵とともに
