@@ -4,7 +4,7 @@ import { GENRES } from "../src/koan";
 import { SYNC_STATE_KEY } from "../src/sync";
 
 // Only synthetic records and responses. No university session is used.
-async function setup(page: Page, options: { auto?: boolean; gradesAge?: number; noticesAge?: number; recentAge?: number; hidden?: boolean; failGrades?: boolean; emptyGrades?: boolean; holdGrades?: boolean; cleMessageWarning?: boolean } = {}) {
+async function setup(page: Page, options: { auto?: boolean; gradesAge?: number; noticesAge?: number; recentAge?: number; hidden?: boolean; failGrades?: boolean; emptyGrades?: boolean; holdGrades?: boolean; cleMessageWarning?: boolean; cleMessageRecovery?: boolean } = {}) {
   await page.addInitScript(({ keys, options, versions }) => {
     const now = new Date().toISOString();
     const before = (age = 0) => new Date(Date.now() - age).toISOString();
@@ -22,6 +22,7 @@ async function setup(page: Page, options: { auto?: boolean; gradesAge?: number; 
         courses: [], tasks: [], messages: options.cleMessageWarning ? [{ courseId: "cached-course", courseName: "保存済み連絡", unreadCount: 2 }] : [], unreadMessages: options.cleMessageWarning ? 2 : 0, updatedAt: now,
         coursesUpdatedAt: now, tasksUpdatedAt: now, messagesUpdatedAt: options.cleMessageWarning ? before(120_000) : now, taskStatusesUpdatedAt: now,
         taskScopeVersion: 3, announcements: [], announcementsPendingCount: 0, warnings: [],
+        messagesComplete: !options.cleMessageRecovery,
       }));
       if (!options.emptyGrades) localStorage.setItem(keys.grades, JSON.stringify({
         creditsTotal: 42, cumulativeGpa: "3.25", termGpas: [], groups: [], courses: [], history: [], updatedAt: before(options.gradesAge),
@@ -52,6 +53,13 @@ async function setup(page: Page, options: { auto?: boolean; gradesAge?: number; 
       }
       if (message.type === "cle-fetch") {
         const url = new URL(message.request.url);
+        if (options.cleMessageRecovery && url.pathname.includes("/messages/summary")) {
+          const offset = Number(url.searchParams.get("offset") || 0);
+          return { ok: true, response: { ok: true, status: 200, text: JSON.stringify({
+            results: offset < 17 ? [{ courseId: `recovery-${offset}`, courseName: `確認用科目${offset}`, numUnreadMessages: 1 }] : [],
+            paging: { nextPage: offset < 17 ? `/learn/api/v1/messages/summary?offset=${offset}&limit=100` : null },
+          }) } };
+        }
         if (options.cleMessageWarning && url.pathname.includes("/messages/summary")) {
           const offset = Number(url.searchParams.get("offset") || 0);
           return {
@@ -92,14 +100,14 @@ async function gradesCredits(page: Page) {
 test("fresh reloads and repeated clicks use cache without authentication or upstream requests", async ({ page }) => {
   const requests = await setup(page);
   await page.goto("/");
-  await expect(page.getByText(/自動同期オン/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
   for (let i = 0; i < 3; i++) await page.getByRole("button", { name: "更新", exact: true }).click();
   await expect(page.getByText(/直近の確認結果/)).toBeVisible();
   await page.getByRole("button", { name: "成績", exact: true }).click();
   await page.getByRole("button", { name: "更新", exact: true }).click();
   await expect(page.getByText(/直近の確認結果/)).toBeVisible();
   await page.reload();
-  await expect(page.getByText(/自動同期オン/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
   expect(await calls(page, "auth-ensure-koan")).toBe(0);
   expect(await calls(page, "auth-ensure-cle")).toBe(0);
   expect(requests).toEqual([]);
@@ -134,7 +142,7 @@ test("grades and bulletin snapshots sync automatically without opening their pag
 test("hidden and offline pages wait until visible and connected", async ({ page, context }) => {
   await setup(page, { hidden: true, gradesAge: 7 * 3600_000 });
   await page.goto("/");
-  await expect(page.getByText(/自動同期オン/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
   expect(await calls(page, "auth-ensure-koan")).toBe(0);
   await context.setOffline(true);
   await page.evaluate(() => {
@@ -178,6 +186,30 @@ test("cached content keeps a sync warning in the consolidated header only", asyn
   await page.screenshot({ path: "/tmp/koan-header-desktop.png", fullPage: false });
 });
 
+test("message recovery continues automatically across page budgets without failure backoff", async ({ page }) => {
+  await page.clock.install();
+  await setup(page, { cleMessageRecovery: true });
+  await page.goto("/");
+  const cache = () => page.evaluate((key) => JSON.parse(localStorage.getItem(key) || "{}"), CLE_CACHE_KEY);
+  const failures = () => page.evaluate((key) => JSON.parse(localStorage.getItem(key) || "{}").dashboard?.failures, SYNC_STATE_KEY);
+
+  await expect.poll(async () => (await cache()).messagesNextPage).toContain("offset=7");
+  await expect.poll(failures).toBe(0);
+  await page.clock.fastForward(60_001);
+  await expect.poll(async () => (await cache()).messagesNextPage).toContain("offset=13");
+  await expect.poll(failures).toBe(0);
+  await page.clock.fastForward(60_001);
+  await expect.poll(async () => (await cache()).messagesComplete).toBe(true);
+  const result = await cache();
+  expect(result.messagesNextPage).toBeNull();
+  expect(result.unreadMessages).toBe(17);
+  expect(result.messages.map((item: { courseId: string }) => item.courseId).sort()).toEqual(
+    Array.from({ length: 17 }, (_, i) => `recovery-${i}`).sort(),
+  );
+  expect(result.warnings).toEqual([]);
+  await expect.poll(failures).toBe(0);
+});
+
 test("failed auto sync preserves grades and backs off across focus and reload", async ({ page }) => {
   await page.clock.install();
   await setup(page, { gradesAge: 7 * 3600_000, failGrades: true });
@@ -189,7 +221,7 @@ test("failed auto sync preserves grades and backs off across focus and reload", 
   await page.evaluate(() => { window.dispatchEvent(new Event("focus")); });
   expect(await calls(page, "koan-fetch")).toBe(1);
   await page.reload();
-  await expect(page.getByText(/自動同期オン/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
   expect(await calls(page, "koan-fetch")).toBe(0);
   await page.evaluate(() => { (window as any).failGrades = false; });
   await page.clock.fastForward(60_000);
@@ -293,6 +325,5 @@ test("disabling auto-login during a sync stops the remaining automatic jobs", as
   await expect.poll(() => calls(page, "auth-settings")).toBeGreaterThan(2);
   await page.evaluate(() => { (window as any).holdGrades = false; (window as any).releaseGrades(); });
   await expect.poll(() => gradesCredits(page)).toBe(48);
-  await expect(page.getByText("手動で更新", { exact: true })).toBeVisible();
   expect(requests).toEqual([]);
 });

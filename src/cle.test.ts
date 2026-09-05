@@ -22,6 +22,7 @@ import {
 } from "./cle";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -264,6 +265,49 @@ describe("fetchMessages", () => {
     expect(result.messages.map((message) => message.courseId)).toEqual(["course-0", "course-1"]);
   });
 
+  it("allows multiple validated recoveries when each page adds a course", async () => {
+    vi.stubGlobal("window", globalThis);
+    const offsets: number[] = [];
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn(async (message: any) => {
+          const offset = Number(new URL(message.request.url).searchParams.get("offset"));
+          offsets.push(offset);
+          const terminal = offset >= 5;
+          return {
+            ok: true,
+            response: {
+              ok: true,
+              status: 200,
+              text: JSON.stringify({
+                results: terminal
+                  ? []
+                  : [{ courseId: `course-${offset}`, numUnreadMessages: 1 }],
+                paging: {
+                  nextPage: terminal
+                    ? ""
+                    : `/learn/api/v1/messages/summary?offset=${offset}&limit=100`,
+                },
+              }),
+            },
+          };
+        }),
+      },
+    });
+
+    const result = await fetchMessages();
+
+    expect(offsets).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(result.complete).toBe(true);
+    expect(result.messages.map((message) => message.courseId)).toEqual([
+      "course-0",
+      "course-1",
+      "course-2",
+      "course-3",
+      "course-4",
+    ]);
+  });
+
   it("treats an explicitly empty recovery page as an authoritative end", async () => {
     vi.stubGlobal("window", globalThis);
     const offsets: number[] = [];
@@ -307,7 +351,141 @@ describe("fetchMessages", () => {
     }]);
   });
 
-  it("preserves cached messages when an empty recovery page has malformed paging", async () => {
+  it("continues through a smaller page with missing paging metadata", async () => {
+    vi.stubGlobal("window", globalThis);
+    const offsets: number[] = [];
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn(async (message: any) => {
+          const offset = Number(new URL(message.request.url).searchParams.get("offset"));
+          offsets.push(offset);
+          const results = offset === 0
+            ? [{ courseId: "course-0", numUnreadMessages: 1 }, { courseId: "course-1", numUnreadMessages: 1 }]
+            : offset === 2
+              ? [{ courseId: "course-2", numUnreadMessages: 1 }]
+              : [];
+          return {
+            ok: true,
+            response: {
+              ok: true,
+              status: 200,
+              text: JSON.stringify({ results }),
+            },
+          };
+        }),
+      },
+    });
+
+    const result = await fetchMessages();
+
+    expect(offsets).toEqual([0, 2, 3]);
+    expect(result.complete).toBe(true);
+    expect(result.messages.map((message) => message.courseId)).toEqual([
+      "course-0",
+      "course-1",
+      "course-2",
+    ]);
+  });
+
+  it("does not infer completion from an empty self-loop", async () => {
+    vi.stubGlobal("window", globalThis);
+    const offsets: number[] = [];
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn(async (message: any) => {
+          const offset = Number(new URL(message.request.url).searchParams.get("offset"));
+          offsets.push(offset);
+          return {
+            ok: true,
+            response: {
+              ok: true,
+              status: 200,
+              text: JSON.stringify(offset === 0
+                ? {
+                  results: [{ courseId: "course-0", numUnreadMessages: 1 }],
+                  paging: { nextPage: "/learn/api/v1/messages/summary?offset=1&limit=100" },
+                }
+                : {
+                  results: [],
+                  paging: { nextPage: "/learn/api/v1/messages/summary?offset=1&limit=100" },
+                }),
+            },
+          };
+        }),
+      },
+    });
+
+    const result = await fetchMessages();
+
+    expect(offsets).toEqual([0, 1]);
+    expect(result.complete).toBe(false);
+    expect(result.reason).toBe("pagination");
+    expect(result.nextPage).toBeNull();
+    expect(result.warning).toContain("前進しなかった");
+    expect(result.messages).toEqual([{
+      courseId: "course-0",
+      courseName: "CLE科目",
+      unreadCount: 1,
+    }]);
+  });
+
+  it("keeps fetched rows visible while rejecting malformed nextPage metadata", async () => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn(async () => ({
+          ok: true,
+          response: {
+            ok: true,
+            status: 200,
+            text: JSON.stringify({
+              results: [{ courseId: "course-0", numUnreadMessages: 1 }],
+              paging: { nextPage: 123 },
+            }),
+          },
+        })),
+      },
+    });
+
+    const result = await fetchMessages();
+
+    expect(result.complete).toBe(false);
+    expect(result.reason).toBe("pagination");
+    expect(result.nextPage).toContain("offset=0");
+    expect(result.warning).toContain("次ページ情報が不正");
+    expect(result.messages).toEqual([{
+      courseId: "course-0",
+      courseName: "CLE科目",
+      unreadCount: 1,
+    }]);
+  });
+
+  it("rejects a malformed message row instead of treating it as read", async () => {
+    vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn(async () => ({
+          ok: true,
+          response: {
+            ok: true,
+            status: 200,
+            text: JSON.stringify({
+              results: [{ courseId: "course-0", numUnreadMessages: "unknown" }],
+              paging: { nextPage: "" },
+            }),
+          },
+        })),
+      },
+    });
+
+    await expect(fetchMessages(undefined, [{
+      courseId: "cached-course",
+      courseName: "保存済み科目",
+      unreadCount: 2,
+    }])).rejects.toThrow("未読数が不正");
+  });
+
+  it("preserves the current recovery page when its paging metadata is malformed", async () => {
     vi.stubGlobal("window", globalThis);
     const offsets: number[] = [];
     vi.stubGlobal("chrome", {
@@ -341,12 +519,12 @@ describe("fetchMessages", () => {
 
     expect(offsets).toEqual([0, 1]);
     expect(result.complete).toBe(false);
-    expect(result.nextPage).toBeNull();
+    expect(result.nextPage).toContain("offset=1");
     expect(result.warning).toContain("次ページ情報が不正");
     expect(result.messages.map((message) => message.courseId)).toEqual(["old-course", "course-0"]);
   });
 
-  it("stops an unrecoverable repeated page after one recovery request", async () => {
+  it("keeps the verified recovery source after a repeated page", async () => {
     vi.stubGlobal("window", globalThis);
     const offsets: number[] = [];
     vi.stubGlobal("chrome", {
@@ -377,12 +555,59 @@ describe("fetchMessages", () => {
 
     expect(offsets).toEqual([0, 1]);
     expect(result.complete).toBe(false);
-    expect(result.nextPage).toBeNull();
+    expect(result.nextPage).toContain("offset=0");
     expect(result.warning).toContain("同じ内容");
     expect(result.messages).toEqual([
       { courseId: "cached-course", courseName: "保存済み科目", unreadCount: 2 },
       { courseId: "same-course", courseName: "科目", unreadCount: 1 },
     ]);
+  });
+
+  it("detects a repeated course set when order and unread counts change", async () => {
+    vi.stubGlobal("window", globalThis);
+    const offsets: number[] = [];
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn(async (message: any) => {
+          const offset = Number(new URL(message.request.url).searchParams.get("offset"));
+          offsets.push(offset);
+          const first = offset === 0;
+          return {
+            ok: true,
+            response: {
+              ok: true,
+              status: 200,
+              text: JSON.stringify({
+                results: first
+                  ? [
+                    { courseId: "course-a", numUnreadMessages: 1 },
+                    { courseId: "course-b", numUnreadMessages: 2 },
+                  ]
+                  : [
+                    { courseId: "course-b", numUnreadMessages: 5 },
+                    { courseId: "course-a", numUnreadMessages: 0 },
+                  ],
+                paging: {
+                  nextPage: `/learn/api/v1/messages/summary?offset=${offset + 2}&limit=100`,
+                },
+              }),
+            },
+          };
+        }),
+      },
+    });
+
+    const result = await fetchMessages();
+
+    expect(offsets).toEqual([0, 2]);
+    expect(result.complete).toBe(false);
+    expect(result.reason).toBe("pagination");
+    expect(result.warning).toContain("同じ内容");
+    expect(result.messages).toEqual([{
+      courseId: "course-b",
+      courseName: "CLE科目",
+      unreadCount: 5,
+    }]);
   });
 
   it("returns a partial result at the server-side page cap", async () => {
@@ -418,7 +643,7 @@ describe("fetchMessages", () => {
     expect(sendMessage).toHaveBeenCalledTimes(8);
   });
 
-  it("does not persist a guessed recovery cursor when the budget ends", async () => {
+  it("persists the verified recovery source when the budget ends", async () => {
     vi.stubGlobal("window", globalThis);
     const offsets: number[] = [];
     vi.stubGlobal("chrome", {
@@ -453,8 +678,43 @@ describe("fetchMessages", () => {
     expect(offsets).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
     expect(result.complete).toBe(false);
     expect(result.reason).toBe("budget");
-    expect(result.nextPage).toBeNull();
+    expect(new URL(result.nextPage || "").searchParams.get("offset")).toBe("7");
     expect(result.warning).toContain("上限");
+  });
+
+  it("keeps verified pages when the refresh deadline expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    vi.stubGlobal("window", globalThis);
+    const sendMessage = vi.fn(async () => {
+      await Promise.resolve();
+      vi.setSystemTime(200);
+      return {
+        ok: true,
+        response: {
+          ok: true,
+          status: 200,
+          text: JSON.stringify({
+            results: [{ courseId: "course-0", numUnreadMessages: 1 }],
+            paging: { nextPage: "/learn/api/v1/messages/summary?offset=100&limit=100" },
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+
+    const result = await fetchMessages(undefined, [], { deadlineAt: 100 });
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(result.complete).toBe(false);
+    expect(result.reason).toBe("budget");
+    expect(result.nextPage).toContain("offset=100");
+    expect(result.messages).toEqual([{
+      courseId: "course-0",
+      courseName: "CLE科目",
+      unreadCount: 1,
+    }]);
+    vi.useRealTimers();
   });
 
   it("rechecks the head and resumes the deep cursor on the next run", async () => {
@@ -698,6 +958,42 @@ describe("fetchMessages", () => {
     expect(result.messagesNextPage).toContain("offset=100");
     expect(result.warnings?.some((warning) => warning.includes("途中取得"))).toBe(true);
     expect(failure.nextRetryAt).toBeGreaterThan(Date.now() + 50 * 1000);
+  });
+
+  it("marks messages incomplete when the initial refresh fails", async () => {
+    vi.stubGlobal("window", globalThis);
+    const now = new Date().toISOString();
+    const previous = {
+      ...EMPTY_CLE_DATA,
+      messages: [{ courseId: "cached-course", courseName: "保存済み科目", unreadCount: 2 }],
+      unreadMessages: 2,
+      updatedAt: now,
+      coursesUpdatedAt: now,
+      tasksUpdatedAt: now,
+      messagesUpdatedAt: now,
+      taskStatusesUpdatedAt: now,
+      announcementsUpdatedAt: now,
+    };
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn(async (message: any) => {
+          const url = new URL(message.request.url);
+          if (url.pathname.includes("/messages/summary")) {
+            return { ok: true, response: { ok: false, status: 400, text: "" } };
+          }
+          return emptyRefreshResponse();
+        }),
+      },
+    });
+
+    const result = await refreshCle(previous, undefined, undefined, true);
+
+    expect(result.messages).toEqual(previous.messages);
+    expect(result.messagesComplete).toBe(false);
+    expect(result.messagesPendingCount).toBe(1);
+    expect(result.messagesUpdatedAt).toBe(now);
+    expect(isCleCacheFresh(result)).toBe(false);
+    expect(result.warnings?.some((warning) => warning.includes("CLEの取得に失敗"))).toBe(true);
   });
 
   it("continues a complete refresh when coordination storage is unavailable", async () => {

@@ -683,16 +683,25 @@ p {
 }
 
 .gpa-trend {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
 }
 
 .gpa-chart {
-  padding: 8px 12px 4px;
+  box-sizing: border-box;
+  display: flex;
+  flex: 1 1 0px;
+  flex-direction: column;
+  min-height: 280px;
+  padding: 8px 12px 12px;
 }
 
 .gpa-chart svg {
   display: block;
-  height: auto;
+  flex: 1 1 0px;
+  height: 100%;
+  min-height: 0;
   overflow: visible;
   width: 100%;
 }
@@ -752,18 +761,6 @@ p {
   justify-content: space-between;
   min-width: 0;
   padding: 0 36px;
-}
-
-.page-heading {
-  display: grid;
-  gap: 7px;
-  min-width: 0;
-}
-
-.sync-mode {
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-  line-height: 1.5;
 }
 
 .app-topbar.is-syncing::after {
@@ -951,23 +948,35 @@ p {
 }
 
 .sync-details summary {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 6px;
   cursor: pointer;
   list-style: none;
   color: var(--text-muted);
   font-size: var(--fs-sm);
-  padding: 9px 4px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  transition: color var(--t), background var(--t);
+  user-select: none;
 }
 
 .sync-details summary::-webkit-details-marker {
   display: none;
 }
 
+.sync-details summary:hover {
+  color: var(--text-strong);
+  background: var(--bg-muted);
+}
+
+.sync-details[open] summary {
+  color: var(--text-strong);
+}
+
 .sync-details summary:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 4px;
+  outline-offset: 2px;
   border-radius: var(--r-sm);
 }
 
@@ -987,14 +996,11 @@ p {
   color: var(--brand-strong);
 }
 
-.sync-details-label {
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-  margin-left: 10px;
-}
-
 .sync-chevron {
-  transition: transform .15s ease;
+  display: inline-block;
+  flex-shrink: 0;
+  transition: transform var(--t);
+  transform-origin: center;
 }
 
 .sync-details[open] .sync-chevron {
@@ -1004,7 +1010,7 @@ p {
 .sync-popover {
   position: absolute;
   right: 0;
-  top: calc(100% + 16px);
+  top: calc(100% + 8px);
   width: 460px;
   max-height: 70vh;
   overflow-y: auto;
@@ -1014,6 +1020,18 @@ p {
   background: var(--bg-elevated);
   box-shadow: 0 12px 36px rgb(0 0 0 / 12%);
   z-index: 30;
+  animation: popover-appear var(--t) ease-out;
+}
+
+@keyframes popover-appear {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .sync-popover-heading {

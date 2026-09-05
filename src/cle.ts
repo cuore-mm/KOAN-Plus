@@ -2238,6 +2238,46 @@ function messageRecoveryCursor(currentUrl: string, itemCount: number) {
   return Number.isSafeInteger(nextOffset) ? messageSummaryUrl(nextOffset) : null;
 }
 
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function messagePageIdSignature(items: JsonRecord[]) {
+  const ids = [...new Set(
+    items
+      .map((item) => asString(item.courseId))
+      .filter(Boolean),
+  )].sort();
+  return ids.length ? JSON.stringify(ids) : null;
+}
+
+function messageUnreadCount(item: JsonRecord) {
+  if (!Object.prototype.hasOwnProperty.call(item, "numUnreadMessages")) return 0;
+  const raw = item.numUnreadMessages;
+  const value = typeof raw === "number"
+    ? raw
+    : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function requiredMessageResults(value: unknown) {
+  const items = asRecord(value).results;
+  if (!Array.isArray(items)) {
+    throw new Error("CLEメッセージの応答形式を確認できませんでした。以前のデータを保持します。");
+  }
+  const records: JsonRecord[] = [];
+  for (const item of items) {
+    if (!isJsonRecord(item) || !asString(item.courseId).trim()) {
+      throw new Error("CLEメッセージの科目情報が不正だったため、以前のデータを保持します。");
+    }
+    if (messageUnreadCount(item) === null) {
+      throw new Error("CLEメッセージの未読数が不正だったため、以前のデータを保持します。");
+    }
+    records.push(item);
+  }
+  return records;
+}
+
 export async function fetchMessages(
   tabId?: number,
   previous: CleMessageCourse[] = [],
@@ -2255,12 +2295,11 @@ export async function fetchMessages(
   const resumedFromCursor = Boolean(resumeUrl && resumeUrl !== firstUrl);
   let nextUrl = firstUrl;
   let nextAfterHead = resumeUrl && resumeUrl !== firstUrl ? resumeUrl : null;
-  let offset = 0;
-  let pageSignature = "";
   let scannedPages = 0;
   const visited = new Set<string>();
-  let recoveryUsed = false;
+  const pageSignatures = new Set<string>();
   let awaitingRecovery = false;
+  let recoverySourceUrl: string | null = null;
 
   const partial = (
     nextPage: string | null,
@@ -2294,7 +2333,21 @@ export async function fetchMessages(
   });
 
   for (let page = 0; page < MAX_MESSAGE_PAGES && nextUrl; page += 1) {
-    ensureRefreshTime(context);
+    try {
+      ensureRefreshTime(context);
+    } catch (error) {
+      // A bounded refresh deadline is expected during a large message list.
+      // Return the next validated cursor so the caller can resume instead of
+      // throwing away pages that were already verified in this run.
+      if (scannedPages > 0 && error instanceof CleDeadlineError) {
+        return partial(
+          awaitingRecovery ? recoverySourceUrl : nextUrl,
+          "budget",
+          "CLEメッセージの取得時間上限に達したため、取得済み分だけを保持します。",
+        );
+      }
+      throw error;
+    }
     if (visited.has(nextUrl)) {
       return partial(
         null,
@@ -2310,11 +2363,15 @@ export async function fetchMessages(
       if (isCleAuthenticationError(error)) throw error;
       if (scannedPages > 0) {
         return partial(
-          awaitingRecovery ? null : nextUrl,
-          error instanceof CleRequestError && error.status === 429
-            ? "rate-limit"
-            : "error",
-          `メッセージの途中取得に失敗したため、取得済み分だけを保持しました: ${error instanceof Error ? error.message : String(error)}`,
+          awaitingRecovery ? recoverySourceUrl : nextUrl,
+          error instanceof CleDeadlineError
+            ? "budget"
+            : error instanceof CleRequestError && error.status === 429
+              ? "rate-limit"
+              : "error",
+          error instanceof CleDeadlineError
+            ? "CLEメッセージの取得時間上限に達したため、取得済み分だけを保持します。"
+            : `メッセージの途中取得に失敗したため、取得済み分だけを保持しました: ${error instanceof Error ? error.message : String(error)}`,
           retryAfterFromError(error),
         );
       }
@@ -2322,61 +2379,56 @@ export async function fetchMessages(
     }
     let items: JsonRecord[];
     try {
-      items = requiredResults(response, "CLEメッセージ");
+      items = requiredMessageResults(response);
     } catch (error) {
       if (scannedPages > 0) {
         return partial(
-          awaitingRecovery ? null : nextUrl,
+          awaitingRecovery ? recoverySourceUrl : nextUrl,
           "error",
           error instanceof Error ? error.message : String(error),
         );
       }
       throw error;
     }
-    const currentSignature = JSON.stringify(items);
-    const paging = asRecord(asRecord(response).paging);
-    if (scannedPages > 0 && items.length && currentSignature === pageSignature) {
-      return partial(
-        null,
-        "pagination",
-        "メッセージの同じ内容が繰り返されたため、取得済み分だけを保持しました。",
-      );
-    }
-    if (awaitingRecovery) {
-      const hasNextPageField = "nextPage" in paging;
-      const rawNextPage = hasNextPageField ? paging.nextPage : undefined;
-      const explicitEnd = rawNextPage === null || rawNextPage === "";
-      if (hasNextPageField && !explicitEnd && typeof rawNextPage !== "string") {
-        return partial(
-          null,
-          "pagination",
-          "CLEメッセージの次ページ情報が不正だったため、取得済み分だけを保持しました。",
-        );
-      }
-      if (!items.length && explicitEnd) {
-        awaitingRecovery = false;
-        return complete();
-      }
-      const contributesNewCourse = items.some((item) => {
-        const courseId = asString(item.courseId);
-        return Boolean(courseId && !seenCourseIds.has(courseId));
-      });
-      awaitingRecovery = false;
-      if (!contributesNewCourse) {
-        return partial(
-          null,
-          "pagination",
-          "CLEメッセージの循環回復先に新しい科目がなかったため、取得済み分だけを保持しました。",
-        );
-      }
-    }
-    pageSignature = currentSignature;
+
+    const responseRecord = asRecord(response);
+    const hasPagingField = Object.prototype.hasOwnProperty.call(responseRecord, "paging");
+    const rawPaging = hasPagingField ? responseRecord.paging : undefined;
+    const pagingIsValid = !hasPagingField || isJsonRecord(rawPaging);
+    const paging = pagingIsValid ? rawPaging as JsonRecord | undefined : undefined;
+    const hasNextPageField = Boolean(
+      paging && Object.prototype.hasOwnProperty.call(paging, "nextPage"),
+    );
+    const rawNextPage = hasNextPageField ? paging?.nextPage : undefined;
+    const explicitEnd = rawNextPage === null || rawNextPage === "";
+    const nextPageIsValid = !hasNextPageField || explicitEnd || (
+      typeof rawNextPage === "string" && rawNextPage.trim().length > 0
+    );
+
+    const currentSignature = messagePageIdSignature(items);
+    const repeatedPage = Boolean(currentSignature && pageSignatures.has(currentSignature));
+    if (currentSignature) pageSignatures.add(currentSignature);
+    const contributesNewCourse = awaitingRecovery && items.some((item) => {
+      const courseId = asString(item.courseId);
+      return Boolean(courseId && !seenCourseIds.has(courseId));
+    });
+
+    // The result rows are valid even when paging metadata is not. Apply them
+    // before returning the partial result so a malformed cursor cannot erase
+    // a page that was already fetched successfully.
     scannedPages += 1;
     for (const item of items) {
       const courseId = asString(item.courseId);
-      if (courseId) seenCourseIds.add(courseId);
-      const unreadCount = asNumber(item.numUnreadMessages);
-      if (!courseId || unreadCount <= 0) continue;
+      if (!courseId) continue;
+      seenCourseIds.add(courseId);
+      const unreadCount = messageUnreadCount(item) || 0;
+      if (unreadCount <= 0) {
+        // A later zero count is authoritative for a course already observed
+        // with unread messages. Leaving the old map entry would keep stale
+        // unread badges after a valid page reports it as read.
+        messages.delete(courseId);
+        continue;
+      }
       messages.set(courseId, {
         courseId,
         courseName: asString(item.courseName) || "CLE科目",
@@ -2384,13 +2436,57 @@ export async function fetchMessages(
       });
     }
 
-    const rawNext = pagingNextUrl(response);
+    if (!pagingIsValid) {
+      return partial(
+        nextUrl,
+        "pagination",
+        "CLEメッセージのページ情報が不正だったため、取得済み分だけを保持しました。",
+      );
+    }
+    if (!nextPageIsValid) {
+      return partial(
+        nextUrl,
+        "pagination",
+        "CLEメッセージの次ページ情報が不正だったため、取得済み分だけを保持しました。",
+      );
+    }
+    if (repeatedPage) {
+      return partial(
+        awaitingRecovery ? recoverySourceUrl : null,
+        "pagination",
+        "メッセージの同じ内容（科目一覧）が繰り返されたため、取得済み分だけを保持しました。",
+      );
+    }
+
+    if (awaitingRecovery) {
+      // An empty page with an explicit end marker (or no paging metadata at
+      // all) is a valid terminal response, including when it was reached via
+      // a recovery cursor. A non-empty page must still prove progress.
+      if (!items.length && (explicitEnd || !hasNextPageField)) {
+        awaitingRecovery = false;
+        recoverySourceUrl = null;
+        return complete();
+      }
+      awaitingRecovery = false;
+      if (!contributesNewCourse) {
+        return partial(
+          recoverySourceUrl || nextUrl,
+          "pagination",
+          "CLEメッセージの循環回復先に新しい科目がなかったため、取得済み分だけを保持しました。",
+        );
+      }
+      recoverySourceUrl = null;
+    }
+
+    const rawNext = hasNextPageField && typeof rawNextPage === "string"
+      ? rawNextPage
+      : "";
     let pageNextUrl: string | null = null;
     if (rawNext) {
       pageNextUrl = validateMessageCursor(rawNext);
       if (!pageNextUrl) {
         return partial(
-          null,
+          nextUrl,
           "pagination",
           "CLEメッセージの次ページURLが不正だったため、そこで停止しました。",
         );
@@ -2402,12 +2498,16 @@ export async function fetchMessages(
         nextOffset !== null &&
         nextOffset <= currentOffset
       ) {
-        const recoveryUrl = !recoveryUsed && items.length > 0
+        // CLE has occasionally returned a stale/self-looping nextPage. The
+        // offset derived from the received item count is safe to try, and a
+        // recovery is accepted only after its response contributes a new
+        // course ID. This allows more than one recovery in a bounded scan.
+        const recoveryUrl = items.length > 0
           ? messageRecoveryCursor(nextUrl, items.length)
           : null;
         if (recoveryUrl && !visited.has(recoveryUrl)) {
-          recoveryUsed = true;
           awaitingRecovery = true;
+          recoverySourceUrl = nextUrl;
           pageNextUrl = recoveryUrl;
         } else {
           return partial(
@@ -2417,12 +2517,20 @@ export async function fetchMessages(
           );
         }
       }
-    } else if ("nextPage" in paging) {
+    } else if (hasNextPageField) {
       pageNextUrl = null;
-    } else if (items.length >= MESSAGE_PAGE_SIZE && items.length > 0) {
-      const parsed = new URL(nextUrl);
-      offset = Number.parseInt(parsed.searchParams.get("offset") || String(offset), 10);
-      pageNextUrl = messageSummaryUrl(offset + items.length);
+    } else if (items.length > 0) {
+      // The endpoint may honor a smaller page size while omitting paging.
+      // Continue by the number of rows received; an empty response is the
+      // only implicit terminal marker.
+      pageNextUrl = messageRecoveryCursor(nextUrl, items.length);
+      if (!pageNextUrl) {
+        return partial(
+          nextUrl,
+          "pagination",
+          "CLEメッセージの続き位置を確認できなかったため、取得済み分だけを保持しました。",
+        );
+      }
     }
 
     if (scannedPages === 1 && nextAfterHead) {
@@ -2430,10 +2538,10 @@ export async function fetchMessages(
       // cursor saved by the previous partial run.
       if (awaitingRecovery) {
         // A known persisted cursor is preferable to a recovery cursor derived
-        // from the head response. It was not requested, so do not consume the
-        // one-recovery allowance or treat it as an awaited recovery result.
+        // from the head response. It was not requested, so do not treat it as
+        // an awaited recovery result.
         awaitingRecovery = false;
-        recoveryUsed = false;
+        recoverySourceUrl = null;
       }
       nextUrl = nextAfterHead;
       nextAfterHead = null;
@@ -2446,7 +2554,7 @@ export async function fetchMessages(
   }
 
   return partial(
-    awaitingRecovery ? null : nextUrl,
+    awaitingRecovery ? recoverySourceUrl : nextUrl,
     "budget",
     `CLEメッセージの取得上限（${MAX_MESSAGE_PAGES}ページ）に達したため、次回は続きから再開します。`,
   );
@@ -2788,8 +2896,11 @@ export async function refreshCle(
             messages: previous?.messages || [],
             updatedAt: clePartUpdatedAt(previous, "messagesUpdatedAt"),
             nextPage: previous?.messagesNextPage || null,
-            complete: previousMessagesComplete,
-            pendingCount: previous?.messagesPendingCount || 0,
+            // A failed refresh must invalidate a previously complete cache;
+            // otherwise its recent timestamp can make the next refresh look
+            // fresh and suppress the retry that is needed to recover it.
+            complete: false,
+            pendingCount: Math.max(1, previous?.messagesPendingCount || 0),
           };
         }),
       coursesPromise,

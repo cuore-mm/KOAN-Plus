@@ -604,7 +604,8 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       return !next.warnings?.length || next.updatedAt !== cleData.updatedAt ||
         Object.keys(next.announcementCourses || {}).length > Object.keys(cleData.announcementCourses || {}).length ||
         (next.taskStatusPendingCount || 0) < (cleData.taskStatusPendingCount || 0) ||
-        (next.messagesPendingCount || 0) < (cleData.messagesPendingCount || 0);
+        (next.messagesPendingCount || 0) < (cleData.messagesPendingCount || 0) ||
+        Boolean(next.messagesNextPage && next.messagesNextPage !== cleData.messagesNextPage);
     } catch (error) {
       setCleStatus(error instanceof Error ? error.message : String(error));
       return false;
@@ -1174,10 +1175,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       />
 
       <header className={`app-topbar${activeSync ? " is-syncing" : ""}`}>
-        <div className="page-heading">
-          <h1 ref={pageTitleRef} tabIndex={-1}>{viewTitle}</h1>
-          <span className="sync-mode">{autoLoginActive ? "自動同期オン" : "手動で更新"}</span>
-        </div>
+        <h1 ref={pageTitleRef} tabIndex={-1}>{viewTitle}</h1>
         <div className="topbar-actions">
           <div className="update-group">
             <details ref={syncDetailsRef} key={view} className="sync-details" onBlur={(event) => {
@@ -1193,8 +1191,22 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
                 <span role="status" aria-live="polite">{isOffline ? "オフライン · 保存済みを表示" : activeSync
                   ? `${({ dashboard: "ホーム", reference: "掲示", grades: "成績" })[activeSync]}を同期中`
                   : currentFeedback || (syncHasIssue ? "一部の情報を更新できませんでした" : topbarStatus)}</span>
-                <span className="sync-details-label">同期の詳細</span>
-                <span className="sync-chevron" aria-hidden="true">⌄</span>
+                <span className="sr-only">同期の詳細</span>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="lucide-icon sync-chevron"
+                  aria-hidden="true"
+                >
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
               </summary>
               <div className="sync-popover" aria-label="同期の詳細">
                 <div className="sync-popover-heading"><strong>同期の状態</strong><span>保存済みの情報は引き続き閲覧できます</span></div>
@@ -1211,8 +1223,23 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
               disabled={topbarState.busy}
               onClick={topbarState.action}
             >
-              <svg className="refresh-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
-                <path d="M20 7v5h-5M4 17v-5h5M5.6 7a8 8 0 0 1 13-1L20 8M4 16l1.4 2a8 8 0 0 0 13-1" />
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={`lucide-icon refresh-icon${topbarState.busy ? " spinner" : ""}`}
+                aria-hidden="true"
+              >
+                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+                <path d="M21 3v5h-5" />
+                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+                <path d="M8 16H3v5" />
               </svg>
               {topbarState.label}
             </button>
@@ -3836,11 +3863,38 @@ function GpaTrend({
   termGpas: GradeData["termGpas"];
 }) {
   const points = buildGpaTrendPoints(termGpas);
-  const width = 590;
-  const height = 285;
-  const margin = { top: 35, right: 20, bottom: 50, left: 42 };
-  const plotWidth = width - margin.left - margin.right;
-  const plotHeight = height - margin.top - margin.bottom;
+  const chartRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 590, height: 285 });
+
+  useEffect(() => {
+    const el = chartRef.current;
+    if (!el) return;
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        const nextWidth = Math.round(entry.contentRect.width);
+        const nextHeight = Math.round(entry.contentRect.height);
+        if (nextWidth > 0 && nextHeight > 0) {
+          setSize((prev) => {
+            if (prev.width === nextWidth && prev.height === nextHeight) {
+              return prev;
+            }
+            return { width: nextWidth, height: nextHeight };
+          });
+        }
+      });
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+  }, []);
+
+  const width = Math.max(300, size.width);
+  const height = Math.max(260, size.height);
+  const margin = { top: 35, right: 25, bottom: 50, left: 42 };
+  const plotWidth = Math.max(10, width - margin.left - margin.right);
+  const plotHeight = Math.max(10, height - margin.top - margin.bottom);
   const x = (index: number) =>
     margin.left + (points.length <= 1 ? plotWidth / 2 : (plotWidth * index) / (points.length - 1));
   const y = (value: number) => margin.top + plotHeight - (plotHeight * value) / 4;
@@ -3854,7 +3908,7 @@ function GpaTrend({
           <p>KOANに記録された学期ごとの公式 GPA</p>
         </div>
       </div>
-      <div className="gpa-chart">
+      <div className="gpa-chart" ref={chartRef}>
         <svg aria-label="学期ごとの公式 GPA の推移" role="img" viewBox={`0 0 ${width} ${height}`}>
           {[0, 1, 2, 3, 4].map((tick) => (
             <g className="gpa-grid-line" key={tick}>
@@ -3867,7 +3921,10 @@ function GpaTrend({
             <g className="gpa-point cumulative" key={point.key}>
               <circle cx={x(index)} cy={y(point.gpa)} r="4" />
               <text className="gpa-value" x={x(index)} y={y(point.gpa) - 12}>{point.gpa.toFixed(2)}</text>
-              <text className="gpa-label" x={x(index)} y={height - 20}>{point.label}</text>
+              <text className="gpa-label" x={x(index)} y={height - 24}>
+                <tspan x={x(index)} dy="0">{point.year}</tspan>
+                <tspan x={x(index)} dy="13">{point.term}</tspan>
+              </text>
             </g>
           ))}
         </svg>
