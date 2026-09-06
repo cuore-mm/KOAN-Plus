@@ -23,6 +23,7 @@
 
   const proceedMfaRegistration = (proceedBtn) => {
     let transitionObserved = false;
+    const firefoxDataConsent = isFirefoxDataConsentEnv();
     const markTransition = () => {
       transitionObserved = true;
     };
@@ -31,16 +32,17 @@
     window.addEventListener("pagehide", markTransition, { once: true });
 
     chrome.runtime.sendMessage({ type: "auth-mfa-click-proceed" }).then((response) => {
+      if (firefoxDataConsent) return; // All Firefox submissions go through the permission-checked background.
       if ((!response?.ok || !response.started) && !transitionObserved) {
         proceedBtn.click();
       }
     }).catch(() => {
-      if (!transitionObserved) proceedBtn.click();
+      if (!firefoxDataConsent && !transitionObserved) proceedBtn.click();
     });
 
     window.setTimeout(() => {
       if (transitionObserved || !document.contains(proceedBtn)) return;
-      proceedBtn.click();
+      if (!firefoxDataConsent) proceedBtn.click();
     }, 500);
 
     window.setTimeout(() => {
@@ -245,7 +247,7 @@
       sessionStorage.setItem("koan-plus-mfa-auto-collect", "true");
       autoCollectRegistration = chrome.runtime.sendMessage({ type: "auth-mfa-register-auto-tab" })
         .then((response) => {
-          if (response?.permissionRequired) {
+          if (response?.permissionRequired || (isFirefoxDataConsentEnv() && !response?.ok)) {
             autoCollectPermissionBlocked = true;
             sessionStorage.removeItem("koan-plus-mfa-auto-collect");
           }
@@ -267,8 +269,12 @@
       return chrome.runtime.sendMessage({ type: "auth-mfa-check-auto-tab" });
     }).then((response) => {
       if (autoCollectPermissionBlocked || !response) return;
+      if (isFirefoxDataConsentEnv() && !response.ok) {
+        sessionStorage.removeItem("koan-plus-mfa-auto-collect");
+        return;
+      }
       const isAutoCollect = response?.isAutoCollect === true ||
-        sessionStorage.getItem("koan-plus-mfa-auto-collect") === "true";
+        (!isFirefoxDataConsentEnv() && sessionStorage.getItem("koan-plus-mfa-auto-collect") === "true");
 
       const isSuccessPage = document.body.innerText.includes("MFA登録\t：\t登録済") ||
         document.body.innerText.includes("MFA登録 ： 登録済");
@@ -349,7 +355,14 @@
             if (registerBtn instanceof HTMLElement) {
               sessionStorage.setItem(MFA_PENDING_TRANSACTION_KEY, saveRes.transactionId);
               setTimeout(() => {
-                registerBtn.click();
+                if (!isFirefoxDataConsentEnv()) {
+                  registerBtn.click();
+                  return;
+                }
+                // Consent or the registration flow may have been cancelled during the delay.
+                chrome.runtime.sendMessage({ type: "auth-mfa-check-auto-tab" }).then((state) => {
+                  if (state?.ok && state.isAutoCollect) registerBtn.click();
+                }).catch(() => {});
               }, 1200);
             }
           } else if (registerBtn) {

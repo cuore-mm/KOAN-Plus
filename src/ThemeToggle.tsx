@@ -1,8 +1,25 @@
+import { recordStorageDiagnostic, THEME_KEY } from "./storage";
+
 export type Theme = "light" | "dark";
 
 export function loadTheme(): Theme {
-  const stored = localStorage.getItem("koan-plus-theme");
-  return stored === "dark" ? "dark" : "light";
+  try {
+    const stored = localStorage.getItem(THEME_KEY);
+    return stored === "dark" ? "dark" : "light";
+  } catch (error) {
+    recordStorageDiagnostic(THEME_KEY, "read", error);
+    return "light";
+  }
+}
+
+export function saveTheme(theme: Theme) {
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+    return true;
+  } catch (error) {
+    recordStorageDiagnostic(THEME_KEY, "write", error);
+    return false;
+  }
 }
 
 export default function ThemeToggle({

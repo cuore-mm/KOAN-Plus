@@ -1,6 +1,6 @@
 # Privacy Policy / プライバシーポリシー
 
-Last updated / 最終更新日: 2026-08-27
+Last updated / 最終更新日: 2026-09-06
 
 ## English
 
@@ -16,14 +16,20 @@ operation, except for the optional Google Forms contact flow described below.
 
 KOAN Plus may process and store:
 
-- KOAN schedules, course registrations, class changes, bulletin metadata,
-  grades, credits, GPA data, and update timestamps;
+- KOAN schedules, course registrations, class changes, survey titles,
+  response states and periods, bulletin metadata, grades, credits, GPA data,
+  and update timestamps;
 - CLE course mappings, assignment titles, due dates, submission or grading
-  status, unread message counts, course material file names and download
+  status, unread message counts, course announcement titles, bodies and dates,
+  course material file names and download
   URLs, and update timestamps;
 - display preferences and refresh coordination timestamps;
 - when auto-login is enabled, the university ID, password, TOTP secret,
   temporary cancellation code, and MFA consent state.
+
+Course announcements are separate from CLE messages. Their bodies are retrieved
+and cached for display; CLE message bodies and KOAN bulletin bodies are not
+prefetched.
 
 Dashboard data and preferences are stored in the extension origin's
 `localStorage`. Credentials and MFA data are encrypted with AES-GCM-256 and
@@ -55,6 +61,11 @@ this transmission is performed only while the optional `authenticationInfo`
 data permission is granted. If that permission is denied or revoked, KOAN Plus
 does not provide the credentials or codes to authentication pages, while the
 encrypted local data is retained.
+
+When auto-login is enabled, a visible, online dashboard automatically refreshes
+expired academic data, including grades and bulletin metadata. Cached results
+are reused across tabs. Hidden or offline dashboards start no automatic sync.
+Manual refresh remains available; disabling auto-login stops periodic sync.
 
 The sidebar's **Contact** link opens a Google Form at `docs.google.com`.
 Opening the link always sends the KOAN Plus version to Google as a prefilled
@@ -114,13 +125,16 @@ KOAN Plus は、ユーザーがローカルにインストールする Chrome / 
 
 KOAN Plus は、次のデータを処理・保存する場合があります。
 
-- KOANの時間割、履修科目、休講・教室変更、掲示メタデータ、成績、単位、GPA、
-  更新日時
-- CLEの科目対応、課題名、期限、提出・採点状態、未読メッセージ数、
+- KOANの時間割、履修科目、休講・教室変更、アンケート名・回答状態・実施期間、
+  掲示メタデータ、成績、単位、GPA、更新日時
+- CLEの科目対応、課題名、期限、提出・採点状態、未読メッセージ数、授業の連絡事項の件名・本文・日時、
   配布資料のファイル名・取得用URL、更新日時
 - 表示設定、更新制御用のタイムスタンプ
 - 自動ログインを有効にした場合の学内個人ID、パスワード、TOTPシークレット、
   一時解除コード、MFA同意状態
+
+CLEの授業の連絡事項はメッセージとは別の情報で、表示のために本文も取得・保存します。
+CLEメッセージ本文とKOAN掲示本文の事前取得は行いません。
 
 ダッシュボードデータと表示設定は、拡張機能オリジンの `localStorage` に保存されます。
 認証情報とMFA情報は AES-GCM（256-bit）で暗号化され、非エクスポート鍵とともに
@@ -148,6 +162,11 @@ KOAN Plus は Cookie API の権限を要求しません。
 あります。Firefoxでは、optionalな `authenticationInfo` データ権限が許可されている間だけ
 この送信を行います。許可が拒否または取り消された場合、KOAN Plusは認証ページへ認証情報や
 コードを渡しません。暗号化済みのローカルデータは保持されます。
+
+自動ログインが有効な場合、表示中かつオンラインのダッシュボードは、成績と掲示
+メタデータを含む保存期限切れの学務情報を自動同期します。取得結果はタブ間で
+再利用します。非表示・オフライン中は新しい自動同期を開始しません。手動更新も
+利用でき、自動ログインを停止すると定期的な自動同期も停止します。
 
 サイドバーの「お問い合わせ」は `docs.google.com` の Google Forms を開きます。
 リンクを開くと、KOAN Plusのバージョンが常にフォームの事前入力用URLパラメータとして

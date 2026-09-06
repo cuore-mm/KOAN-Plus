@@ -11,6 +11,9 @@ dist-firefox/
 
 # Local environment
 .env
+.env.*
+!.env.example
+!.env.*.example
 
 # Logs
 *.log
@@ -19,6 +22,10 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Browser test artifacts
+/playwright-report/
+/test-results/
+
 # OS/editor files
 .DS_Store
 Thumbs.db
@@ -26,10 +33,12 @@ Thumbs.db
 .vscode/
 .VSCodeCounter/
 
+# Local design notes (not published with the OSS repo)
+/design.md
+
 # Temporary assets and scratch files at the root level
 /*.png
 /*.jpg
 /*.jpeg
 /*.webp
 /scratch/
-/*.zip

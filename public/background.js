@@ -11,8 +11,10 @@ const KOAN_PORTAL_URL = "https://koan.osaka-u.ac.jp/campusweb/campusportal.do?pa
 const CLE_ORIGIN = "https://www.cle.osaka-u.ac.jp";
 const CLE_HOME_URL = `${CLE_ORIGIN}/ultra`;
 const CLE_PROBE_URL = `${CLE_ORIGIN}/learn/api/v1/messages/summary?offset=0&limit=1`;
+const MAX_CLE_RESPONSE_TEXT_LENGTH = 10 * 1024 * 1024;
 const MFA_REGISTRATION_PATH = "/AttributeRegistSite/MfaInfoServlet";
 const MFA_PENDING_TTL_MS = 10 * 60 * 1000;
+const MFA_AUTO_FLOW_TTL_MS = 2 * 60 * 1000;
 const EXTENSION_ONLY_AUTH_TYPES = new Set([
   "auth-check-login",
   "auth-claim-startup-refresh",
@@ -21,12 +23,14 @@ const EXTENSION_ONLY_AUTH_TYPES = new Set([
   "auth-get-secrets",
   "auth-focus-pending-mfa",
   "auth-mfa-registration-result",
+  "auth-mfa-cancel-auto-tab",
   "auth-delete",
   "auth-delete-mfa",
   "auth-save",
   "auth-ensure-koan",
   "auth-ensure-cle",
   "auth-refresh-cle",
+  "auth-open-url",
 ]);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -37,6 +41,8 @@ let pendingMfa = null;
 const PENDING_MFA_KEY = "authPendingMfa";
 const AUTO_COLLECT_TAB_IDS_KEY = "authAutoCollectTabIds";
 const MFA_AUTO_FLOW_KEY_PREFIX = "authMfaAutoFlow:";
+const MANUAL_FLOW_KEY_PREFIX = "authManualFlow:";
+const MANUAL_FLOW_TTL_MS = 5 * 60 * 1000;
 const STARTUP_REFRESH_CLAIMED_KEY = "startupRefreshClaimed";
 const DASHBOARD_REFRESH_ATTEMPT_KEY = "dashboardRefreshAttempt";
 const autoCollectTabIds = new Set();
@@ -44,10 +50,13 @@ let startupRefreshClaimTask = Promise.resolve();
 let dashboardRefreshClaimTask = Promise.resolve();
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  autoCollectTabIds.delete(tabId);
-  void persistAutoCollectTabIds();
+  // Reload the session-backed set first. The worker may have restarted since
+  // the tab was registered, so deleting from an empty in-memory Set would
+  // otherwise erase registrations for every other tab.
+  void removeAutoCollectTabId(tabId).catch(() => {});
+  void clearManualFlow(tabId).catch(() => {});
   void readMfaAutoFlow(tabId).then((flow) => {
-    if (flow && flow.status !== "saved") {
+    if (flow?.status === "pending") {
       return writeMfaAutoFlow(tabId, {
         status: "cancelled",
         error: "MFA登録が完了する前に画面が閉じられました。",
@@ -295,7 +304,20 @@ async function readAuthSettings(record) {
   };
 }
 
-async function probeKoanLogin() {
+let koanProbeTask;
+
+// Share only an active request. A later check must still observe session expiry
+// immediately instead of reusing a cached authentication decision.
+function probeKoanLogin() {
+  if (koanProbeTask) return koanProbeTask;
+  const task = probeKoanLoginOnce().finally(() => {
+    if (koanProbeTask === task) koanProbeTask = undefined;
+  });
+  koanProbeTask = task;
+  return task;
+}
+
+async function probeKoanLoginOnce() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
@@ -364,12 +386,124 @@ async function readMfaAutoFlow(tabId) {
   if (!chrome.storage?.session) return null;
   const key = mfaAutoFlowKey(tabId);
   const stored = await chrome.storage.session.get(key);
-  return stored[key] || null;
+  const flow = stored[key] || null;
+  const completedAt = Number(flow?.completedAt || 0);
+  if (
+    flow &&
+    (flow.status === "saved" || flow.status === "cancelled") &&
+    completedAt > 0 &&
+    Date.now() - completedAt > MFA_AUTO_FLOW_TTL_MS
+  ) {
+    await chrome.storage.session.remove(key);
+    return null;
+  }
+  return flow;
 }
 
 async function writeMfaAutoFlow(tabId, value) {
   if (!chrome.storage?.session) return;
   await chrome.storage.session.set({ [mfaAutoFlowKey(tabId)]: value });
+}
+
+async function cleanupExpiredMfaAutoFlows() {
+  if (!chrome.storage?.session) return;
+  const stored = await chrome.storage.session.get();
+  const now = Date.now();
+  const expiredKeys = Object.entries(stored)
+    .filter(([key, value]) => {
+      const flow = value && typeof value === "object" ? value : null;
+      const completedAt = Number(flow?.completedAt || 0);
+      return key.startsWith(MFA_AUTO_FLOW_KEY_PREFIX) &&
+        (flow?.status === "saved" || flow?.status === "cancelled") &&
+        completedAt > 0 &&
+        now - completedAt > MFA_AUTO_FLOW_TTL_MS;
+    })
+    .map(([key]) => key);
+  if (expiredKeys.length) await chrome.storage.session.remove(expiredKeys);
+}
+
+chrome.runtime.onStartup?.addListener(() => {
+  void Promise.all([
+    cleanupExpiredMfaAutoFlows(),
+    cleanupExpiredManualFlows(),
+  ]).catch(() => {});
+});
+
+function manualFlowKey(tabId) {
+  return `${MANUAL_FLOW_KEY_PREFIX}${tabId}`;
+}
+
+async function readManualFlow(tabId) {
+  const cached = manualFlows.get(tabId);
+  if (cached) {
+    const createdAt = Number(cached.createdAt || 0);
+    if (createdAt <= 0 || Date.now() - createdAt <= MANUAL_FLOW_TTL_MS) return cached;
+    manualFlows.delete(tabId);
+    if (chrome.storage?.session) {
+      await chrome.storage.session.remove(manualFlowKey(tabId)).catch(() => {});
+    }
+    return null;
+  }
+  if (!chrome.storage?.session) return null;
+  const key = manualFlowKey(tabId);
+  let stored;
+  try {
+    stored = await chrome.storage.session.get(key);
+  } catch {
+    return null;
+  }
+  const flow = stored[key] || null;
+  const createdAt = Number(flow?.createdAt || 0);
+  if (flow && createdAt > 0 && Date.now() - createdAt > MANUAL_FLOW_TTL_MS) {
+    await chrome.storage.session.remove(key).catch(() => {});
+    return null;
+  }
+  if (flow) manualFlows.set(tabId, flow);
+  return flow;
+}
+
+async function writeManualFlow(tabId, value) {
+  const flow = {
+    returnTabId: Number.isInteger(value?.returnTabId) ? value.returnTabId : null,
+    createdAt: Number.isFinite(value?.createdAt) ? value.createdAt : Date.now(),
+  };
+  manualFlows.set(tabId, flow);
+  if (chrome.storage?.session) {
+    try {
+      await chrome.storage.session.set({ [manualFlowKey(tabId)]: flow });
+    } catch {
+      // Keep the in-memory fallback; storage.session may be unavailable in a
+      // restricted profile or while the worker is shutting down.
+    }
+  }
+  return flow;
+}
+
+async function clearManualFlow(tabId) {
+  manualFlows.delete(tabId);
+  if (chrome.storage?.session) {
+    try {
+      await chrome.storage.session.remove(manualFlowKey(tabId));
+    } catch {
+      // The tab is already gone; an unavailable session store needs no retry.
+    }
+  }
+}
+
+async function cleanupExpiredManualFlows() {
+  if (!chrome.storage?.session) return;
+  const stored = await chrome.storage.session.get();
+  const now = Date.now();
+  const expiredKeys = Object.entries(stored)
+    .filter(([key, value]) => {
+      const flow = value && typeof value === "object" ? value : null;
+      const createdAt = Number(flow?.createdAt || 0);
+      return key.startsWith(MANUAL_FLOW_KEY_PREFIX) &&
+        createdAt > 0 &&
+        now - createdAt > MANUAL_FLOW_TTL_MS;
+    })
+    .map(([key]) => key);
+  if (expiredKeys.length) await chrome.storage.session.remove(expiredKeys);
 }
 
 async function beginMfaAutoFlow(tabId) {
@@ -424,13 +558,52 @@ async function clearPendingMfa() {
   }
 }
 
-async function withTimeout(task, milliseconds) {
+async function cancelMfaAutoTab(tabId) {
+  await removeAutoCollectTabId(tabId);
+
+  // Keep the cancellation result in session storage until the extension page
+  // asks for auth-mfa-registration-result. This survives a service-worker
+  // restart and prevents a user-initiated close from being reported as an
+  // ambiguous registration failure.
+  const currentFlow = await readMfaAutoFlow(tabId);
+  if (currentFlow?.status !== "saved") {
+    await writeMfaAutoFlow(tabId, {
+      status: "cancelled",
+      error: "MFA登録をキャンセルしました。",
+      completedAt: Date.now(),
+    });
+  }
+
+  const currentPendingMfa = await readPendingMfa();
+  if (currentPendingMfa?.tabId === tabId) await clearPendingMfa();
+
+  return {
+    ok: true,
+    status: currentFlow?.status === "saved" ? "saved" : "cancelled",
+  };
+}
+
+async function handleAuthenticationPermissionRemoved(permissions) {
+  if (!isFirefoxDataConsentEnv() || !permissions.data_collection?.includes("authenticationInfo")) return;
+  await restoreAutoCollectTabIds();
+  for (const tabId of [...autoCollectTabIds]) await cancelMfaAutoTab(tabId);
+  // Discard only an unfinished registration; keep the encrypted saved settings.
+  await clearPendingMfa();
+}
+
+chrome.permissions?.onRemoved?.addListener((permissions) => {
+  void handleAuthenticationPermissionRemoved(permissions).catch(() => {
+    console.warn("KOAN Plus: MFA登録の取消状態を保存できませんでした。権限確認により自動操作は停止します。");
+  });
+});
+
+async function withTimeout(task, milliseconds, message = "timeout") {
   let timeoutId;
   try {
     return await Promise.race([
       task,
       new Promise((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error("timeout")), milliseconds);
+        timeoutId = setTimeout(() => reject(new Error(message)), milliseconds);
       }),
     ]);
   } finally {
@@ -501,6 +674,7 @@ async function startCleDownload(rawUrl, rawFileName) {
   return chrome.downloads.download({
     url: url.toString(),
     filename: fileName,
+    // Never replace an existing user file; Chrome will append a suffix instead.
     conflictAction: "uniquify",
     saveAs: false,
   });
@@ -624,9 +798,9 @@ async function focusTab(tabId) {
 }
 
 async function returnToDashboard(flowTabId) {
-  const flow = manualFlows.get(flowTabId);
+  const flow = await readManualFlow(flowTabId);
   if (!flow) return;
-  manualFlows.delete(flowTabId);
+  await clearManualFlow(flowTabId);
   await focusTab(flow.returnTabId);
   await chrome.tabs.remove(flowTabId).catch(() => {});
 }
@@ -639,10 +813,12 @@ async function openLoginTab(url, record, sender, activeWhenManual = true) {
     active: manual ? activeWhenManual : false,
   });
   if ((manual || guideMfa) && tab.id) {
-    manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
+    await writeManualFlow(tab.id, { returnTabId: sender?.tab?.id });
   }
   return { manual, tab };
 }
+
+const KOAN_LOGIN_POLL_INTERVAL_MS = 5 * 1000;
 
 async function ensureKoanLogin(record, sender, requireTab = false) {
   const initialProbe = await probeKoanLogin();
@@ -668,19 +844,24 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
     const { manual, tab } = await openLoginTab(KOAN_PORTAL_URL, record, sender);
     try {
       const deadline = Date.now() + 90 * 1000;
+      let nextProbeAt = Date.now() + KOAN_LOGIN_POLL_INTERVAL_MS;
       while (Date.now() < deadline) {
+        // Keep local tab-close detection responsive; only the network probe
+        // waits five seconds between attempts.
         await wait(1000);
         if (tab.id && !await tabExists(tab.id)) {
           throw new Error("認証画面が閉じられたため、更新を中止しました。");
         }
+        if (Date.now() < nextProbeAt) continue;
         const probe = await probeKoanLogin();
+        nextProbeAt = Date.now() + KOAN_LOGIN_POLL_INTERVAL_MS;
         if (probe.ok) {
           if (tab.id) {
-            const shouldReturn = manualFlows.has(tab.id);
+            const flow = await readManualFlow(tab.id);
+            const shouldReturn = Boolean(flow);
             if (requireTab) {
               if (shouldReturn) {
-                const flow = manualFlows.get(tab.id);
-                manualFlows.delete(tab.id);
+                await clearManualFlow(tab.id);
                 await focusTab(flow?.returnTabId);
               }
               await waitForTabComplete(tab.id);
@@ -703,14 +884,26 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
         ? "認証が完了していません。開いた認証画面でログインしてください。"
         : "KOANの自動ログインが完了しませんでした。開いた認証画面を確認してから、もう一度更新してください。");
     } finally {
-      if (tab.id) manualFlows.delete(tab.id);
+      if (tab.id) await clearManualFlow(tab.id);
       koanLoginTask = undefined;
     }
   })();
   return koanLoginTask;
 }
 
-async function cleApiReady(tabId) {
+const cleProbeTasks = new Map();
+
+function cleApiReady(tabId) {
+  const existing = cleProbeTasks.get(tabId);
+  if (existing) return existing;
+  const task = cleApiReadyOnce(tabId).finally(() => {
+    if (cleProbeTasks.get(tabId) === task) cleProbeTasks.delete(tabId);
+  });
+  cleProbeTasks.set(tabId, task);
+  return task;
+}
+
+async function cleApiReadyOnce(tabId) {
   try {
     const [execution] = await withTimeout(chrome.scripting.executeScript({
       target: { tabId },
@@ -812,7 +1005,9 @@ async function ensureCleLogin(record, sender, force = false) {
     if (!tab?.id) {
       ({ tab } = await openLoginTab(CLE_HOME_URL, record, sender));
     } else {
-      if (manual || guideMfa) manualFlows.set(tab.id, { returnTabId: sender?.tab?.id });
+      if (manual || guideMfa) {
+        await writeManualFlow(tab.id, { returnTabId: sender?.tab?.id });
+      }
       await chrome.tabs.update(tab.id, { url: CLE_HOME_URL, active: manual });
     }
     try {
@@ -823,9 +1018,9 @@ async function ensureCleLogin(record, sender, force = false) {
           throw new Error("CLE認証画面が閉じられたため、更新を中止しました。");
         }
         if (tab.id && await cleApiReady(tab.id)) {
-          if (manualFlows.has(tab.id)) {
-            const flow = manualFlows.get(tab.id);
-            manualFlows.delete(tab.id);
+          const flow = await readManualFlow(tab.id);
+          if (flow) {
+            await clearManualFlow(tab.id);
             await focusTab(flow?.returnTabId);
           }
           return { ok: true, loginStarted: true, tabId: tab.id };
@@ -835,11 +1030,52 @@ async function ensureCleLogin(record, sender, force = false) {
         ? "CLEの認証が完了していません。開いた認証画面でログインしてください。"
         : "CLEの自動再認証が完了しませんでした。CLEタブを確認してください。");
     } finally {
-      if (tab?.id) manualFlows.delete(tab.id);
+      if (tab?.id) await clearManualFlow(tab.id);
       cleLoginTask = undefined;
     }
   })();
   return cleLoginTask;
+}
+
+function requireAuthenticatedTarget(rawUrl) {
+  const url = new URL(String(rawUrl || ""));
+  const isKoan = url.origin === "https://koan.osaka-u.ac.jp" &&
+    url.pathname.startsWith("/campusweb/");
+  const isCle = url.origin === CLE_ORIGIN;
+  if (!isKoan && !isCle) {
+    throw new Error("KOANまたはCLE以外のページは認証付きで開けません。");
+  }
+  return { isKoan, url };
+}
+
+async function openAuthenticatedUrl(rawUrl, record, sender) {
+  const target = requireAuthenticatedTarget(rawUrl);
+  if (target.isKoan) {
+    await ensureKoanLogin(record, sender);
+    const tab = await chrome.tabs.create({
+      url: target.url.toString(),
+      active: true,
+    });
+    if (Number.isInteger(tab?.windowId)) {
+      await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    }
+    return { ok: true, tabId: tab.id };
+  }
+
+  const auth = await ensureCleLogin(record, sender);
+  const tab = auth.loginStarted && Number.isInteger(auth.tabId)
+    ? await chrome.tabs.update(auth.tabId, {
+        url: target.url.toString(),
+        active: true,
+      })
+    : await chrome.tabs.create({
+        url: target.url.toString(),
+        active: true,
+      });
+  if (Number.isInteger(tab?.windowId)) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  }
+  return { ok: true, tabId: tab.id };
 }
 
 async function authResponse(message, sender) {
@@ -909,6 +1145,7 @@ async function authResponse(message, sender) {
     if (!isMfaRegistrationSender(sender)) {
       throw new Error("MFA情報画面以外では遷移操作を実行しません。");
     }
+    await requireAuthenticationInfoPermission();
     if (!sender.tab?.id) throw new Error("MFA情報画面のタブを特定できませんでした。");
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: sender.tab.id },
@@ -1040,10 +1277,18 @@ async function authResponse(message, sender) {
     return { ok: true };
   }
 
+  if (message.type === "auth-mfa-cancel-auto-tab") {
+    if (!Number.isInteger(message.tabId)) {
+      throw new Error("MFA登録タブを特定できませんでした。");
+    }
+    return cancelMfaAutoTab(message.tabId);
+  }
+
   if (message.type === "auth-mfa-check-auto-tab") {
     if (!isMfaRegistrationSender(sender)) {
       throw new Error("MFA登録画面以外からは自動取得状態を確認できません。");
     }
+    await requireAuthenticationInfoPermission();
     const isAuto = Boolean(sender.tab && await isAutoCollectTabId(sender.tab.id));
     return { ok: true, isAutoCollect: isAuto };
   }
@@ -1222,6 +1467,10 @@ async function authResponse(message, sender) {
     return ensureCleLogin(record, sender, true);
   }
 
+  if (message.type === "auth-open-url") {
+    return openAuthenticatedUrl(message.url, record, sender);
+  }
+
   if (message.type === "auth-auto-login-state") {
     if (!isIdpSender(sender) && !isCleLoginSender(sender)) {
       throw new Error("認証画面以外には自動ログイン状態を渡しません。");
@@ -1316,22 +1565,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "cle-download") {
     (async () => {
       requireExtensionPageSender(sender);
-      const url = new URL(message.url);
-      if (url.origin !== CLE_ORIGIN) {
-        throw new Error("CLE以外からのダウンロードは許可されていません。");
-      }
-      const fileName = String(message.fileName || "")
-        .split("/")
-        .map((part) => part.replace(/[<>:"\\|?*\u0000-\u001f]/g, "_").replace(/[. ]+$/g, "").trim())
-        .filter((part) => part && part !== "." && part !== "..")
-        .join("/");
-      if (!fileName) throw new Error("ダウンロードするファイル名が不正です。");
-      const downloadId = await chrome.downloads.download({
-        url: url.toString(),
-        filename: fileName,
-        conflictAction: "uniquify",
-        saveAs: false,
-      });
+      const downloadId = await startCleDownload(message.url, message.fileName);
       return { ok: true, downloadId };
     })()
       .then(sendResponse)
@@ -1479,7 +1713,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
             }
           };
-          await Promise.all(Array.from({ length: Math.min(6, targetUrls.length) }, worker));
+          await Promise.all(Array.from({ length: Math.min(3, targetUrls.length) }, worker));
           return heads;
         },
         args: [urls],
@@ -1575,24 +1809,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabs = await chrome.tabs.query({
       url: `${target.origin}/*`,
     });
-    const tab = message.tabId
-      ? tabs.find((candidate) => candidate.id === message.tabId)
-      : tabs
-          .filter((candidate) => !candidate.discarded)
+    const usableTabs = tabs.filter((candidate) => !candidate.discarded && !candidate.frozen);
+    // A closed/frozen pinned tab must not permanently strand a read-only Web Flow.
+    let tab = usableTabs.find((candidate) => candidate.id === message.tabId)
+      || usableTabs
           .sort((left, right) => {
+            if (left.status !== right.status) return left.status === "complete" ? -1 : 1;
             if (left.active !== right.active) return left.active ? -1 : 1;
             return (right.lastAccessed || 0) - (left.lastAccessed || 0);
           })[0];
+    if (!tab?.id && target.label === "KOAN") {
+      tab = await chrome.tabs.create({ url: KOAN_PORTAL_URL, active: false });
+      try {
+        await waitForTabComplete(tab.id, 7000);
+      } catch (error) {
+        await chrome.tabs.remove(tab.id).catch(() => {});
+        throw error;
+      }
+    }
     if (!tab?.id) {
       throw new Error(`${target.label}をログイン済みのタブで開いてから取得してください。`);
     }
 
-    const [execution] = await chrome.scripting.executeScript({
+    const deadline = Date.now() + 20000;
+    const [execution] = await withTimeout(chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      world: "MAIN",
-      func: async (request, label) => {
+      // Waiting for document_idle can hang on a portal with long-lived frames.
+      injectImmediately: true,
+      world: target.label === "KOAN" ? "ISOLATED" : "MAIN",
+      func: async (request, label, maxResponseTextLength, deadline) => {
+        // Frozen tabs may execute only after the caller has already given up.
+        if (Date.now() >= deadline) throw new Error(`${label}の取得開始期限を過ぎました。`);
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000);
+        const timeout = setTimeout(() => controller.abort(), Math.min(15000, deadline - Date.now()));
         try {
           const response = await fetch(request.url, {
             credentials: "include",
@@ -1600,10 +1849,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ...request.options,
             signal: controller.signal,
           });
+
+          const declaredLength = Number(response.headers.get("content-length"));
+          if (Number.isFinite(declaredLength) && declaredLength > maxResponseTextLength) {
+            controller.abort();
+            throw new Error(`${label}の応答が大きすぎるため、取得を中止しました。`);
+          }
+
+          let text = "";
+          if (response.body) {
+            const reader = response.body.getReader?.();
+            if (!reader) {
+              controller.abort();
+              throw new Error(`${label}の応答ストリームを利用できません。`);
+            }
+            const chunks = [];
+            let totalBytes = 0;
+            try {
+              while (true) {
+                const part = await reader.read();
+                if (part.done) break;
+                const chunk = part.value instanceof Uint8Array
+                  ? part.value
+                  : new Uint8Array(part.value || 0);
+                totalBytes += chunk.byteLength;
+                if (totalBytes > maxResponseTextLength) {
+                  await reader.cancel().catch(() => {});
+                  controller.abort();
+                  throw new Error(`${label}の応答が大きすぎるため、取得を中止しました。`);
+                }
+                chunks.push(chunk);
+              }
+            } finally {
+              reader.releaseLock?.();
+            }
+            const bytes = new Uint8Array(totalBytes);
+            let offset = 0;
+            for (const chunk of chunks) {
+              bytes.set(chunk, offset);
+              offset += chunk.byteLength;
+            }
+            text = new TextDecoder().decode(bytes);
+          }
           return {
             ok: response.ok,
             status: response.status,
-            text: await response.text(),
+            text,
+            retryAfter: response.headers.get("retry-after") || "",
             contentDisposition: response.headers.get("content-disposition") || "",
             contentType: response.headers.get("content-type") || "",
             url: response.url,
@@ -1618,11 +1910,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           clearTimeout(timeout);
         }
       },
-      args: [message.request, target.label],
-    });
+      args: [message.request, target.label, MAX_CLE_RESPONSE_TEXT_LENGTH, deadline],
+    }), 21000, `${target.label}タブの取得が応答しませんでした。保存済みデータを保持し、再試行します。`);
     if (!execution.result) {
       throw new Error(`${target.label}タブから応答を取得できませんでした。`);
     }
+    const responseUrl = new URL(execution.result.url || requestUrl.href);
+    if (responseUrl.protocol !== "https:" || responseUrl.origin !== target.origin) {
+      throw new Error(`${target.label}以外へリダイレクトされたため、取得を中止しました。`);
+    }
+    execution.result.url = responseUrl.href;
     sendResponse({ ok: true, response: execution.result, tabId: tab.id });
   })().catch((error) => {
     sendResponse({

@@ -1,22 +1,30 @@
+import { MANUAL_REFRESH_TTL_MS } from "./sync";
+
 const BASE_URL = "https://koan.osaka-u.ac.jp/campusweb/";
 export const PORTAL_URL = `${BASE_URL}campusportal.do?page=main`;
 export const SCHEDULE_URL = `${BASE_URL}campussquare.do?_flowId=PTW0001200-flow`;
 export const COURSE_REGISTRATION_URL = `${BASE_URL}campussquare.do?_flowId=RSW0001000-flow`;
 export const CHANGES_URL = `${BASE_URL}campussquare.do?_flowId=KHW0001100-flow`;
+export const SURVEYS_URL = `${BASE_URL}campussquare.do?_flowId=ENW4201000-flow`;
 export const BOARD_URL = `${BASE_URL}campussquare.do?_flowId=KJW0001100-flow`;
 export const GRADE_HISTORY_URL = `${BASE_URL}campussquare.do?_flowId=SIW0001200-flow`;
 export const CREDIT_STATUS_URL = `${BASE_URL}campussquare.do?_flowId=SIW0001300-flow`;
 
 export const SNAPSHOT_TTL_MS = 6 * 60 * 60 * 1000;
+export const NOTICE_SNAPSHOT_VERSION = 2;
 export const LIGHT_REFRESH_TTL_MS = 10 * 60 * 1000;
 export const SCHEDULE_REFRESH_TTL_MS = 30 * 60 * 1000;
 export const FUTURE_SCHEDULE_REFRESH_TTL_MS = 6 * 60 * 60 * 1000;
+export const FUTURE_CHANGES_REFRESH_TTL_MS = 6 * 60 * 60 * 1000;
+export const SURVEYS_REFRESH_TTL_MS = 30 * 60 * 1000;
 export const COURSES_REFRESH_TTL_MS = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 15 * 1000;
 const BOARD_REQUEST_GAP_MS = 750;
 const MAX_BOARD_PAGES_PER_GENRE = 12;
+const MAX_BOARD_TRAVERSE_PAGES_PER_GENRE = 100;
 const SCHEDULE_RANGE_WEEKS = 8;
 const MAX_SCHEDULE_MONTH_PAGES = 4;
+const CHANGES_RANGE_WEEKS = 8;
 const SNAPSHOT_MAX_DURATION_MS = 3 * 60 * 1000;
 const NOTICE_RESOLVE_MAX_DURATION_MS = 60 * 1000;
 const LIGHT_LEASE_KEY = "koan-plus-light-refresh-lease-v1";
@@ -24,7 +32,7 @@ const LIGHT_ATTEMPT_KEY = "koan-plus-light-refresh-attempt-v1";
 const LIGHT_FAILURE_KEY = "koan-plus-light-refresh-failure-v1";
 const SNAPSHOT_LEASE_KEY = "koan-plus-snapshot-lease-v1";
 const SNAPSHOT_ATTEMPT_KEY = "koan-plus-snapshot-attempt-v1";
-const SNAPSHOT_COMPLETED_KEY = "koan-plus-snapshot-completed-v1";
+const SNAPSHOT_COMPLETED_KEY = "koan-plus-snapshot-completed-v2";
 const SNAPSHOT_FAILURE_KEY = "koan-plus-snapshot-failure-v1";
 const NOTICE_RESOLVE_LEASE_KEY = "koan-plus-notice-resolve-lease-v1";
 const NOTICE_RESOLVE_ATTEMPT_KEY = "koan-plus-notice-resolve-attempt-v1";
@@ -34,6 +42,13 @@ const GRADES_LEASE_KEY = "koan-plus-grades-lease-v1";
 const GRADES_ATTEMPT_KEY = "koan-plus-grades-attempt-v1";
 const NOTICE_URL_TTL_MS = 6 * 60 * 60 * 1000;
 const NOTICE_URL_FAILURE_TTL_MS = 10 * 60 * 1000;
+const NOTICE_RESOLVE_ATTEMPT_TTL_MS = 10 * 1000;
+
+// Keep a large soft limit so ordinary users never lose old notices merely
+// because a new semester started. The hard limit is still small enough to
+// keep the JSON localStorage record comfortably below typical browser quotas.
+export const NOTICE_CACHE_WARNING_THRESHOLD = 4_000;
+export const NOTICE_CACHE_MAX_ITEMS = 5_000;
 
 export const GENRES = [
   "授業",
@@ -51,7 +66,13 @@ export const GENRES = [
 
 
 
-export type ScheduleItem = { date?: string; period: string; title: string; room: string };
+export type ScheduleItem = {
+  date?: string;
+  period: string;
+  title: string;
+  room: string;
+  kind?: "course" | "holiday" | "other";
+};
 export type CourseRegistration = {
   code: string;
   departmentCode: string;
@@ -61,8 +82,20 @@ export type CourseRegistration = {
   period: string;
   teacherAndRoom: string;
   syllabusUrl: string;
+  isIntensive?: boolean;
 };
 export type ChangeItem = { type: string; date: string; period: string; course: string };
+export type KoanSurvey = {
+  title: string;
+  courseName: string;
+  slot: string;
+  startAt: string | null;
+  endAt: string | null;
+  status: string;
+  responseStatus: string;
+  completed: boolean;
+  kind: "course" | "general";
+};
 export type Notice = {
   title: string;
   href: string;
@@ -79,6 +112,7 @@ export type KoanData = {
   schedule: ScheduleItem[];
   courses: CourseRegistration[];
   changes: ChangeItem[];
+  surveys: KoanSurvey[];
   notices: Notice[];
   lightUpdatedAt: string | null;
   snapshotUpdatedAt: string | null;
@@ -86,8 +120,14 @@ export type KoanData = {
   futureScheduleUpdatedAt: string | null;
   coursesUpdatedAt: string | null;
   changesUpdatedAt: string | null;
+  futureChangesUpdatedAt: string | null;
+  surveysUpdatedAt: string | null;
   noticesUpdatedAt: string | null;
+  snapshotVersion?: number;
   snapshotGenreSyncAt?: Record<string, string>;
+  snapshotGenreVersions?: Record<string, number>;
+  snapshotComplete?: boolean;
+  warnings?: string[];
 };
 export type GradeHistoryItem = {
   code: string;
@@ -145,8 +185,17 @@ function addDays(date: Date, days: number) {
   return next;
 }
 
+function formatDateKey(date: Date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
 function requireKoanUrl(url: string) {
-  if (new URL(url).origin !== "https://koan.osaka-u.ac.jp") {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" || parsed.origin !== "https://koan.osaka-u.ac.jp") {
     throw new Error("KOAN以外への通信は許可されていません。");
   }
 }
@@ -170,6 +219,7 @@ async function fetchHtml(url: string, options?: RequestInit) {
       if (!response.ok) {
         throw new Error(`KOANの取得に失敗しました (${response.status})。`);
       }
+      requireKoanUrl(response.url);
       return {
         doc: new DOMParser().parseFromString(await response.text(), "text/html"),
         url: response.url,
@@ -191,9 +241,104 @@ async function fetchHtml(url: string, options?: RequestInit) {
   }
 }
 
+type StorageReadResult =
+  | { ok: true; value: string | null }
+  | { ok: false };
+
+// These keys coordinate tabs and cache notice URL searches. They are not the
+// source of truth for fetched data, so a blocked or full storage area should
+// disable coordination rather than abort a network refresh.
+function safeStorageGet(key: string): StorageReadResult {
+  try {
+    return { ok: true, value: localStorage.getItem(key) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function safeStorageSet(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeStorageRemove(key: string) {
+  try {
+    localStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeStorageLength() {
+  try {
+    return localStorage.length;
+  } catch {
+    return 0;
+  }
+}
+
+function safeStorageKey(index: number) {
+  try {
+    return localStorage.key(index);
+  } catch {
+    return null;
+  }
+}
+
 function readTimestamp(key: string) {
-  const value = Number.parseInt(localStorage.getItem(key) || "", 10);
+  const result = safeStorageGet(key);
+  const value = Number.parseInt(result.ok ? result.value || "" : "", 10);
   return Number.isFinite(value) ? value : 0;
+}
+
+type LeaseState = {
+  expiresAt: number;
+  owner: string | null;
+};
+
+function parseLease(raw: string | null): LeaseState | null {
+  if (!raw) return null;
+
+  // Releases before the owner-token migration wrote a bare expiry timestamp.
+  // Continue to understand those records so an active old tab still blocks a
+  // new refresh instead of being treated as immediately expired.
+  const legacyExpiresAt = Number.parseInt(raw, 10);
+  if (Number.isFinite(legacyExpiresAt)) {
+    return { expiresAt: legacyExpiresAt, owner: null };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<LeaseState>;
+    const expiresAt = Number(parsed.expiresAt);
+    if (!Number.isFinite(expiresAt)) return null;
+    return {
+      expiresAt,
+      owner: typeof parsed.owner === "string" && parsed.owner ? parsed.owner : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readLease(key: string): LeaseState | null {
+  const result = safeStorageGet(key);
+  return result.ok ? parseLease(result.value) : null;
+}
+
+function leaseExpiresAt(key: string) {
+  return readLease(key)?.expiresAt || 0;
+}
+
+function createLeaseOwner() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 type FailureState = {
@@ -208,7 +353,9 @@ export type SnapshotAvailability = {
 
 function readFailureState(key: string): FailureState {
   try {
-    const state = JSON.parse(localStorage.getItem(key) || "{}") as Partial<FailureState>;
+    const result = safeStorageGet(key);
+    if (!result.ok) return { count: 0, nextRetryAt: 0 };
+    const state = JSON.parse(result.value || "{}") as Partial<FailureState>;
     return {
       count: Number.isFinite(state.count) ? Number(state.count) : 0,
       nextRetryAt: Number.isFinite(state.nextRetryAt) ? Number(state.nextRetryAt) : 0,
@@ -225,23 +372,35 @@ function requireRetryAvailable(key: string, label: string) {
   throw new Error(`${label}は失敗後の待機中です。${seconds}秒後に再試行できます。`);
 }
 
-function recordFailure(key: string) {
+function recordFailure(key: string, maxDelay = 60 * 60 * 1000) {
   const previous = readFailureState(key);
   const count = previous.count + 1;
-  const delay = Math.min(60 * 60 * 1000, 60 * 1000 * (2 ** Math.min(count - 1, 6)));
-  localStorage.setItem(key, JSON.stringify({
+  const delay = Math.min(maxDelay, 60 * 1000 * (2 ** Math.min(count - 1, 6)));
+  safeStorageSet(key, JSON.stringify({
     count,
     nextRetryAt: Date.now() + delay,
   }));
 }
 
+export function getLightRetryAt() {
+  return Math.max(
+    readTimestamp(LIGHT_ATTEMPT_KEY) + MANUAL_REFRESH_TTL_MS,
+    readFailureState(LIGHT_FAILURE_KEY).nextRetryAt,
+    leaseExpiresAt(LIGHT_LEASE_KEY),
+  );
+}
+
+export function getGradesRetryAt() {
+  return Math.max(readTimestamp(GRADES_ATTEMPT_KEY) + MANUAL_REFRESH_TTL_MS, leaseExpiresAt(GRADES_LEASE_KEY));
+}
+
 export function getSnapshotAvailability(): SnapshotAvailability {
   const now = Date.now();
-  const snapshotLeaseUntil = readTimestamp(SNAPSHOT_LEASE_KEY);
+  const snapshotLeaseUntil = leaseExpiresAt(SNAPSHOT_LEASE_KEY);
   if (snapshotLeaseUntil > now) {
     return { blockedUntil: snapshotLeaseUntil, reason: "syncing" };
   }
-  const noticeResolveLeaseUntil = readTimestamp(NOTICE_RESOLVE_LEASE_KEY);
+  const noticeResolveLeaseUntil = leaseExpiresAt(NOTICE_RESOLVE_LEASE_KEY);
   if (noticeResolveLeaseUntil > now) {
     return { blockedUntil: noticeResolveLeaseUntil, reason: "resolving" };
   }
@@ -277,7 +436,8 @@ function timestampValue(value: string | null | undefined) {
 
 function isFresh(value: string | null | undefined, ttl: number) {
   const timestamp = timestampValue(value);
-  return timestamp > 0 && Date.now() - timestamp < ttl;
+  const age = Date.now() - timestamp;
+  return timestamp > 0 && age >= 0 && age < ttl;
 }
 
 function koanPartUpdatedAt(
@@ -288,10 +448,13 @@ function koanPartUpdatedAt(
     | "futureScheduleUpdatedAt"
     | "coursesUpdatedAt"
     | "changesUpdatedAt"
+    | "futureChangesUpdatedAt"
+    | "surveysUpdatedAt"
     | "noticesUpdatedAt"
   >,
 ) {
-  return data?.[key] || data?.lightUpdatedAt || null;
+  if (data && key in data) return data[key] || null;
+  return data?.lightUpdatedAt || null;
 }
 
 function latestTimestamp(values: Array<string | null | undefined>) {
@@ -299,21 +462,60 @@ function latestTimestamp(values: Array<string | null | undefined>) {
   return latest ? new Date(latest).toISOString() : null;
 }
 
-export function isKoanCacheFresh(data: KoanData) {
+export function isKoanCacheFresh(data: KoanData, refreshRecent = false) {
+  const recentTtl = refreshRecent ? MANUAL_REFRESH_TTL_MS : LIGHT_REFRESH_TTL_MS;
+  // Older cache records predate these independently refreshed datasets. Treat
+  // them as stale instead of borrowing lightUpdatedAt and silently skipping the
+  // first survey/future-change fetch after an upgrade.
+  if (!("futureChangesUpdatedAt" in data) || !("surveysUpdatedAt" in data)) {
+    return false;
+  }
   return (
-    isFresh(koanPartUpdatedAt(data, "changesUpdatedAt"), LIGHT_REFRESH_TTL_MS) &&
-    isFresh(koanPartUpdatedAt(data, "noticesUpdatedAt"), LIGHT_REFRESH_TTL_MS) &&
+    isFresh(koanPartUpdatedAt(data, "changesUpdatedAt"), recentTtl) &&
+    isFresh(koanPartUpdatedAt(data, "noticesUpdatedAt"), recentTtl) &&
     isFresh(koanPartUpdatedAt(data, "scheduleUpdatedAt"), SCHEDULE_REFRESH_TTL_MS) &&
     isFresh(koanPartUpdatedAt(data, "futureScheduleUpdatedAt"), FUTURE_SCHEDULE_REFRESH_TTL_MS) &&
+    isFresh(koanPartUpdatedAt(data, "futureChangesUpdatedAt"), FUTURE_CHANGES_REFRESH_TTL_MS) &&
+    isFresh(koanPartUpdatedAt(data, "surveysUpdatedAt"), SURVEYS_REFRESH_TTL_MS) &&
     isFresh(koanPartUpdatedAt(data, "coursesUpdatedAt"), COURSES_REFRESH_TTL_MS)
   );
 }
 
-function acquireLease(key: string, milliseconds: number, message: string) {
+/** @internal Exposed for storage-coordination tests. */
+export function acquireLease(key: string, milliseconds: number, message: string) {
   const now = Date.now();
-  if (readTimestamp(key) > now) throw new Error(message);
-  localStorage.setItem(key, String(now + milliseconds));
-  return () => localStorage.removeItem(key);
+  const current = readLease(key);
+  if (current && current.expiresAt > now) throw new Error(message);
+
+  const owner = createLeaseOwner();
+  if (!safeStorageSet(key, JSON.stringify({
+    expiresAt: now + milliseconds,
+    owner,
+  } satisfies LeaseState))) {
+    // Coordination state is best-effort. A blocked or full storage area must
+    // not prevent the actual KOAN request from continuing.
+    return () => undefined;
+  }
+
+  // localStorage writes are synchronous. Verifying the value after the write
+  // gives a racing tab a deterministic loser in the common case where both
+  // checked an expired lease at the same time.
+  const verification = safeStorageGet(key);
+  if (!verification.ok) return () => undefined;
+  const verifiedLease = parseLease(verification.value);
+  if (verifiedLease?.owner !== owner) {
+    throw new Error(message);
+  }
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const latestResult = safeStorageGet(key);
+    const latest = latestResult.ok ? parseLease(latestResult.value) : null;
+    // An expired owner must never delete a newer execution's lease.
+    if (latest?.owner === owner) safeStorageRemove(key);
+  };
 }
 
 function requireCooldown(key: string, milliseconds: number, message: string) {
@@ -321,7 +523,7 @@ function requireCooldown(key: string, milliseconds: number, message: string) {
 }
 
 function requireNoActiveLease(key: string, message: string) {
-  if (readTimestamp(key) > Date.now()) throw new Error(message);
+  if (leaseExpiresAt(key) > Date.now()) throw new Error(message);
 }
 
 function requireTimeBudget(deadline: number, message: string) {
@@ -371,8 +573,8 @@ async function fetchHtmlFromKoanTab(
       request: { url, options },
       tabId,
     }) as Promise<KoanTabMessage>,
-    25000,
-    "成績取得が25秒以内に完了しませんでした。KOANタブを再読み込みして再試行してください。",
+    32000,
+    "成績取得から応答がありませんでした。保存済みデータを保持し、再試行します。",
   );
   if (!result.ok || !result.response) {
     throw new Error(result.error || "KOANタブから応答を取得できませんでした。");
@@ -380,6 +582,7 @@ async function fetchHtmlFromKoanTab(
   if (!result.response.ok) {
     throw new Error(`KOANの取得に失敗しました (${result.response.status})。`);
   }
+  requireKoanUrl(result.response.url);
   return {
     doc: new DOMParser().parseFromString(result.response.text, "text/html"),
     url: result.response.url,
@@ -423,6 +626,12 @@ function requireLogin(doc: Document) {
   }
 }
 
+function requireElement(doc: Document, selector: string, label: string) {
+  if (!doc.querySelector(selector)) {
+    throw new Error(`${label}の画面構造を確認できませんでした。以前のデータを保持します。`);
+  }
+}
+
 function parseSchedule(doc: Document): ScheduleItem[] {
   const list = doc.querySelector(".mysch-portlet-list");
   if (!list) return [];
@@ -432,8 +641,18 @@ function parseSchedule(doc: Document): ScheduleItem[] {
     .map((text) => {
       const match = text.match(/^(\d+)限:\s*(.+?)(?:\s*@\s*(.+))?$/);
       return match
-        ? { period: `${match[1]}限`, title: match[2], room: match[3] || "" }
-        : { period: "", title: text, room: "" };
+        ? {
+          period: `${match[1]}限`,
+          title: match[2],
+          room: match[3] || "",
+          kind: "course" as const,
+        }
+        : {
+          period: "",
+          title: text,
+          room: "",
+          kind: text.startsWith("[休日]") ? "holiday" as const : "other" as const,
+        };
     });
 }
 
@@ -456,8 +675,20 @@ function parseWeeklySchedule(doc: Document): ScheduleItem[] {
         .map((text) => {
           const match = text.match(/^(\d+)限:\s*(.+?)(?:\s*@\s*(.+))?$/);
           return match
-            ? { date, period: `${match[1]}限`, title: match[2], room: match[3] || "" }
-            : { date, period: "", title: text, room: "" };
+            ? {
+              date,
+              period: `${match[1]}限`,
+              title: match[2],
+              room: match[3] || "",
+              kind: "course" as const,
+            }
+            : {
+              date,
+              period: "",
+              title: text,
+              room: "",
+              kind: text.startsWith("[休日]") ? "holiday" as const : "other" as const,
+            };
         });
     });
 }
@@ -496,9 +727,14 @@ async function fetchScheduleRange(includeFuture: boolean) {
   let page = await fetchHtml(SCHEDULE_URL);
   const horizon = addDays(new Date(), SCHEDULE_RANGE_WEEKS * 7).getTime();
   for (let index = 0; index < MAX_SCHEDULE_MONTH_PAGES; index += 1) {
+    requireElement(page.doc, "#schedule-calender", "時間割");
     pages.push(page.doc);
-    if (!includeFuture || maxCalendarDate(page.doc) >= horizon) break;
+    if (!includeFuture || maxCalendarDate(page.doc) >= horizon ||
+        index === MAX_SCHEDULE_MONTH_PAGES - 1) break;
     page = await submitScheduleEvent(page.doc, "setNextMonth");
+  }
+  if (includeFuture && maxCalendarDate(pages[pages.length - 1]) < horizon) {
+    throw new Error("時間割を8週間先まで取得できませんでした。以前のデータを保持します。");
   }
   return pages;
 }
@@ -548,40 +784,86 @@ function parseSyllabusCall(value: string) {
 
 function parseCourseRegistrations(doc: Document): CourseRegistration[] {
   const table = doc.querySelector("table.rishu-koma");
-  if (!table) return [];
+  const intensiveTable = doc.querySelector("table.rishu-etc");
+  if (!table && !intensiveTable) {
+    throw new Error("履修授業の表を確認できませんでした。以前のデータを保持します。");
+  }
   const weekdays = ["月", "火", "水", "木", "金", "土"];
   const courses: CourseRegistration[] = [];
-  for (const row of [...table.querySelectorAll(":scope > tbody > tr")].slice(1)) {
-    const rowCells = [...row.children].filter((cell) => cell.tagName === "TD");
-    const period = normalize(rowCells[0]?.textContent);
-    rowCells.slice(1).forEach((cell, index) => {
-      const rows = [...cell.querySelectorAll(":scope table tr")]
-        .map((innerRow) => normalize(innerRow.textContent))
-        .filter(Boolean);
-      if (!rows.length || rows[0] === "未登録") return;
-      const onclick = [...cell.querySelectorAll("a")]
-        .map((link) => link.getAttribute("onclick") || "")
-        .find((value) => value.includes("syllabusRefer")) || "";
-      const syllabus = parseSyllabusCall(onclick);
-      const code = syllabus?.code || rows[0];
-      courses.push({
-        code,
-        departmentCode: syllabus?.departmentCode || "",
-        year: syllabus?.year || "",
-        title: rows[1] || "",
-        day: weekdays[index] || "",
-        period,
-        teacherAndRoom: rows[2] || "",
-        syllabusUrl: syllabus
-          ? `${BASE_URL}campussquare.do?_flowId=SYW0001000-flow&_eventId=syllabus&nendo=${syllabus.year}&jikanwarishozokucd=${syllabus.departmentCode}&jikanwaricd=${syllabus.code}`
-          : "",
+  if (table) {
+    for (const row of [...table.querySelectorAll(":scope > tbody > tr")].slice(1)) {
+      const rowCells = [...row.children].filter((cell) => cell.tagName === "TD");
+      const period = normalize(rowCells[0]?.textContent);
+      rowCells.slice(1).forEach((cell, index) => {
+        const rows = [...cell.querySelectorAll(":scope table tr")]
+          .map((innerRow) => normalize(innerRow.textContent))
+          .filter(Boolean);
+        if (!rows.length || rows[0] === "未登録") return;
+        const onclick = [...cell.querySelectorAll("a")]
+          .map((link) => link.getAttribute("onclick") || "")
+          .find((value) => value.includes("syllabusRefer")) || "";
+        const syllabus = parseSyllabusCall(onclick);
+        const code = syllabus?.code || rows[0];
+        courses.push({
+          code,
+          departmentCode: syllabus?.departmentCode || "",
+          year: syllabus?.year || "",
+          title: rows[1] || "",
+          day: weekdays[index] || "",
+          period,
+          teacherAndRoom: rows[2] || "",
+          syllabusUrl: syllabus
+            ? `${BASE_URL}campussquare.do?_flowId=SYW0001000-flow&_eventId=syllabus&nendo=${syllabus.year}&jikanwarishozokucd=${syllabus.departmentCode}&jikanwaricd=${syllabus.code}`
+            : "",
+        });
       });
+    }
+  }
+
+  for (const row of intensiveTable?.querySelectorAll(":scope > tbody > tr") || []) {
+    const cells = [...row.children].filter((cell) => cell.tagName === "TD");
+    if (cells.length < 7) continue;
+    const rawCode = normalize(cells[2]?.textContent);
+    const title = normalize(cells[4]?.textContent);
+    if (!rawCode || rawCode === "時間割コード" || !title) continue;
+    const onclick = [...row.querySelectorAll("a")]
+      .map((link) => link.getAttribute("onclick") || "")
+      .find((value) => value.includes("syllabusRefer")) || "";
+    const syllabus = parseSyllabusCall(onclick);
+    const teacher = normalize(cells[5]?.textContent);
+    const room = normalize(cells[6]?.textContent);
+    courses.push({
+      code: syllabus?.code || rawCode,
+      departmentCode: syllabus?.departmentCode || "",
+      year: syllabus?.year || "",
+      title,
+      day: normalize(cells[0]?.textContent).replace(/曜日$/, ""),
+      period: normalize(cells[1]?.textContent),
+      teacherAndRoom: [teacher, room].filter(Boolean).join(" / "),
+      syllabusUrl: syllabus
+        ? `${BASE_URL}campussquare.do?_flowId=SYW0001000-flow&_eventId=syllabus&nendo=${syllabus.year}&jikanwarishozokucd=${syllabus.departmentCode}&jikanwaricd=${syllabus.code}`
+        : "",
+      isIntensive: true,
     });
   }
   return courses;
 }
 
-function mergeCourses(items: CourseRegistration[]) {
+function courseSlotTokens(course: CourseRegistration) {
+  const encodedSlots = [...course.period.matchAll(/([月火水木金土日])\s*(\d+)/g)]
+    .map((match) => `${match[1]}${match[2]}`);
+  if (encodedSlots.length) return encodedSlots;
+
+  const period = periodNumber(course.period);
+  if (!period) return [];
+  return course.day
+    .split(",")
+    .map((day) => day.trim())
+    .filter(Boolean)
+    .map((day) => `${day}${period}`);
+}
+
+export function mergeCourses(items: CourseRegistration[]) {
   const grouped = new Map<string, CourseRegistration>();
   for (const item of items) {
     const current = grouped.get(item.code);
@@ -589,17 +871,19 @@ function mergeCourses(items: CourseRegistration[]) {
       grouped.set(item.code, item);
       continue;
     }
-    const slots = new Set(
-      `${current.day}${periodNumber(current.period) || current.period}`
-        .split(",")
-        .filter(Boolean),
-    );
-    const nextSlot = `${item.day}${periodNumber(item.period) || item.period}`;
-    if (nextSlot) slots.add(nextSlot);
+    const slots = new Set([
+      ...courseSlotTokens(current),
+      ...courseSlotTokens(item),
+    ]);
+    const days = [
+      ...current.day.split(","),
+      ...item.day.split(","),
+    ].map((day) => day.trim()).filter(Boolean);
     grouped.set(item.code, {
       ...current,
-      day: [...new Set([current.day, item.day].filter(Boolean))].join(","),
-      period: [...slots].join(","),
+      day: [...new Set(days)].join(","),
+      period: slots.size ? [...slots].join(",") : current.period || item.period,
+      isIntensive: Boolean(current.isIntensive && item.isIntensive),
     });
   }
   return [...grouped.values()].sort((left, right) =>
@@ -620,9 +904,70 @@ function parseCellCourse(cell: Element) {
   return detail || text;
 }
 
-function parseChanges(doc: Document): ChangeItem[] {
+function changeWeekStart(doc: Document, responseUrl: string) {
+  const links = [...doc.querySelectorAll<HTMLAnchorElement>("a[href]")];
+  const nextWeek = links.find((link) => normalize(link.textContent) === "週>>");
+  const previousWeek = links.find((link) => normalize(link.textContent) === "<<週");
+  const reference = nextWeek || previousWeek;
+  let navigationWeekStart: Date | null = null;
+  if (reference) {
+    const day = new URL(reference.getAttribute("href") || "", responseUrl)
+      .searchParams.get("day");
+    const match = day?.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (match) {
+      const referenceDate = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+      navigationWeekStart = addDays(referenceDate, nextWeek ? -7 : 7);
+    }
+  }
+
+  const headerDate = [...doc.querySelectorAll("table.kyuko-kyukohoko tr:first-child th")]
+    .map((item) => parseChangeHeaderDate(item.textContent || "", navigationWeekStart || new Date()))
+    .find((value) => /^\d{4}-\d{2}-\d{2}$/.test(value));
+  return headerDate ? parseDateKey(headerDate) : navigationWeekStart;
+}
+
+function nearestDateForMonthDay(month: number, day: number, anchorDate: Date) {
+  const candidates = [-1, 0, 1].map((yearOffset) =>
+    new Date(anchorDate.getFullYear() + yearOffset, month - 1, day),
+  );
+  return candidates.reduce((nearest, candidate) =>
+    Math.abs(candidate.getTime() - anchorDate.getTime()) <
+      Math.abs(nearest.getTime() - anchorDate.getTime())
+      ? candidate
+      : nearest,
+  );
+}
+
+export function parseChangeHeaderDate(value: string, anchorDate = new Date()) {
+  const text = normalize(value);
+  const fullDate = text.match(
+    /(?:^|[^\d])(\d{4})\s*(?:年|[./-])\s*(\d{1,2})\s*(?:月|[./-])\s*(\d{1,2})/,
+  );
+  if (fullDate) {
+    return formatDateKey(new Date(
+      Number(fullDate[1]),
+      Number(fullDate[2]) - 1,
+      Number(fullDate[3]),
+    ));
+  }
+
+  const monthDay = text.match(/(?:^|[^\d])(\d{1,2})\s*(?:\/|月)\s*(\d{1,2})\s*日?/);
+  if (!monthDay) return text;
+  return formatDateKey(nearestDateForMonthDay(
+    Number(monthDay[1]),
+    Number(monthDay[2]),
+    anchorDate,
+  ));
+}
+
+function parseChanges(
+  doc: Document,
+  weekStart: Date | null = null,
+): ChangeItem[] {
   const timetable = doc.querySelector("table.kyuko-kyukohoko");
-  if (!timetable) return [];
+  if (!timetable) {
+    throw new Error("休講・補講の表を確認できませんでした。以前のデータを保持します。");
+  }
   const dates = [...timetable.querySelectorAll("tr:first-child th")]
     .map((item) => normalize(item.textContent))
     .filter(Boolean);
@@ -643,7 +988,9 @@ function parseChanges(doc: Document): ChangeItem[] {
       );
       if (!className) return;
       changes.push({
-        date: dates[index] || "",
+        date: dates[index]
+          ? parseChangeHeaderDate(dates[index], weekStart || new Date())
+          : "",
         period,
         type: typeByClass[className],
         course: parseCellCourse(cell),
@@ -670,50 +1017,347 @@ function parseChanges(doc: Document): ChangeItem[] {
     }));
 }
 
-function findBoardTable(doc: Document, unread: boolean) {
-  return [...doc.querySelectorAll("table")].find((table) => {
-    const text = normalize(table.textContent);
-    return unread
-      ? text.includes("表題 重要度") && text.includes("所属 氏名 掲示期間")
-      : text.includes("ジャンル 表題 重要度") && text.includes("掲示期間");
+function mergeChanges(items: ChangeItem[]) {
+  const merged = new Map<string, ChangeItem>();
+  for (const item of items) {
+    merged.set([item.date, item.period, item.type, item.course].join("\t"), item);
+  }
+  return [...merged.values()].sort((left, right) =>
+    left.date.localeCompare(right.date) ||
+    comparePeriods(left.period, right.period) ||
+    left.course.localeCompare(right.course, "ja"),
+  );
+}
+
+function comparePeriods(left: string, right: string) {
+  const leftMatch = left.match(/\d+/);
+  const rightMatch = right.match(/\d+/);
+  if (leftMatch && rightMatch) {
+    const difference = Number(leftMatch[0]) - Number(rightMatch[0]);
+    if (difference) return difference;
+  } else if (leftMatch) {
+    return -1;
+  } else if (rightMatch) {
+    return 1;
+  }
+  return left.localeCompare(right, "ja");
+}
+
+function mergeCurrentChanges(
+  current: ChangeItem[],
+  previous: ChangeItem[],
+  weekStart: Date | null,
+) {
+  if (!weekStart) return current.length ? current : previous;
+  const rangeStart = formatDateKey(weekStart);
+  const rangeEnd = formatDateKey(addDays(weekStart, 6));
+  return mergeChanges([
+    ...previous.filter((item) =>
+      !/^\d{4}-\d{2}-\d{2}$/.test(item.date) ||
+      item.date < rangeStart ||
+      item.date > rangeEnd,
+    ),
+    ...current,
+  ]);
+}
+
+async function fetchChangesRange(includeFuture: boolean) {
+  const pages: Array<{ doc: Document; url: string; weekStart: Date | null }> = [];
+  let page = await fetchHtml(CHANGES_URL);
+  for (
+    let index = 0;
+    index < (includeFuture ? CHANGES_RANGE_WEEKS : 1);
+    index += 1
+  ) {
+    const weekStart = changeWeekStart(page.doc, page.url);
+    requireElement(page.doc, "table.kyuko-kyukohoko", "休講・補講");
+    pages.push({ ...page, weekStart });
+    if (!includeFuture || index === CHANGES_RANGE_WEEKS - 1) break;
+    const nextWeek = [...page.doc.querySelectorAll<HTMLAnchorElement>("a[href]")]
+      .find((link) => normalize(link.textContent) === "週>>");
+    if (!nextWeek) {
+      throw new Error("休講・補講を8週間先まで取得できませんでした。以前のデータを保持します。");
+    }
+    page = await fetchHtml(
+      new URL(nextWeek.getAttribute("href") || "", page.url).href,
+    );
+  }
+  return {
+    changes: mergeChanges(
+      pages.flatMap(({ doc, weekStart }) => parseChanges(doc, weekStart)),
+    ),
+    currentWeekStart: pages[0]?.weekStart || null,
+  };
+}
+
+function koanDateTime(value: string) {
+  const match = value.match(
+    /(\d{4})年(\d{1,2})月(\d{1,2})日(?:(\d{1,2})時(?:(\d{1,2})分)?)?/,
+  );
+  if (!match) return null;
+  const [, year, month, day, hour = "0", minute = "0"] = match;
+  return new Date(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour) - 9,
+    Number(minute),
+  )).toISOString();
+}
+
+export function parseKoanSurveyPeriod(value: string) {
+  const matches = [
+    ...value.matchAll(
+      /(\d{4})年(\d{1,2})月(\d{1,2})日(?:(\d{1,2})時(?:(\d{1,2})分)?)?/g,
+    ),
+  ];
+  return {
+    startAt: matches[0] ? koanDateTime(matches[0][0]) : null,
+    endAt: matches[1] ? koanDateTime(matches[1][0]) : null,
+  };
+}
+
+function koanCellText(cell: Element) {
+  const text = normalize(cell.textContent);
+  if (text) return text;
+  const control = cell.querySelector<HTMLInputElement | HTMLButtonElement>(
+    "input[value], button[value]",
+  );
+  return normalize(control?.value);
+}
+
+function parseSurveys(doc: Document): KoanSurvey[] {
+  const surveys: KoanSurvey[] = [];
+  for (const table of doc.querySelectorAll("table")) {
+    if (!isSurveyTable(table)) continue;
+    const rows = [
+      ...table.querySelectorAll(
+        ":scope > thead > tr, :scope > tbody > tr",
+      ),
+    ];
+    const headerIndex = rows.findIndex(
+      (row) => row.querySelectorAll(":scope > th").length > 0,
+    );
+    if (headerIndex < 0) continue;
+    const headers = [
+      ...rows[headerIndex].querySelectorAll(":scope > th"),
+    ].map((cell) => normalize(cell.textContent));
+    const titleIndex = headers.indexOf("タイトル");
+    const periodIndex = headers.indexOf("実施期間");
+    const statusIndex = headers.indexOf("状態");
+    const responseIndex = headers.findIndex((header) =>
+      header.replace(/\s/g, "") === "入力状況"
+    );
+    if (
+      titleIndex < 0 ||
+      periodIndex < 0 ||
+      statusIndex < 0 ||
+      responseIndex < 0
+    ) {
+      continue;
+    }
+    const courseIndex = headers.indexOf("開講科目名");
+    const slotIndex = headers.indexOf("曜日・時限");
+    for (const row of rows.slice(headerIndex + 1)) {
+      const values = [
+        ...row.querySelectorAll(":scope > td"),
+      ].map(koanCellText);
+      const title = values[titleIndex] || "";
+      if (!title || /回答対象アンケートはありません/.test(title)) continue;
+      const responseStatus = values[responseIndex] || "";
+      const period = parseKoanSurveyPeriod(values[periodIndex] || "");
+      surveys.push({
+        title,
+        courseName: courseIndex >= 0 ? values[courseIndex] || "" : "",
+        slot: slotIndex >= 0 ? values[slotIndex] || "" : "",
+        ...period,
+        status: values[statusIndex] || "",
+        responseStatus,
+        completed: /済|回答済/.test(responseStatus),
+        kind: courseIndex >= 0 ? "course" : "general",
+      });
+    }
+  }
+  return surveys.sort((left, right) =>
+    Number(left.completed) - Number(right.completed) ||
+    (left.endAt || "9999").localeCompare(right.endAt || "9999") ||
+    left.title.localeCompare(right.title, "ja"),
+  );
+}
+
+function isSurveyTable(table: Element) {
+  const headers = [...table.querySelectorAll("th")].map((cell) => normalize(cell.textContent));
+  return (
+    headers.includes("タイトル") &&
+    headers.includes("実施期間") &&
+    headers.includes("状態") &&
+    headers.some((header) => header.replace(/\s/g, "") === "入力状況")
+  );
+}
+
+function requireSurveyRoot(doc: Document) {
+  if (![...doc.querySelectorAll("table")].some(isSurveyTable)) {
+    throw new Error("アンケートの画面構造を確認できませんでした。以前のデータを保持します。");
+  }
+}
+
+function compactBoardText(value: unknown) {
+  return normalize(value).replace(/\s/g, "");
+}
+
+function boardHeaderTokens(unread: boolean) {
+  return unread
+    ? ["表題", "重要度", "所属", "氏名", "掲示期間"]
+    : ["ジャンル", "表題", "重要度", "掲示期間"];
+}
+
+function boardHeaderRowIndex(table: Element, unread: boolean) {
+  const required = boardHeaderTokens(unread);
+  return [...table.querySelectorAll("tr")].findIndex((row) => {
+    // KOAN has used both one concatenated header cell and one <th> per
+    // column. Inspect the row as a whole so either representation remains a
+    // valid, specifically identified bulletin table.
+    const text = compactBoardText(row.textContent);
+    return required.every((token) => text.includes(token));
   });
 }
 
-function parseNotices(doc: Document, responseUrl: string, unread = false): Notice[] {
+function boardColumnIndex(table: Element, unread: boolean, token: string, fallback: number) {
+  const headerIndex = boardHeaderRowIndex(table, unread);
+  if (headerIndex < 0) return fallback;
+  const row = [...table.querySelectorAll("tr")][headerIndex];
+  const cells = [...row.querySelectorAll(":scope > th, :scope > td")];
+  const index = cells.findIndex((cell) => compactBoardText(cell.textContent) === token);
+  return index >= 0 ? index : fallback;
+}
+
+function findBoardTable(doc: Document, unread: boolean) {
+  return [...doc.querySelectorAll("table")].find((table) =>
+    boardHeaderRowIndex(table, unread) >= 0,
+  );
+}
+
+export function parseNotices(doc: Document, responseUrl: string, unread = false): Notice[] {
   const table = findBoardTable(doc, unread);
   if (!table) return [];
+  const headerIndex = boardHeaderRowIndex(table, unread);
+  const titleIndex = boardColumnIndex(table, unread, "表題", unread ? 0 : 1);
+  const genreIndex = boardColumnIndex(table, unread, "ジャンル", unread ? 3 : 0);
+  const priorityIndex = boardColumnIndex(table, unread, "重要度", unread ? 1 : 2);
+  const departmentIndex = boardColumnIndex(table, unread, "所属", 4);
+  const authorIndex = boardColumnIndex(table, unread, "氏名", 5);
+  const periodIndex = boardColumnIndex(table, unread, "掲示期間", unread ? 6 : 4);
   return [...table.querySelectorAll("tr")]
-    .slice(1)
+    .slice(headerIndex + 1)
     .map((row) => {
       const cells = [...row.querySelectorAll("td")];
-      const titleIndex = unread ? 0 : 1;
       const link = cells[titleIndex]?.querySelector("a");
       if (!link) return null;
+      let href: string;
+      try {
+        href = new URL(link.getAttribute("href") || "", responseUrl).href;
+        requireKoanUrl(href);
+      } catch {
+        return null;
+      }
       return {
         title: normalize(link.textContent),
-        href: new URL(link.getAttribute("href") || "", responseUrl).href,
-        genre: normalize(cells[unread ? 3 : 0]?.textContent) || "掲示",
-        priority: normalize(cells[unread ? 1 : 2]?.textContent),
+        href,
+        genre: normalize(cells[genreIndex]?.textContent) || "掲示",
+        priority: normalize(cells[priorityIndex]?.textContent),
         unread,
-        department: unread ? normalize(cells[4]?.textContent) : "",
-        author: unread ? normalize(cells[5]?.textContent) : "",
-        period: normalize(cells[unread ? 6 : 4]?.textContent),
+        department: unread ? normalize(cells[departmentIndex]?.textContent) : "",
+        author: unread ? normalize(cells[authorIndex]?.textContent) : "",
+        period: normalize(cells[periodIndex]?.textContent),
         live: true,
       };
     })
     .filter((notice): notice is Notice => Boolean(notice));
 }
 
+function requireBoardRoot(doc: Document) {
+  const genreCount = GENRES.filter((genre) =>
+    [...doc.querySelectorAll("a")].some((item) => normalize(item.textContent) === genre)
+  ).length;
+  if (!findBoardTable(doc, true) && genreCount < Math.ceil(GENRES.length / 2)) {
+    throw new Error("掲示板の画面構造を確認できませんでした。以前のデータを保持します。");
+  }
+}
+
+function isEmptyNoticePage(doc: Document) {
+  const text = normalize(doc.body?.textContent);
+  return /(?:該当|掲示|検索結果).*(?:ありません|0件)/.test(text);
+}
+
 export function noticeKey(notice: Notice) {
   const url = new URL(notice.href);
-  return [
+  const parts = [
     url.searchParams.get("keijitype"),
     url.searchParams.get("genrecd"),
     url.searchParams.get("seqNo"),
-  ].join(":");
+  ];
+  return parts.every(Boolean)
+    ? parts.join(":")
+    : `${url.pathname}${url.search}`;
 }
 
-export function mergeNotices(notices: Notice[]) {
+function isImportantNotice(notice: Notice) {
+  return notice.priority === "○" ||
+    /重要|要確認|締切|期限|停止|休講|変更|試験/.test(notice.title);
+}
+
+export type NoticeRetentionResult = {
+  notices: Notice[];
+  warnings: string[];
+  dropped: number;
+};
+
+function noticeRetentionPriority(notice: Notice) {
+  return (
+    (notice.unread ? 1_000 : 0) +
+    (notice.live ? 500 : 0) +
+    (notice.isNew ? 300 : 0) +
+    (isImportantNotice(notice) ? 200 : 0)
+  );
+}
+
+/**
+ * Keep the notice record bounded without making a normal semester rollover
+ * destructive. The soft limit only emits a warning; pruning starts at the
+ * hard limit and removes the oldest low-attention, read, non-live records
+ * first. Protected records win ties, while array order is used as the
+ * conservative recency signal because the existing schema has no fetchedAt.
+ */
+export function retainNotices(notices: Notice[]): NoticeRetentionResult {
+  if (notices.length <= NOTICE_CACHE_WARNING_THRESHOLD) {
+    return { notices, warnings: [], dropped: 0 };
+  }
+
+  const warnings = [
+    `掲示キャッシュが${NOTICE_CACHE_WARNING_THRESHOLD}件を超えています（現在${notices.length}件）。`,
+  ];
+  if (notices.length <= NOTICE_CACHE_MAX_ITEMS) {
+    return { notices, warnings, dropped: 0 };
+  }
+
+  const ranked = notices
+    .map((notice, index) => ({ notice, index }))
+    .sort((left, right) =>
+      noticeRetentionPriority(right.notice) - noticeRetentionPriority(left.notice) ||
+      right.index - left.index,
+    );
+  const kept = ranked
+    .slice(0, NOTICE_CACHE_MAX_ITEMS)
+    .sort((left, right) => left.index - right.index)
+    .map(({ notice }) => notice);
+  const dropped = notices.length - kept.length;
+  warnings.push(
+    `掲示キャッシュが上限${NOTICE_CACHE_MAX_ITEMS}件に達したため、古い既読掲示を${dropped}件整理しました。`,
+  );
+  return { notices: kept, warnings, dropped };
+}
+
+export function mergeNotices(notices: Notice[], warningSink?: string[]) {
   const merged = new Map<string, Notice>();
   for (const notice of notices) {
     const key = noticeKey(notice);
@@ -727,7 +1371,9 @@ export function mergeNotices(notices: Notice[]) {
       live: Boolean(previous?.live || notice.live),
     });
   }
-  return [...merged.values()];
+  const retained = retainNotices([...merged.values()]);
+  warningSink?.push(...retained.warnings);
+  return retained.notices;
 }
 
 export function attentionScore(notice: Notice) {
@@ -744,31 +1390,51 @@ export async function refreshLight(
   previous: KoanData,
   options?: {
     force?: boolean;
+    refreshRecent?: boolean;
     portalHtml?: string;
     portalUrl?: string;
     onProgress?: (value: string) => void;
   },
 ) {
   const force = Boolean(options?.force);
-  requireRetryAvailable(LIGHT_FAILURE_KEY, "KOAN通常更新");
+  if (!force) requireRetryAvailable(LIGHT_FAILURE_KEY, "KOAN通常更新");
   if (!force) {
     requireCooldown(LIGHT_ATTEMPT_KEY, 60 * 1000, "通常更新の再試行は1分後にできます。");
   }
   const release = acquireLease(LIGHT_LEASE_KEY, 90 * 1000, "別の画面で通常更新中です。");
-  localStorage.setItem(LIGHT_ATTEMPT_KEY, String(Date.now()));
+  safeStorageSet(LIGHT_ATTEMPT_KEY, String(Date.now()));
   try {
     const onProgress = options?.onProgress;
     onProgress?.("KOANキャッシュを確認中");
     const completed = new Set<string>();
+    const warnings: string[] = [];
     const markDone = (label: string) => {
       completed.add(label);
       onProgress?.(`${[...completed].join(" / ")} 取得済み`);
     };
+    const keepCached = (label: string, error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`${label}: ${message}`);
+      markDone(`${label}キャッシュ`);
+    };
     const now = new Date().toISOString();
+    const recentTtl = options?.refreshRecent ? MANUAL_REFRESH_TTL_MS : LIGHT_REFRESH_TTL_MS;
     const changesFresh = !force &&
-      isFresh(koanPartUpdatedAt(previous, "changesUpdatedAt"), LIGHT_REFRESH_TTL_MS);
+      isFresh(koanPartUpdatedAt(previous, "changesUpdatedAt"), recentTtl);
+    const futureChangesFresh = !force &&
+      "futureChangesUpdatedAt" in previous &&
+      isFresh(
+        koanPartUpdatedAt(previous, "futureChangesUpdatedAt"),
+        FUTURE_CHANGES_REFRESH_TTL_MS,
+      );
+    const surveysFresh = !force &&
+      "surveysUpdatedAt" in previous &&
+      isFresh(
+        koanPartUpdatedAt(previous, "surveysUpdatedAt"),
+        SURVEYS_REFRESH_TTL_MS,
+      );
     const noticesFresh = !force &&
-      isFresh(koanPartUpdatedAt(previous, "noticesUpdatedAt"), LIGHT_REFRESH_TTL_MS);
+      isFresh(koanPartUpdatedAt(previous, "noticesUpdatedAt"), recentTtl);
     const scheduleFresh = !force &&
       isFresh(koanPartUpdatedAt(previous, "scheduleUpdatedAt"), SCHEDULE_REFRESH_TTL_MS);
     const futureScheduleFresh = !force &&
@@ -786,7 +1452,13 @@ export async function refreshLight(
       : await fetchHtml(PORTAL_URL);
     requireLogin(portal.doc);
     markDone("ポータル");
-    const [scheduleResult, coursesResult, changesResult, boardResult] = await Promise.all([
+    const [
+      scheduleResult,
+      coursesResult,
+      changesResult,
+      surveysResult,
+      boardResult,
+    ] = await Promise.all([
       scheduleFresh && futureScheduleFresh
         ? Promise.resolve({
           pages: [] as Document[],
@@ -807,8 +1479,8 @@ export async function refreshLight(
                 : koanPartUpdatedAt(previous, "futureScheduleUpdatedAt"),
             };
           })
-          .catch(() => {
-            markDone("時間割キャッシュ");
+          .catch((error) => {
+            keepCached("時間割", error);
             return {
               pages: [] as Document[],
               updatedAt: koanPartUpdatedAt(previous, "scheduleUpdatedAt"),
@@ -828,24 +1500,63 @@ export async function refreshLight(
             markDone("履修授業");
             return { courses: mergeCourses(parseCourseRegistrations(result.doc)), updatedAt: now };
           })
-          .catch(() => {
-            markDone("履修授業キャッシュ");
+          .catch((error) => {
+            keepCached("履修授業", error);
             return {
               courses: previous.courses,
               updatedAt: koanPartUpdatedAt(previous, "coursesUpdatedAt"),
             };
           }),
-      changesFresh
+      changesFresh && futureChangesFresh
         ? Promise.resolve({
-          changes: previous.changes,
+          changes: previous.changes || [],
           updatedAt: koanPartUpdatedAt(previous, "changesUpdatedAt"),
+          futureUpdatedAt: koanPartUpdatedAt(previous, "futureChangesUpdatedAt"),
         }).then((result) => {
           markDone("休講補講キャッシュ");
           return result;
         })
-        : fetchHtml(CHANGES_URL).then((result) => {
-          markDone("休講補講");
-          return { changes: parseChanges(result.doc), updatedAt: now };
+        : fetchChangesRange(!futureChangesFresh).then((result) => {
+          markDone(!futureChangesFresh ? "8週間休講補講" : "今週の休講補講");
+          return {
+            changes: !futureChangesFresh
+              ? result.changes
+              : mergeCurrentChanges(
+                result.changes,
+                previous.changes || [],
+                result.currentWeekStart,
+              ),
+            updatedAt: now,
+            futureUpdatedAt: !futureChangesFresh
+              ? now
+              : koanPartUpdatedAt(previous, "futureChangesUpdatedAt"),
+          };
+        }).catch((error) => {
+          keepCached("休講補講", error);
+          return {
+            changes: previous.changes || [],
+            updatedAt: koanPartUpdatedAt(previous, "changesUpdatedAt"),
+            futureUpdatedAt: koanPartUpdatedAt(previous, "futureChangesUpdatedAt"),
+          };
+        }),
+      surveysFresh
+        ? Promise.resolve({
+          surveys: previous.surveys || [],
+          updatedAt: koanPartUpdatedAt(previous, "surveysUpdatedAt"),
+        }).then((result) => {
+          markDone("アンケートキャッシュ");
+          return result;
+        })
+        : fetchHtml(SURVEYS_URL).then((result) => {
+          requireSurveyRoot(result.doc);
+          markDone("アンケート");
+          return { surveys: parseSurveys(result.doc), updatedAt: now };
+        }).catch((error) => {
+          keepCached("アンケート", error);
+          return {
+            surveys: previous.surveys || [],
+            updatedAt: koanPartUpdatedAt(previous, "surveysUpdatedAt"),
+          };
         }),
       noticesFresh
         ? Promise.resolve({
@@ -856,8 +1567,15 @@ export async function refreshLight(
           return result;
         })
         : fetchHtml(BOARD_URL).then((board) => {
+          requireBoardRoot(board.doc);
           markDone("新着掲示");
           return { board, updatedAt: now };
+        }).catch((error) => {
+          keepCached("新着掲示", error);
+          return {
+            board: null,
+            updatedAt: koanPartUpdatedAt(previous, "noticesUpdatedAt"),
+          };
         }),
     ]);
     onProgress?.("取得結果を整理中");
@@ -875,37 +1593,46 @@ export async function refreshLight(
         !futureScheduleFresh,
       )
       : previous.schedule;
-    const notices = boardResult.board
-      ? mergeNotices([
-        ...previous.notices.map((notice) => ({
-          ...notice,
-          isNew: false,
-          live: false,
-          unread: false,
-        })),
-        ...unread,
-      ])
-      : previous.notices;
+    const notices = mergeNotices(
+      boardResult.board
+        ? [
+          ...previous.notices.map((notice) => ({
+            ...notice,
+            isNew: false,
+            live: false,
+            unread: false,
+          })),
+          ...unread,
+        ]
+        : previous.notices,
+      warnings,
+    );
     const lightUpdatedAt = latestTimestamp([
       scheduleResult.updatedAt,
       scheduleResult.futureUpdatedAt,
       coursesResult.updatedAt,
       changesResult.updatedAt,
+      changesResult.futureUpdatedAt,
+      surveysResult.updatedAt,
       boardResult.updatedAt,
     ]);
     const result = {
       schedule: schedule.length ? schedule : parseSchedule(portal.doc),
       courses: coursesResult.courses,
       changes: changesResult.changes,
+      surveys: surveysResult.surveys,
       notices,
       lightUpdatedAt,
       scheduleUpdatedAt: scheduleResult.updatedAt,
       futureScheduleUpdatedAt: scheduleResult.futureUpdatedAt,
       coursesUpdatedAt: coursesResult.updatedAt,
       changesUpdatedAt: changesResult.updatedAt,
+      futureChangesUpdatedAt: changesResult.futureUpdatedAt,
+      surveysUpdatedAt: surveysResult.updatedAt,
       noticesUpdatedAt: boardResult.updatedAt,
+      warnings,
     };
-    localStorage.removeItem(LIGHT_FAILURE_KEY);
+    safeStorageRemove(LIGHT_FAILURE_KEY);
     return result;
   } catch (error) {
     recordFailure(LIGHT_FAILURE_KEY);
@@ -916,40 +1643,76 @@ export async function refreshLight(
   }
 }
 
+type GenreResult = {
+  notices: Notice[];
+  complete: boolean;
+  warning?: string;
+  failed?: boolean;
+  stop?: boolean;
+};
+
 async function fetchGenre(
   root: { doc: Document; url: string },
   genre: string,
   deadline: number,
   knownKeys: Set<string>,
-) {
+  stopAtKnown: boolean,
+): Promise<GenreResult> {
   requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
   const link = [...root.doc.querySelectorAll("a")].find(
     (item) => normalize(item.textContent) === genre,
   );
-  if (!link) return [];
+  if (!link) {
+    throw new Error(`${genre}の掲示リンクを確認できませんでした。`);
+  }
   await pause(BOARD_REQUEST_GAP_MS);
   requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
   let page = await fetchHtml(new URL(link.getAttribute("href") || "", root.url).href);
   const notices: Notice[] = [];
   const visited = new Set<string>();
-  for (let index = 0; index < MAX_BOARD_PAGES_PER_GENRE; index += 1) {
+  let knownOnlyPages = 0;
+  let newPages = 0;
+  for (let index = 0; index < MAX_BOARD_TRAVERSE_PAGES_PER_GENRE; index += 1) {
+    if (!findBoardTable(page.doc, false) && !isEmptyNoticePage(page.doc)) {
+      return {
+        notices, complete: false, failed: true, stop: true,
+        warning: "掲示一覧を確認できませんでした。",
+      };
+    }
     const pageNotices = parseNotices(page.doc, page.url);
     notices.push(...pageNotices);
-    if (knownKeys.size && pageNotices.some((notice) => knownKeys.has(noticeKey(notice)))) {
-      break;
-    }
+    const onlyKnown = pageNotices.length > 0 &&
+      pageNotices.every((notice) => knownKeys.has(noticeKey(notice)));
+    knownOnlyPages = onlyKnown ? knownOnlyPages + 1 : 0;
+    if (!onlyKnown) newPages += 1;
     const next = [...page.doc.querySelectorAll("a")].find(
       (item) => normalize(item.textContent) === "次へ >>",
     );
-    if (!next || index === MAX_BOARD_PAGES_PER_GENRE - 1) break;
+    if (!next || (stopAtKnown && knownOnlyPages >= 2)) {
+      return { notices, complete: true };
+    }
+    if (newPages >= MAX_BOARD_PAGES_PER_GENRE || index === MAX_BOARD_TRAVERSE_PAGES_PER_GENRE - 1) {
+      return { notices, complete: false, warning: `${index + 1}ページで中断しました` };
+    }
     const nextUrl = new URL(next.getAttribute("href") || "", page.url).href;
-    if (visited.has(nextUrl)) break;
+    if (visited.has(nextUrl)) {
+      return { notices, complete: false, warning: "ページ送りが循環したため中断しました", failed: true };
+    }
     visited.add(nextUrl);
     await pause(BOARD_REQUEST_GAP_MS);
-    requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
-    page = await fetchHtml(nextUrl);
+    if (Date.now() >= deadline) {
+      return { notices, complete: false, warning: "制限時間に達したため次回へ継続します", stop: true };
+    }
+    try {
+      page = await fetchHtml(nextUrl);
+    } catch (error) {
+      return {
+        notices, complete: false, failed: true, stop: true,
+        warning: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
-  return notices;
+  return { notices, complete: false };
 }
 
 export async function refreshSnapshot(
@@ -961,7 +1724,6 @@ export async function refreshSnapshot(
   requireCooldown(SNAPSHOT_ATTEMPT_KEY, 10 * 60 * 1000, "掲示同期の再試行は10分後にできます。");
   requireNoActiveLease(NOTICE_RESOLVE_LEASE_KEY, "掲示を検索中です。完了後に同期してください。");
   const release = acquireLease(SNAPSHOT_LEASE_KEY, SNAPSHOT_MAX_DURATION_MS + REQUEST_TIMEOUT_MS, "別の画面で掲示を同期中です。");
-  localStorage.setItem(SNAPSHOT_ATTEMPT_KEY, String(Date.now()));
   try {
     const notices: Notice[] = [];
     const deadline = Date.now() + SNAPSHOT_MAX_DURATION_MS;
@@ -969,31 +1731,89 @@ export async function refreshSnapshot(
     if (new URL(root.url).origin !== "https://koan.osaka-u.ac.jp") {
       throw new Error("KOANにログインしてから更新してください。");
     }
+    requireBoardRoot(root.doc);
+    safeStorageSet(SNAPSHOT_ATTEMPT_KEY, String(Date.now()));
     const syncAt = new Date().toISOString();
     const snapshotGenreSyncAt = { ...(previous.snapshotGenreSyncAt || {}) };
+    const snapshotGenreVersions = { ...(previous.snapshotGenreVersions || {}) };
+    const warnings: string[] = [];
+    let complete = true;
+    let failed = false;
     for (const [index, genre] of GENRES.entries()) {
       onProgress?.(`${index + 1}/${GENRES.length} ${genre}`);
+      // Resume interrupted crawls at unfinished genres. Re-reading completed
+      // genres can consume the entire time budget and starve the final genres.
+      if (previous.snapshotComplete === false &&
+          snapshotGenreVersions[genre] === NOTICE_SNAPSHOT_VERSION &&
+          isFresh(snapshotGenreSyncAt[genre], SNAPSHOT_TTL_MS)) continue;
+      const canResume =
+        previous.snapshotVersion === NOTICE_SNAPSHOT_VERSION ||
+        previous.snapshotComplete === false;
+      const genreCompleteForCurrentVersion =
+        (previous.snapshotVersion === NOTICE_SNAPSHOT_VERSION &&
+          previous.snapshotComplete !== false) ||
+        snapshotGenreVersions[genre] === NOTICE_SNAPSHOT_VERSION;
       const knownKeys = new Set(
-        previous.notices
+        (canResume ? previous.notices : [])
           .filter((notice) => notice.genre === genre)
           .map(noticeKey),
       );
-      notices.push(...(await fetchGenre(root, genre, deadline, knownKeys)));
-      snapshotGenreSyncAt[genre] = syncAt;
+      let genreResult: Awaited<ReturnType<typeof fetchGenre>>;
+      try {
+        genreResult = await fetchGenre(
+          root,
+          genre,
+          deadline,
+          knownKeys,
+          genreCompleteForCurrentVersion,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const genreFailed = !message.includes("3分で中断");
+        failed ||= genreFailed;
+        complete = false;
+        warnings.push(`${genre}: ${genreFailed ? message : "制限時間に達したため次回へ継続します"}`);
+        break;
+      }
+      notices.push(...genreResult.notices);
+      if (genreResult.complete) {
+        snapshotGenreSyncAt[genre] = syncAt;
+        snapshotGenreVersions[genre] = NOTICE_SNAPSHOT_VERSION;
+      } else {
+        complete = false;
+        warnings.push(`${genre}: ${genreResult.warning || "一部未取得です"}`);
+      }
+      failed ||= Boolean(genreResult.failed);
+      if (genreResult.stop) break;
       await pause(BOARD_REQUEST_GAP_MS);
-      requireTimeBudget(deadline, "掲示同期は3分で中断しました。時間を置いて再試行してください。");
+      if (Date.now() >= deadline) {
+        complete = false;
+        warnings.push("制限時間に達したため次回へ継続します");
+        break;
+      }
     }
-    localStorage.setItem(SNAPSHOT_COMPLETED_KEY, String(Date.now()));
+    if (complete) {
+      safeStorageSet(SNAPSHOT_COMPLETED_KEY, String(Date.now()));
+    }
+    // App merges the returned snapshot with its current cache. Run retention
+    // against that final shape here so a warning is still surfaced, while
+    // returning only the fetched snapshot preserves the existing merge API.
+    mergeNotices([...previous.notices, ...notices], warnings);
     onProgress?.("");
     const result = {
       notices: mergeNotices(notices),
-      snapshotUpdatedAt: syncAt,
+      snapshotUpdatedAt: complete ? syncAt : previous.snapshotUpdatedAt,
+      snapshotVersion: complete ? NOTICE_SNAPSHOT_VERSION : previous.snapshotVersion,
       snapshotGenreSyncAt,
+      snapshotGenreVersions,
+      snapshotComplete: complete,
+      warnings,
     };
-    localStorage.removeItem(SNAPSHOT_FAILURE_KEY);
+    if (failed) recordFailure(SNAPSHOT_FAILURE_KEY, 10 * 60 * 1000);
+    else safeStorageRemove(SNAPSHOT_FAILURE_KEY);
     return result;
   } catch (error) {
-    recordFailure(SNAPSHOT_FAILURE_KEY);
+    recordFailure(SNAPSHOT_FAILURE_KEY, 10 * 60 * 1000);
     throw error;
   } finally {
     release();
@@ -1005,28 +1825,58 @@ type NoticeUrlCacheEntry = {
   expiresAt: number;
 };
 
+const NOTICE_RESOLVE_ATTEMPT_PREFIX = `${NOTICE_RESOLVE_ATTEMPT_KEY}:`;
+const LEGACY_NOTICE_RESOLVE_ATTEMPT_PREFIX = "koan-plus-notice-resolve-attempt-";
+
 function readNoticeUrlCache() {
   try {
-    return JSON.parse(localStorage.getItem(NOTICE_URL_CACHE_KEY) || "{}") as Record<
-      string,
-      NoticeUrlCacheEntry
-    >;
+    const stored = safeStorageGet(NOTICE_URL_CACHE_KEY);
+    if (!stored.ok) return {};
+    const parsed = JSON.parse(stored.value || "{}");
+    return parsed && typeof parsed === "object"
+      ? parsed as Record<string, NoticeUrlCacheEntry>
+      : {};
   } catch {
     return {};
   }
+}
+
+/** Remove per-notice cooldown keys so one-year use cannot grow localStorage. */
+export function cleanupNoticeResolveAttempts(now = Date.now()) {
+  const keysToRemove: string[] = [];
+  for (let index = 0; index < safeStorageLength(); index += 1) {
+    const key = safeStorageKey(index);
+    if (
+      !key ||
+      key === NOTICE_RESOLVE_ATTEMPT_KEY ||
+      (!key.startsWith(NOTICE_RESOLVE_ATTEMPT_PREFIX) &&
+        !key.startsWith(LEGACY_NOTICE_RESOLVE_ATTEMPT_PREFIX))
+    ) {
+      continue;
+    }
+    const stored = safeStorageGet(key);
+    if (!stored.ok) continue;
+    const attemptedAt = Number.parseInt(stored.value || "", 10);
+    if (!Number.isFinite(attemptedAt) || now - attemptedAt >= NOTICE_RESOLVE_ATTEMPT_TTL_MS) {
+      keysToRemove.push(key);
+    }
+  }
+  keysToRemove.forEach((key) => safeStorageRemove(key));
+  return keysToRemove.length;
 }
 
 function cacheNoticeUrl(key: string, url: string | null) {
   const cache = readNoticeUrlCache();
   const now = Date.now();
   for (const [cachedKey, entry] of Object.entries(cache)) {
-    if (!entry || entry.expiresAt <= now) delete cache[cachedKey];
+    const expiresAt = Number(entry?.expiresAt);
+    if (!entry || !Number.isFinite(expiresAt) || expiresAt <= now) delete cache[cachedKey];
   }
   cache[key] = {
     url,
     expiresAt: now + (url ? NOTICE_URL_TTL_MS : NOTICE_URL_FAILURE_TTL_MS),
   };
-  localStorage.setItem(NOTICE_URL_CACHE_KEY, JSON.stringify(cache));
+  safeStorageSet(NOTICE_URL_CACHE_KEY, JSON.stringify(cache));
 }
 
 async function findNoticeUrl(
@@ -1039,12 +1889,13 @@ async function findNoticeUrl(
   try {
     const deadline = Date.now() + NOTICE_RESOLVE_MAX_DURATION_MS;
     const target = noticeKey(notice);
-    localStorage.setItem(`${NOTICE_RESOLVE_ATTEMPT_KEY}:${target}`, String(Date.now()));
+    cleanupNoticeResolveAttempts();
+    safeStorageSet(`${NOTICE_RESOLVE_ATTEMPT_PREFIX}${target}`, String(Date.now()));
     const snapshotMatch = snapshotNotices.find(
       (candidate) => noticeKey(candidate) === target && candidate.live && candidate.href,
     );
     if (snapshotMatch) {
-      localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+      safeStorageRemove(NOTICE_RESOLVE_FAILURE_KEY);
       return snapshotMatch.href;
     }
 
@@ -1053,7 +1904,7 @@ async function findNoticeUrl(
       (candidate) => noticeKey(candidate) === target,
     );
     if (unreadMatch) {
-      localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+      safeStorageRemove(NOTICE_RESOLVE_FAILURE_KEY);
       return unreadMatch.href;
     }
 
@@ -1061,7 +1912,7 @@ async function findNoticeUrl(
       (item) => normalize(item.textContent) === notice.genre,
     );
     if (!genreLink) {
-      localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+      safeStorageRemove(NOTICE_RESOLVE_FAILURE_KEY);
       return null;
     }
 
@@ -1074,7 +1925,7 @@ async function findNoticeUrl(
         (candidate) => noticeKey(candidate) === target,
       );
       if (match) {
-        localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+        safeStorageRemove(NOTICE_RESOLVE_FAILURE_KEY);
         return match.href;
       }
       const next = [...page.doc.querySelectorAll("a")].find(
@@ -1088,7 +1939,7 @@ async function findNoticeUrl(
       requireTimeBudget(deadline, "掲示の検索は1分で中断しました。掲示板から直接開いてください。");
       page = await fetchHtml(nextUrl);
     }
-    localStorage.removeItem(NOTICE_RESOLVE_FAILURE_KEY);
+    safeStorageRemove(NOTICE_RESOLVE_FAILURE_KEY);
     return null;
   } catch (error) {
     recordFailure(NOTICE_RESOLVE_FAILURE_KEY);
@@ -1098,18 +1949,50 @@ async function findNoticeUrl(
   }
 }
 
+/** Already resolved links never wait for authentication, a crawl, or its lease. */
+export function getKnownNoticeUrl(notice: Notice, snapshotNotices: Notice[] = []): string | null {
+  const key = noticeKey(notice);
+  const live = notice.live && notice.href ? notice : snapshotNotices.find(candidate =>
+    candidate.live && candidate.href && noticeKey(candidate) === key);
+  const cached = live ? undefined : readNoticeUrlCache()[key];
+  const url = live?.href || (cached && cached.expiresAt > Date.now() ? cached.url : null);
+  if (!url) return null;
+  try { requireKoanUrl(url); return url; }
+  catch { return null; }
+}
+
 export async function resolveNoticeUrl(
   notice: Notice,
   snapshotNotices: Notice[] = [],
 ): Promise<string | null> {
+  const knownUrl = getKnownNoticeUrl(notice, snapshotNotices);
+  if (knownUrl) return knownUrl;
+  cleanupNoticeResolveAttempts();
   const key = noticeKey(notice);
   const cached = readNoticeUrlCache()[key];
-  if (cached && cached.expiresAt > Date.now()) return cached.url;
+  if (cached && cached.expiresAt > Date.now() && cached.url === null) {
+    // A failed lookup is a real, short-lived negative cache entry. Treating it
+    // as a miss makes repeated clicks scan the same board pages indefinitely.
+    return null;
+  }
+  if (cached && cached.expiresAt > Date.now() && typeof cached.url === "string") {
+    try {
+      requireKoanUrl(cached.url);
+      return cached.url;
+    } catch {
+      // Ignore stale or malformed entries written by an older version.
+    }
+  }
   const existing = noticeResolveRequests.get(key);
   if (existing) return existing;
-  requireCooldown(`${NOTICE_RESOLVE_ATTEMPT_KEY}:${key}`, 10 * 1000, "この掲示を開く操作は10秒後に再試行できます。");
+  requireCooldown(
+    `${NOTICE_RESOLVE_ATTEMPT_PREFIX}${key}`,
+    NOTICE_RESOLVE_ATTEMPT_TTL_MS,
+    "この掲示を開く操作は10秒後に再試行できます。",
+  );
   const request = findNoticeUrl(notice, snapshotNotices)
     .then((url) => {
+      if (url) requireKoanUrl(url);
       cacheNoticeUrl(key, url);
       return url;
     });
@@ -1238,13 +2121,19 @@ export async function refreshGrades(
 ): Promise<GradeData> {
   requireCooldown(GRADES_ATTEMPT_KEY, 60 * 1000, "成績取得の再試行は1分後にできます。");
   const release = acquireLease(GRADES_LEASE_KEY, 90 * 1000, "別の画面で成績を取得中です。");
-  localStorage.setItem(GRADES_ATTEMPT_KEY, String(Date.now()));
+  safeStorageSet(GRADES_ATTEMPT_KEY, String(Date.now()));
   try {
   // KOAN stores these old Web Flow screens in a shared session. Keep them sequential.
   onProgress?.("履修成績を取得中");
   const gradeHistory = await submitFullRangeFlow(GRADE_HISTORY_URL, tabId);
+  if (!findTable(gradeHistory.doc, ["時間割コード", "開講科目名", "教員氏名", "評語", "合否"])) {
+    throw new Error("履修成績の表を確認できませんでした。以前の成績データを保持します。");
+  }
   onProgress?.("単位修得状況を取得中");
   const creditStatus = await submitFullRangeFlow(CREDIT_STATUS_URL, gradeHistory.tabId);
+  if (!findTable(creditStatus.doc, ["科目詳細区分", "科目小区分", "科目名", "単位数", "合否"])) {
+    throw new Error("単位修得状況の表を確認できませんでした。以前の成績データを保持します。");
+  }
   const courses = parseCreditCourses(creditStatus.doc).filter(isEarnedCredit);
   return {
     creditsTotal: parseCreditsTotal(creditStatus.doc),

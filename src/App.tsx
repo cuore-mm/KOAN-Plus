@@ -1,18 +1,33 @@
-import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type AnchorHTMLAttributes,
+  type CSSProperties,
+  type ReactNode,
+  type MouseEvent,
+} from "react";
 import DOMPurify from "dompurify";
 import {
   BOARD_URL,
   GENRES,
+  NOTICE_SNAPSHOT_VERSION,
   PORTAL_URL,
+  SURVEYS_URL,
   SNAPSHOT_TTL_MS,
   type ChangeItem,
   type CourseRegistration,
   type GradeData,
   type KoanData,
+  type KoanSurvey,
   type Notice,
   type ScheduleItem,
   attentionScore,
   getSnapshotAvailability,
+  getKnownNoticeUrl,
+  getLightRetryAt,
+  getGradesRetryAt,
   isKoanCacheFresh,
   mergeNotices,
   noticeKey,
@@ -22,7 +37,6 @@ import {
   resolveNoticeUrl,
 } from "./koan";
 import {
-  CLE_CALENDAR_URL,
   CLE_MESSAGES_URL,
   EMPTY_CLE_DATA,
   type CleData,
@@ -37,25 +51,32 @@ import {
   downloadCourseMaterial,
   downloadCourseMaterialBatch,
   fetchCourseMaterials,
+  getCachedCourseMaterials,
+  isMaterialCacheFresh,
   isCleCacheFresh,
+  getCleRetryAt,
   refreshCle,
 } from "./cle";
 import {
+  clearCacheStorage,
+  exportCacheJson,
+  getStorageUsage,
   loadCache,
   loadCleCache,
   loadGradesCache,
   saveCache,
   saveCleCache,
   saveGradesCache,
+  type StorageWriteResult,
 } from "./storage";
 import {
   type AuthSettings,
   claimDashboardRefresh,
-  claimStartupRefresh,
   deleteAuthSettings,
   deleteMfaSettings,
   ensureCleLogin,
   ensureKoanLogin,
+  academicLinkUrl,
   isFirefoxDataConsentEnv,
   loadAuthSettings,
   refreshCleLogin,
@@ -65,14 +86,30 @@ import {
   getSavedMfaSecrets,
   checkLoginStatus,
 } from "./auth";
+import { buildGpaTrendPoints } from "./grades";
 import QRCode from "qrcode";
-import ThemeToggle, { loadTheme } from "./ThemeToggle";
+import ThemeToggle, { loadTheme, saveTheme } from "./ThemeToggle";
+import { useEscapeKey } from "./useEscapeKey";
+import { activityDateLabel, isRecentActivity } from "./activity";
+import { groupDeadlineActions, isUniversityImportant, noticeAttentionReason, upcomingChanges } from "./dashboard";
+import { needsMessageRecoveryUpgrade } from "./cle";
+import { cleCacheIssue, cleCollectionIssue } from "./cle-status";
+import { noticeBenefit } from "./notice-benefits";
+import { communicationItems, homeCommunicationGroups, type CommunicationItem } from "./communications";
+import {
+  coordinateSync, finishSyncAttempt, GRADES_REFRESH_TTL_MS, isSyncFresh,
+  MANUAL_REFRESH_TTL_MS, startSyncAttempt, syncRetryAt, type SyncTarget,
+} from "./sync";
+import { useAutoSync } from "./useAutoSync";
+import { KOAN_CACHE_KEY, CLE_CACHE_KEY, GRADES_CACHE_KEY } from "./storage";
+import packageJson from "../package.json";
 
 
-const EMPTY = {
+const EMPTY: KoanData = {
   schedule: [],
   courses: [],
   changes: [],
+  surveys: [],
   notices: [],
   lightUpdatedAt: null,
   snapshotUpdatedAt: null,
@@ -80,8 +117,82 @@ const EMPTY = {
   futureScheduleUpdatedAt: null,
   coursesUpdatedAt: null,
   changesUpdatedAt: null,
+  futureChangesUpdatedAt: null,
+  surveysUpdatedAt: null,
   noticesUpdatedAt: null,
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasRecordArrayFields(value: Record<string, unknown>, fields: string[]) {
+  return fields.every((field) =>
+    Array.isArray(value[field]) && (value[field] as unknown[]).every(isRecord),
+  );
+}
+
+function isSafeKoanHref(value: unknown) {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === "https://koan.osaka-u.ac.jp";
+  } catch {
+    return false;
+  }
+}
+
+function loadInitialKoanData(cached: unknown = loadCache<unknown>()): KoanData {
+  if (
+    !isRecord(cached) ||
+    !hasRecordArrayFields(cached, ["schedule", "courses", "changes", "surveys", "notices"]) ||
+    !(cached.notices as unknown[]).every((notice) => isRecord(notice) && isSafeKoanHref(notice.href))
+  ) {
+    return EMPTY;
+  }
+  return { ...EMPTY, ...cached } as KoanData;
+}
+
+function loadInitialCleData(cached: unknown = loadCleCache<unknown>()): CleData {
+  if (
+    !isRecord(cached) ||
+    !hasRecordArrayFields(cached, ["courses", "tasks", "messages"]) ||
+    typeof cached.unreadMessages !== "number" ||
+    !Number.isFinite(cached.unreadMessages) ||
+    (cached.announcements !== undefined && !Array.isArray(cached.announcements)) ||
+    (cached.announcementCourses !== undefined && (
+      !isRecord(cached.announcementCourses) ||
+      !Object.values(cached.announcementCourses).every(isRecord)
+    ))
+  ) {
+    return EMPTY_CLE_DATA;
+  }
+  return { ...EMPTY_CLE_DATA, ...cached } as CleData;
+}
+
+function isGradeData(value: unknown): value is GradeData {
+  if (!isRecord(value)) return false;
+  return (
+    (value.creditsTotal === null || typeof value.creditsTotal === "number") &&
+    typeof value.cumulativeGpa === "string" &&
+    typeof value.updatedAt === "string" &&
+    Array.isArray(value.termGpas) &&
+    (value.termGpas as unknown[]).every(isRecord) &&
+    Array.isArray(value.groups) &&
+    (value.groups as unknown[]).every((group) =>
+      isRecord(group) && Array.isArray(group.courses) &&
+      (group.courses as unknown[]).every(isRecord),
+    ) &&
+    Array.isArray(value.courses) &&
+    (value.courses as unknown[]).every(isRecord) &&
+    Array.isArray(value.history) &&
+    (value.history as unknown[]).every(isRecord)
+  );
+}
+
+function loadInitialGradesData(cached: unknown = loadGradesCache<unknown>()): GradeData | null {
+  return isGradeData(cached) ? cached : null;
+}
 
 const fmtTime = (value: string | null) =>
   value
@@ -93,10 +204,34 @@ const fmtTime = (value: string | null) =>
       }).format(new Date(value))
     : "未取得";
 
-const isExpired = (value: string | null, ttl: number) =>
-  !value || Date.now() - new Date(value).getTime() >= ttl;
+function storageWriteFailure(result: StorageWriteResult) {
+  return result.ok
+    ? ""
+    : `保存に失敗しました（${result.error.kind}）。表示中のデータは保持されています。`;
+}
 
-const compactStatus = (label: string, value: string) => value ? `${label}: ${value}` : "";
+function formatStorageBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function latestTimestamp(...values: Array<string | null | undefined>) {
+  const timestamps = values.filter((value): value is string => Boolean(value)).sort();
+  return timestamps[timestamps.length - 1] || null;
+}
+
+function isPartialStatus(value: string) {
+  return /一部|以前のデータ|保存済み|未取得/.test(value);
+}
+
+const isExpired = (value: string | null, ttl: number) => {
+  if (!value) return true;
+  const timestamp = new Date(value).getTime();
+  const age = Date.now() - timestamp;
+  return !Number.isFinite(timestamp) || age < 0 || age >= ttl;
+};
+
 
 function safeDownloadName(value: string) {
   return value
@@ -125,7 +260,142 @@ function formatFileSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
+function materialDisplayName(material: CleMaterial) {
+  return material.title || material.fileName || "資料";
+}
+
+function materialDownloadLabel(material: CleMaterial) {
+  return `${materialDisplayName(material)}をダウンロード`;
+}
+
 type AppView = "dashboard" | "courses" | "reference" | "grades" | "settings";
+
+/**
+ * Progress and success messages. Everything else that lands in a status slot is
+ * treated as an error and shown in the same top-bar status slot.
+ * Keep the wording here in sync with the setStatus/setCleStatus/... call sites.
+ */
+const BENIGN_STATUSES = new Set([
+  "ログイン状態を確認しています",
+  "データを取得しています",
+  "自動ログイン完了 / データを取得しています",
+  "セッションを再認証しています",
+  "KOANログイン完了後に更新します",
+  "手動ログインの完了を待っています",
+  "更新しています",
+  "更新しました",
+  "更新をキャンセルしました",
+]);
+
+/**
+ * KOAN and CLE report separately but usually say the same thing. Label the two
+ * sources only when they actually differ - otherwise the user reads one sentence
+ * twice for no reason.
+ */
+function mergeStatuses(koan: string, cle: string) {
+  if (!koan) return cle;
+  if (!cle || koan === cle) return koan;
+  return `KOAN: ${koan} / CLE: ${cle}`;
+}
+
+/**
+ * Every dialog in the app. Handles the three ways out that a dialog owes the
+ * user - Escape, a click on the backdrop, and the button inside - and puts focus
+ * in the dialog on open, returning it where it came from on close.
+ *
+ * Pass `onDismiss={undefined}` for a step that must not be abandoned halfway
+ * (registration in flight); the dialog then only closes through its own buttons.
+ */
+function Modal({
+  children,
+  className = "",
+  labelledBy,
+  onDismiss,
+  overlayClassName = "",
+  style,
+}: {
+  children: ReactNode;
+  className?: string;
+  labelledBy?: string;
+  onDismiss?: () => void;
+  overlayClassName?: string;
+  style?: CSSProperties;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    const focusableElements = () =>
+      [...dialog.querySelectorAll<HTMLElement>(
+        [
+          "a[href]",
+          "button:not([disabled])",
+          "input:not([disabled])",
+          "select:not([disabled])",
+          "textarea:not([disabled])",
+          '[tabindex]:not([tabindex="-1"])',
+        ].join(","),
+      )].filter((element) =>
+        element.getClientRects().length > 0 &&
+        element.getAttribute("aria-hidden") !== "true",
+      );
+
+    const initialFocus = focusableElements()[0] || dialog;
+    initialFocus.focus();
+
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const focusable = focusableElements();
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    dialog.addEventListener("keydown", trapFocus);
+    return () => {
+      dialog.removeEventListener("keydown", trapFocus);
+      if (previous?.isConnected) previous.focus();
+    };
+  }, []);
+
+  useEscapeKey(onDismiss);
+
+  return (
+    <div
+      className={["settings-modal-overlay", overlayClassName].filter(Boolean).join(" ")}
+      onClick={onDismiss}
+    >
+      <div
+        aria-labelledby={labelledBy}
+        aria-modal="true"
+        className={["settings-modal", className].filter(Boolean).join(" ")}
+        onClick={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+        style={style}
+        tabIndex={-1}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
 
 function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [theme, setTheme] = useState(loadTheme);
@@ -133,32 +403,47 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   useEffect(() => {
     const root = document.documentElement;
     root.setAttribute("data-theme", theme);
-    localStorage.setItem("koan-plus-theme", theme);
+    saveTheme(theme);
   }, [theme]);
 
-  const [data, setData] = useState<KoanData>(() => ({
-    ...EMPTY,
-    ...loadCache<KoanData>(),
-  }));
+  const [data, setData] = useState<KoanData>(loadInitialKoanData);
+  const dataRef = useRef(data);
+  dataRef.current = data;
   const [loading, setLoading] = useState(false);
-  const [cleData, setCleData] = useState<CleData>(() => ({
-    ...EMPTY_CLE_DATA,
-    ...loadCleCache<CleData>(),
-  }));
+  const [cleData, setCleData] = useState<CleData>(loadInitialCleData);
+  const cleDataRef = useRef(cleData);
+  cleDataRef.current = cleData;
   const [cleLoading, setCleLoading] = useState(false);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [snapshotStatus, setSnapshotStatus] = useState("");
   const [status, setStatus] = useState("");
-  const [cleStatus, setCleStatus] = useState("");
+  const [cleLiveStatus, setCleStatus] = useState("");
+  const cleStatus = cleLiveStatus || cleCacheIssue(cleData);
   const [progress, setProgress] = useState("");
   const [query, setQuery] = useState("");
   const [genre, setGenre] = useState("");
-  const [scope, setScope] = useState("attention");
+  const [scope, setScope] = useState("all");
   const [view, setView] = useState<AppView>(initialView);
-  const [selectedCourseCode, setSelectedCourseCode] = useState("");
-  const [gradesData, setGradesData] = useState<GradeData | null>(() =>
-    loadGradesCache<GradeData>(),
+  const [isOffline, setIsOffline] = useState(() =>
+    typeof navigator !== "undefined" && navigator.onLine === false,
   );
+  const pageTitleRef = useRef<HTMLHeadingElement>(null);
+  const syncDetailsRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const closeOutside = (event: PointerEvent) => {
+      const details = syncDetailsRef.current;
+      if (details?.open && !details.contains(event.target as Node)) details.open = false;
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, []);
+  const [selectedCourseCode, setSelectedCourseCode] = useState("");
+  const [gradesData, setGradesData] = useState<GradeData | null>(loadInitialGradesData);
+  const gradesDataRef = useRef(gradesData);
+  gradesDataRef.current = gradesData;
+  const requestedSyncs = useRef(new Set<SyncTarget>());
+  const [syncFeedback, setSyncFeedback] = useState<Partial<Record<SyncTarget, string>>>({});
+  const [activeSync, setActiveSync] = useState<SyncTarget | null>(null);
   const [gradesLoading, setGradesLoading] = useState(false);
   const [gradesStatus, setGradesStatus] = useState("");
   const updateLock = useRef(false);
@@ -168,8 +453,9 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [authChecking, setAuthChecking] = useState(false);
   const [showManualLoginModal, setShowManualLoginModal] = useState(false);
   const [pendingAction, setPendingAction] = useState<"dashboard" | "grades" | null>(null);
-  const [refreshBlockedUntil, setRefreshBlockedUntil] = useState(0);
   const [authSettings, setAuthSettings] = useState<AuthSettings | null>(null);
+  const autoSyncEnabled = useRef(false);
+  autoSyncEnabled.current = Boolean(authSettings?.configured && authSettings.enabled);
   const [freshnessClock, setFreshnessClock] = useState(Date.now());
   const [selectedAnnouncement, setSelectedAnnouncement] = useState<CleAnnouncement | null>(null);
   const [materialCourse, setMaterialCourse] = useState<CourseSummary | null>(null);
@@ -178,11 +464,34 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
   const [materialError, setMaterialError] = useState("");
   const [materialDownloadingId, setMaterialDownloadingId] = useState("");
   const [materialBatchProgress, setMaterialBatchProgress] = useState("");
+  const materialRequestId = useRef(0);
+  const unsavedResources = useRef(new Set<string>());
+  const recordCacheWrite = (key: string, result: StorageWriteResult) => {
+    if (result.ok) unsavedResources.current.delete(key);
+    else unsavedResources.current.add(key);
+    return storageWriteFailure(result);
+  };
 
   useEffect(() => {
     const intervalId = window.setInterval(() => setFreshnessClock(Date.now()), 15 * 1000);
     return () => window.clearInterval(intervalId);
   }, []);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => pageTitleRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [view]);
 
   useEffect(() => {
     const refreshAuthSettings = () => {
@@ -195,76 +504,116 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     return () => window.removeEventListener("focus", refreshAuthSettings);
   }, []);
 
-  const updateKoan = async (force = false) => {
+  const updateKoan = async (refreshRecent = false): Promise<KoanData | null> => {
     setLoading(true);
-    setStatus("ログイン状態を確認中");
+    setStatus("ログイン状態を確認しています");
     try {
-      if (!force && isKoanCacheFresh(data)) {
+      const data = dataRef.current;
+      if (isKoanCacheFresh(data, refreshRecent)) {
         setStatus(`キャッシュ表示中 / 更新 ${fmtTime(data.lightUpdatedAt)}`);
-        return true;
+        return data;
       }
       const auth = await ensureKoanLogin();
-      if (auth.loginStarted) setStatus("自動ログイン完了 / データ取得準備中");
-      else setStatus("データ取得準備中");
+      if (auth.loginStarted) setStatus("自動ログイン完了 / データを取得しています");
+      else setStatus("データを取得しています");
       const result = await refreshLight(data, {
-        force,
+        refreshRecent,
         portalHtml: auth.portalHtml,
         portalUrl: auth.portalUrl,
         onProgress: (value) => {
           if (value) setStatus(value);
         },
       });
-      setData((current) => {
-        const next = { ...current, ...result };
-        saveCache(next);
-        return next;
-      });
-      setStatus("更新しました");
-      return true;
+      const next = { ...dataRef.current, ...result };
+      const writeFailure = recordCacheWrite(KOAN_CACHE_KEY, saveCache(next));
+      dataRef.current = next;
+      setData(next);
+      const refreshedData = next;
+      setStatus(
+        [
+          result.warnings?.length
+            ? `一部を以前のデータで表示しています: ${result.warnings.join(" / ")}`
+            : "",
+          writeFailure,
+        ].filter(Boolean).join(" / ") || "更新しました",
+      );
+      return refreshedData;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
-      return false;
+      return null;
     } finally {
       setLoading(false);
     }
   };
 
-  const updateCle = async (force = false) => {
+  const updateCle = async (
+    refreshRecent = false,
+    activeCoursesTask: Promise<CourseRegistration[]> = Promise.resolve(data.courses),
+  ) => {
     setCleLoading(true);
-    setCleStatus("CLEログイン状態を確認中");
+    setCleStatus("ログイン状態を確認しています");
     try {
-      if (!force && isCleCacheFresh(cleData)) {
+      const cleData = cleDataRef.current;
+      if (isCleCacheFresh(cleData, refreshRecent)) {
         setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
         return true;
       }
-      const auth = await ensureCleLogin();
-      if (auth.loginStarted) setCleStatus("自動ログイン完了 / データ取得準備中");
-      else setCleStatus("データ取得準備中");
+      const [auth, activeCourses] = await Promise.all([
+        ensureCleLogin(),
+        activeCoursesTask,
+      ]);
+      if (auth.loginStarted) setCleStatus("自動ログイン完了 / データを取得しています");
+      else setCleStatus("データを取得しています");
       let next;
       try {
         next = await refreshCle(cleData, auth.tabId, (value) => {
           if (value) setCleStatus(value);
-        }, force, {
-          activeCourseCodes: data.courses.map((course) => course.code),
+        }, false, {
+          refreshRecent,
+          activeCourses: activeCourses.map((course) => ({
+            code: course.code,
+            title: course.title,
+            year: course.year,
+          })),
           priorityCourseCode: selectedCourseCode,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (/別の画面|1分後|待機中|再試行できます/.test(message)) throw error;
-        setCleStatus("セッションを再認証中");
+        if (!/\((?:401|403)\)|ログイン|認証|セッション/i.test(message)) throw error;
+        setCleStatus("セッションを再認証しています");
         const refreshedAuth = await refreshCleLogin();
         next = await refreshCle(cleData, refreshedAuth.tabId, (value) => {
           if (value) setCleStatus(value);
-        }, force, {
-          activeCourseCodes: data.courses.map((course) => course.code),
+        }, false, {
+          refreshRecent,
+          activeCourses: activeCourses.map((course) => ({
+            code: course.code,
+            title: course.title,
+            year: course.year,
+          })),
           priorityCourseCode: selectedCourseCode,
           bypassBackoff: true,
         });
       }
+      const writeFailure = recordCacheWrite(CLE_CACHE_KEY, saveCleCache(next));
+      cleDataRef.current = next;
       setCleData(next);
-      saveCleCache(next);
-      setCleStatus("CLE更新済み");
-      return true;
+      setCleStatus(
+        [
+          next.warnings?.length
+            ? `一部未取得です: ${next.warnings.join(" / ")}`
+            : "",
+          writeFailure,
+        ].filter(Boolean).join(" / ") || "更新しました",
+      );
+      // Progressive pagination is useful work, not a failed attempt. Continue
+      // the remaining courses promptly; back off when no progress is possible.
+      return !next.warnings?.length || next.updatedAt !== cleData.updatedAt ||
+        Object.keys(next.announcementCourses || {}).length > Object.keys(cleData.announcementCourses || {}).length ||
+        (next.taskStatusPendingCount || 0) < (cleData.taskStatusPendingCount || 0) ||
+        (next.messagesPendingCount || 0) < (cleData.messagesPendingCount || 0) ||
+        Boolean(next.messagesNextPage && next.messagesNextPage !== cleData.messagesNextPage);
     } catch (error) {
       setCleStatus(error instanceof Error ? error.message : String(error));
       return false;
@@ -273,30 +622,48 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     }
   };
 
-  const openMaterials = async (course: CourseSummary) => {
-    if (!course.cleCourse) return;
+  const openMaterials = async (course: CourseSummary, force = false) => {
+    if (!course.cleCourse || materialDownloadingId || materialBatchProgress) return;
+    const requestId = materialRequestId.current + 1;
+    materialRequestId.current = requestId;
+    const cached = getCachedCourseMaterials(course.cleCourse.courseId);
     setMaterialCourse(course);
-    setMaterialList(null);
-    setMaterialError("");
+    setMaterialList(cached);
+    setMaterialError(
+      cached?.complete === false
+        ? cached.warnings?.join(" / ") || "資料一覧の一部を取得できていません。"
+        : "",
+    );
     setMaterialBatchProgress("");
-    setMaterialLoading(true);
+    const cacheCanBeShownWithoutRefresh = Boolean(
+      !force && cached && isMaterialCacheFresh(cached),
+    );
+    setMaterialLoading(!cacheCanBeShownWithoutRefresh);
+    if (cacheCanBeShownWithoutRefresh) return;
+
     try {
+      // A cached list is useful even when CLE needs to reconnect. Show it
+      // immediately and let the refresh continue behind the list.
       const auth = await ensureCleLogin();
-      const result = await fetchCourseMaterials(course.cleCourse.courseId, auth.tabId);
+      if (requestId !== materialRequestId.current) return;
+      const result = await fetchCourseMaterials(course.cleCourse.courseId, auth.tabId, force);
+      if (requestId !== materialRequestId.current) return;
       setMaterialList(result);
+      setMaterialError(
+        result.complete === false
+          ? result.warnings?.join(" / ") || "資料一覧の一部を取得できませんでした。"
+          : "",
+      );
     } catch (error) {
-      setMaterialError(error instanceof Error ? error.message : String(error));
+      if (requestId === materialRequestId.current) {
+        setMaterialError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setMaterialLoading(false);
+      if (requestId === materialRequestId.current) setMaterialLoading(false);
     }
   };
 
-  const closeMaterials = () => {
-    if (materialDownloadingId || materialBatchProgress) return;
-    setMaterialCourse(null);
-    setMaterialList(null);
-    setMaterialError("");
-  };
+  const materialsBusy = Boolean(materialDownloadingId || materialBatchProgress);
 
   const downloadMaterial = async (material: CleMaterial) => {
     setMaterialError("");
@@ -342,32 +709,41 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     }
   };
 
-  const executeUpdate = async (force = false, sequential = false) => {
+  const executeUpdate = async (refreshRecent = false, sequential = false) => {
     if (updateLock.current) return;
     updateLock.current = true;
     try {
       const claim = await claimDashboardRefresh();
-      setRefreshBlockedUntil(Date.now() + claim.retryAfterMs);
       if (!claim.allowed) {
-        setStatus("更新の再試行は1分後にできます。");
-        setCleStatus("更新の再試行は1分後にできます。");
+        requestedSyncs.current.add("dashboard");
+        setSyncFeedback((previous) => ({ ...previous, dashboard: "保存済みデータを表示中 · 更新は自動で再試行します" }));
         return;
       }
       if (sequential) {
         setCleStatus("KOANログイン完了後に更新します");
-        const koanUpdated = await updateKoan(force);
-        if (!koanUpdated) {
-          setCleStatus("KOANログインが完了しなかったため、CLE更新を中止しました。");
-          return;
+        const refreshedKoan = await updateKoan(refreshRecent);
+        if (!refreshedKoan) {
+          setCleStatus("KOANログインが完了しなかったため、CLE更新を中止しました");
+          return false;
         }
-        await updateCle(force);
+        const cle = await updateCle(refreshRecent, Promise.resolve(refreshedKoan.courses));
+        return cle && !refreshedKoan.warnings?.length;
       } else {
-        await Promise.all([updateKoan(force), updateCle(force)]);
+        const koanTask = updateKoan(refreshRecent);
+        const activeCoursesTask = koanTask.then(
+          (refreshedKoan) => refreshedKoan?.courses || data.courses,
+        );
+        const [koan, cle] = await Promise.all([
+          koanTask,
+          updateCle(refreshRecent, activeCoursesTask),
+        ]);
+        return Boolean(koan && !koan.warnings?.length && cle);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatus(message);
       setCleStatus(message);
+      return false;
     } finally {
       updateLock.current = false;
     }
@@ -389,28 +765,37 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     if (loggedIn) return { manualMode: true, mfaEnabled: currentAuthSettings.mfaEnabled };
 
     if (action === "dashboard") {
-      setStatus("手動ログインの確認待ち");
-      setCleStatus("手動ログインの確認待ち");
+      setStatus("手動ログインの完了を待っています");
+      setCleStatus("手動ログインの完了を待っています");
     } else {
-      setGradesStatus("手動ログインの確認待ち");
+      setGradesStatus("手動ログインの完了を待っています");
     }
     setPendingAction(action);
     setShowManualLoginModal(true);
     return null;
   };
 
-  const runUpdate = async (force = false) => {
+  const cancelManualLogin = () => {
+    setShowManualLoginModal(false);
+    if (pendingAction === "grades") {
+      setGradesStatus("更新をキャンセルしました");
+    } else {
+      setStatus("更新をキャンセルしました");
+      setCleStatus("更新をキャンセルしました");
+    }
+    setPendingAction(null);
+  };
+
+  const runUpdate = async (refreshRecent = false) => {
     if (authCheckLock.current || updateLock.current) return;
     authCheckLock.current = true;
     setAuthChecking(true);
-    setStatus("ログイン状態を確認中");
-    setCleStatus("ログイン状態を確認中");
-    let manualMode = false;
+    setStatus("ログイン状態を確認しています");
+    setCleStatus("ログイン状態を確認しています");
     let sequential = false;
     try {
       const prepared = await prepareAuthenticatedAction("dashboard");
       if (!prepared) return;
-      manualMode = prepared.manualMode;
       sequential = !prepared.mfaEnabled;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -421,34 +806,40 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       authCheckLock.current = false;
       setAuthChecking(false);
     }
-    if (!force && !manualMode && isKoanCacheFresh(data) && isCleCacheFresh(cleData)) {
-      setStatus(`キャッシュ表示中 / 更新 ${fmtTime(data.lightUpdatedAt)}`);
-      setCleStatus(`キャッシュ表示中 / 更新 ${fmtTime(cleData.updatedAt)}`);
-      return;
-    }
-    await executeUpdate(force, sequential);
+    return executeUpdate(refreshRecent, sequential);
   };
-  const update = () => runUpdate(false);
+  const update = () => requestSync("dashboard", true);
 
   const syncSnapshot = async () => {
     if (snapshotLock.current) return;
     snapshotLock.current = true;
     setSnapshotLoading(true);
-    setSnapshotStatus("掲示スナップショットを同期中");
+    setSnapshotStatus("更新しています");
     try {
-      const snapshot = await refreshSnapshot(data, setProgress);
-      setData((current) => {
-        const next = {
-          ...current,
-          ...snapshot,
-          notices: mergeNotices([...snapshot.notices, ...current.notices]),
-        };
-        saveCache(next);
-        return next;
-      });
-      setSnapshotStatus("掲示スナップショットを同期しました");
+      setProgress("KOANログイン状態を確認中");
+      await ensureKoanLogin();
+      const snapshot = await refreshSnapshot(dataRef.current, setProgress);
+      const current = dataRef.current;
+      const next = {
+        ...current,
+        ...snapshot,
+        notices: mergeNotices([...snapshot.notices, ...current.notices]),
+      };
+      const writeFailure = recordCacheWrite(KOAN_CACHE_KEY, saveCache(next));
+      dataRef.current = next;
+      setData(next);
+      setSnapshotStatus(
+        [
+          snapshot.snapshotComplete === false
+            ? `一部未取得です: ${snapshot.warnings?.join(" / ") || "次回の同期で続きを取得します"}`
+            : "",
+          writeFailure,
+        ].filter(Boolean).join(" / ") || "更新しました",
+      );
+      return snapshot.snapshotComplete !== false;
     } catch (error) {
       setSnapshotStatus(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setProgress("");
       setSnapshotLoading(false);
@@ -460,19 +851,22 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     if (gradesLock.current) return;
     gradesLock.current = true;
     setGradesLoading(true);
-    setGradesStatus("ログイン状態を確認中");
+    setGradesStatus("ログイン状態を確認しています");
     try {
       const auth = await ensureKoanLogin({ requireTab: true });
       if (!auth.tabId) {
         throw new Error("成績取得に使用するKOANタブを準備できませんでした。");
       }
-      setGradesStatus("成績を取得中");
+      setGradesStatus("更新しています");
       const next = await refreshGrades(setGradesStatus, auth.tabId);
+      const writeFailure = recordCacheWrite(GRADES_CACHE_KEY, saveGradesCache(next));
+      gradesDataRef.current = next;
       setGradesData(next);
-      saveGradesCache(next);
-      setGradesStatus("取得しました");
+      setGradesStatus(writeFailure || "更新しました");
+      return true;
     } catch (error) {
       setGradesStatus(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setGradesLoading(false);
       gradesLock.current = false;
@@ -483,7 +877,7 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     if (authCheckLock.current || gradesLock.current) return;
     authCheckLock.current = true;
     setAuthChecking(true);
-    setGradesStatus("ログイン状態を確認中");
+    setGradesStatus("ログイン状態を確認しています");
     try {
       const prepared = await prepareAuthenticatedAction("grades");
       if (!prepared) return;
@@ -495,20 +889,128 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
       authCheckLock.current = false;
       setAuthChecking(false);
     }
-    await executeGradesUpdate();
+    return executeGradesUpdate();
+  };
+
+  // Read other tabs' completed writes before deciding which endpoints are due.
+  // Updating refs as well as React state keeps this decision synchronous.
+  const adoptSharedCache = () => {
+    const koan = loadCache<unknown>();
+    const nextKoan = loadInitialKoanData(koan);
+    if (koan && !unsavedResources.current.has(KOAN_CACHE_KEY) && JSON.stringify(nextKoan) !== JSON.stringify(dataRef.current)) {
+      if (nextKoan.lightUpdatedAt !== dataRef.current.lightUpdatedAt) {
+        setStatus(nextKoan.warnings?.length ? `一部未取得です: ${nextKoan.warnings.join(" / ")}` : "");
+      }
+      if (nextKoan.snapshotUpdatedAt !== dataRef.current.snapshotUpdatedAt) setSnapshotStatus("");
+      dataRef.current = nextKoan;
+      setData(nextKoan);
+    }
+    const cle = loadCleCache<unknown>();
+    const nextCle = loadInitialCleData(cle);
+    if (cle && !unsavedResources.current.has(CLE_CACHE_KEY) && JSON.stringify(nextCle) !== JSON.stringify(cleDataRef.current)) {
+      cleDataRef.current = nextCle;
+      setCleData(nextCle);
+      setCleStatus(nextCle.warnings?.length ? `一部未取得です: ${nextCle.warnings.join(" / ")}` : "");
+    }
+    const grades = loadInitialGradesData();
+    if (grades && !unsavedResources.current.has(GRADES_CACHE_KEY) && JSON.stringify(grades) !== JSON.stringify(gradesDataRef.current)) {
+      gradesDataRef.current = grades;
+      setGradesData(grades);
+      setGradesStatus("");
+    }
   };
 
   useEffect(() => {
-    void loadAuthSettings()
-      .then((authSettings) => {
-        if (!authSettings.configured || !authSettings.enabled) return;
-        return claimStartupRefresh();
-      })
-      .then((shouldRefresh) => {
-        if (shouldRefresh === true) return runUpdate(false);
-      })
-      .catch(() => {});
+    const onStorage = (event: StorageEvent) => {
+      if ([KOAN_CACHE_KEY, CLE_CACHE_KEY, GRADES_CACHE_KEY].includes(event.key || "") &&
+          !updateLock.current && !snapshotLock.current && !gradesLock.current) adoptSharedCache();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
+
+  const syncIsDue = (target: SyncTarget, manual: boolean) => {
+    if (target === "dashboard") return !isKoanCacheFresh(dataRef.current, manual) || !isCleCacheFresh(cleDataRef.current, manual);
+    if (target === "grades") return !isSyncFresh(gradesDataRef.current?.updatedAt, manual ? MANUAL_REFRESH_TTL_MS : GRADES_REFRESH_TTL_MS);
+    return dataRef.current.snapshotVersion !== NOTICE_SNAPSHOT_VERSION ||
+      dataRef.current.snapshotComplete === false || !isSyncFresh(dataRef.current.snapshotUpdatedAt, SNAPSHOT_TTL_MS);
+  };
+
+  const requestSync = async (target: SyncTarget, manual = false, loginApproved = false, scheduled = false) => {
+    if (manual) requestedSyncs.current.add(target);
+    const feedback = (message: string) => setSyncFeedback((previous) => ({ ...previous, [target]: message }));
+    if (navigator.onLine === false) {
+      if (manual) feedback("保存済みデータを表示中 · 接続後に自動で確認します");
+      return;
+    }
+    let attemptStarted = false;
+    const acquired = await coordinateSync(async () => {
+      adoptSharedCache();
+      if (!syncIsDue(target, manual)) {
+        requestedSyncs.current.delete(target);
+        if (manual) feedback("直近の確認結果を、通信せずに表示しています");
+        return;
+      }
+      const resourceRetryAt = target === "reference" ? getSnapshotAvailability().blockedUntil
+        : target === "grades" ? getGradesRetryAt()
+        : Math.max(
+          isKoanCacheFresh(dataRef.current, manual) ? 0 : getLightRetryAt(),
+          isCleCacheFresh(cleDataRef.current, manual) ? 0 : getCleRetryAt(),
+        );
+      // The upgraded terminal check gets one attempt without inheriting the
+      // legacy pagination failure's scheduler penalty. Resource leases and
+      // the one-minute request cooldown remain in force.
+      const recoveryUpgrade = target === "dashboard" && needsMessageRecoveryUpgrade(cleDataRef.current);
+      const retryAt = Math.max(resourceRetryAt, recoveryUpgrade ? 0 : syncRetryAt(target, manual && !scheduled));
+      if (retryAt > Date.now() && !loginApproved) {
+        if (manual) feedback("保存済みデータを表示中 · 更新は自動で再試行します");
+        return;
+      }
+      requestedSyncs.current.delete(target);
+      feedback("");
+      startSyncAttempt(target);
+      attemptStarted = true;
+      setActiveSync(target);
+      let succeeded = false;
+      let completedAttempt = false;
+      try {
+        const result = target === "dashboard"
+          ? await (loginApproved ? executeUpdate(manual, true) : runUpdate(manual))
+          : target === "reference" ? await syncSnapshot()
+          : await (loginApproved ? executeGradesUpdate() : updateGrades());
+        succeeded = result === true;
+        completedAttempt = result !== undefined;
+        if (manual && completedAttempt && (result === false || syncIsDue(target, false))) requestedSyncs.current.add(target);
+      } finally {
+        // A denied lease or a login prompt did not attempt a resource fetch.
+        if (completedAttempt) finishSyncAttempt(target, succeeded);
+        setActiveSync(null);
+      }
+    }).catch((error: unknown) => {
+      feedback("");
+      const message = error instanceof Error ? error.message : String(error);
+      if (target === "grades") setGradesStatus(message);
+      else if (target === "reference") setSnapshotStatus(message);
+      else setStatus(message);
+      // Authentication or extension messaging may fail before a resource starts.
+      if (manual) requestedSyncs.current.add(target);
+      if (!attemptStarted) finishSyncAttempt(target, false);
+      return true;
+    });
+    if (!acquired && manual) feedback("別の更新が進行中です · 完了後に自動で確認します");
+  };
+
+  useAutoSync(async () => {
+    if (showManualLoginModal || authCheckLock.current) return;
+    const preferred: SyncTarget = view === "grades" ? "grades" : view === "reference" ? "reference" : "dashboard";
+    const targets = [...new Set<SyncTarget>([...requestedSyncs.current, preferred, "dashboard", "grades", "reference"])];
+    for (const target of targets) {
+      if (document.visibilityState === "hidden" || navigator.onLine === false) break;
+      const manual = requestedSyncs.current.has(target);
+      if (!manual && (!autoSyncEnabled.current || !syncIsDue(target, false))) continue;
+      await requestSync(target, manual, false, true);
+    }
+  }, `${view}:${Boolean(authSettings?.configured && authSettings.enabled)}`);
 
   const notices = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -522,12 +1024,15 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         if (scope === "unread" && !notice.unread) return false;
         if (scope === "important" && !isImportantNotice(notice)) return false;
         if (scope === "attention" && attentionScore(notice) < 120) return false;
+        if (scope === "benefits" && !noticeBenefit(notice)) return false;
         return true;
       })
-      .sort((a, b) => attentionScore(b) - attentionScore(a));
+      .sort((a, b) => Number(isImportantNotice(b)) - Number(isImportantNotice(a)) || attentionScore(b) - attentionScore(a));
   }, [data.notices, genre, query, scope]);
 
-  const snapshotExpired = isExpired(data.snapshotUpdatedAt, SNAPSHOT_TTL_MS);
+  const snapshotExpired =
+    data.snapshotVersion !== NOTICE_SNAPSHOT_VERSION ||
+    isExpired(data.snapshotUpdatedAt, SNAPSHOT_TTL_MS);
   const snapshotAvailability = getSnapshotAvailability();
   const snapshotNow = Math.max(freshnessClock, Date.now());
   const snapshotBlocked = snapshotAvailability.blockedUntil > snapshotNow;
@@ -544,20 +1049,36 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         : `掲示同期の再試行まで約${snapshotWaitMinutes}分`;
   const markNoticeRead = (openedNotice: Notice) => {
     const openedKey = noticeKey(openedNotice);
-    setData((current) => {
-      const notices = current.notices.map((notice) =>
-        noticeKey(notice) === openedKey ? { ...notice, unread: false } : notice,
-      );
-      const next = { ...current, notices };
-      saveCache(next);
-      return next;
-    });
+    const current = dataRef.current;
+    const notices = current.notices.map((notice) =>
+      noticeKey(notice) === openedKey ? { ...notice, unread: false } : notice,
+    );
+    const next = { ...current, notices };
+    const writeFailure = recordCacheWrite(KOAN_CACHE_KEY, saveCache(next));
+    dataRef.current = next;
+    setData(next);
+    if (writeFailure) setStatus(writeFailure);
   };
 
-  const updateTimes = [data.lightUpdatedAt, cleData.updatedAt]
-    .filter((value): value is string => Boolean(value))
-    .sort();
-  const latestUpdatedAt = updateTimes[updateTimes.length - 1] || null;
+  const updateTimes = [
+    data.scheduleUpdatedAt,
+    data.futureScheduleUpdatedAt,
+    data.coursesUpdatedAt,
+    data.changesUpdatedAt,
+    data.futureChangesUpdatedAt,
+    data.surveysUpdatedAt,
+    data.noticesUpdatedAt,
+    cleData.coursesUpdatedAt,
+    cleData.tasksUpdatedAt,
+    cleData.messagesUpdatedAt,
+    cleData.taskStatusesUpdatedAt,
+  ];
+  const latestUpdatedAt = updateTimes.every(Boolean)
+    ? (() => {
+      const sorted = [...(updateTimes as string[])].sort();
+      return sorted[sorted.length - 1] || null;
+    })()
+    : null;
   const viewTitle = {
     dashboard: "ホーム",
     courses: "授業",
@@ -565,85 +1086,167 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
     grades: "成績",
     settings: "設定",
   }[view];
-  const showGradesError = gradesStatus && gradesStatus !== "取得しました" && gradesStatus !== "成績を取得中";
-  const hasKoanError = status && status !== "更新しました" && !status.includes("キャッシュ表示中");
-  const hasCleError = cleStatus && cleStatus !== "CLE更新済み" && !cleStatus.includes("キャッシュ表示中");
+  // Status strings come from several refresh layers. Partial/cache-retained
+  // results are warnings, not hard failures: they must remain visible without
+  // turning the top bar into an assertive error alert.
+  const isBenign = (value: string) =>
+    !value || value.includes("キャッシュ表示中") || isPartialStatus(value) || BENIGN_STATUSES.has(value);
+  const showGradesError = !gradesLoading && !authChecking && !isBenign(gradesStatus);
+  const hasKoanError = !loading && !authChecking && !isBenign(status);
+  const hasCleError = !cleLoading && !authChecking && !isBenign(cleStatus);
+  const showGradesPartial = !showGradesError && isPartialStatus(gradesStatus);
+  const hasKoanPartial = !hasKoanError && isPartialStatus(status);
+  const hasClePartial = !hasCleError && isPartialStatus(cleStatus);
   const showUpdateError = hasKoanError || hasCleError;
-  const cacheFresh = isKoanCacheFresh(data) && isCleCacheFresh(cleData);
-  const refreshCoolingDown = refreshBlockedUntil > Date.now();
+  const showUpdatePartial = hasKoanPartial || hasClePartial;
+  const snapshotError = !isBenign(snapshotStatus) && !snapshotLoading;
+  const snapshotPartial = !snapshotError && !snapshotLoading && isPartialStatus(snapshotStatus);
+  const courseStatus = showUpdateError || showUpdatePartial
+    ? mergeStatuses(status, cleStatus)
+    : "";
+
   const autoLoginActive = Boolean(authSettings?.configured && authSettings.enabled);
 
+  // The same cache-first action is available on every screen. Fresh data never
+  // triggers authentication, and deferred work remains visible without an error.
   const topbarState = view === "reference" ? {
-    action: syncSnapshot,
+    action: () => requestSync("reference", true),
     busy: snapshotLoading,
-    disabled: snapshotLoading || !snapshotExpired || snapshotBlocked,
-    label: snapshotLoading
-      ? "同期中..."
-      : !snapshotExpired || snapshotAvailability.reason === "completed"
-        ? "同期済み"
-        : snapshotBlocked
-          ? "待機中"
-          : "掲示を同期",
+    label: snapshotLoading ? "更新中…" : "更新",
     status: snapshotLoading
-      ? (progress || "掲示同期中...")
-      : snapshotBlocked
-        ? snapshotBlockedStatus
-        : snapshotStatus || `掲示同期 ${fmtTime(data.snapshotUpdatedAt)} / 更新推奨`,
+      ? (progress || "掲示を同期しています")
+      : snapshotError
+      ? snapshotStatus
+        : snapshotBlocked
+          ? snapshotBlockedStatus
+          : snapshotPartial
+            ? snapshotStatus
+          : `最終更新 ${fmtTime(data.snapshotUpdatedAt)}${snapshotExpired ? " / 更新できます" : ""}`,
   } : view === "grades" ? {
-    action: updateGrades,
+    action: () => requestSync("grades", true),
     busy: gradesLoading || authChecking,
-    disabled: gradesLoading || authChecking,
-    label: gradesLoading ? "取得中..." : authChecking ? "確認中..." : "成績を取得",
+    label: gradesLoading || authChecking ? "更新中…" : "更新",
     status: gradesLoading || authChecking
-      ? (gradesStatus || "成績を取得中...")
+      ? (gradesStatus || "成績を取得しています")
       : showGradesError
         ? gradesStatus
-        : `成績更新履歴 ${fmtTime(gradesData?.updatedAt ?? null)}`,
+        : showGradesPartial
+          ? gradesStatus
+        : `最終更新 ${fmtTime(gradesData?.updatedAt ?? null)}`,
   } : {
-    action: update,
+    action: () => requestSync("dashboard", true),
     busy: loading || cleLoading || authChecking,
-    disabled: loading || cleLoading || authChecking ||
-      (autoLoginActive && (cacheFresh || refreshCoolingDown)),
-    label: loading || cleLoading
-      ? "更新中..."
-      : authChecking
-        ? "確認中..."
-      : cacheFresh && autoLoginActive
-        ? "最新"
-        : refreshCoolingDown && autoLoginActive
-          ? "待機中"
-          : "更新",
+    label: loading || cleLoading || authChecking ? "更新中…" : "更新",
     status: loading || cleLoading || authChecking
-      ? [
-          compactStatus("KOAN", status),
-          compactStatus("CLE", cleStatus),
-        ].filter(Boolean).join(" / ") || (authChecking ? "ログイン状態を確認中..." : "更新中...")
+      ? mergeStatuses(status, cleStatus) || "更新しています"
       : showUpdateError
-        ? [
-            hasKoanError ? compactStatus("KOAN", status) : "",
-            hasCleError ? compactStatus("CLE", cleStatus) : "",
-          ].filter(Boolean).join(" / ")
-        : `更新済み ${fmtTime(latestUpdatedAt)}`,
+        ? mergeStatuses(hasKoanError ? status : "", hasCleError ? cleStatus : "")
+        : showUpdatePartial
+          ? mergeStatuses(hasKoanPartial ? status : "", hasClePartial ? cleStatus : "")
+        : `最終更新 ${fmtTime(latestUpdatedAt)}`,
   };
+  const currentSyncTarget: SyncTarget = view === "reference" ? "reference" : view === "grades" ? "grades" : "dashboard";
+  const currentFeedback = topbarState.busy ? "" : syncFeedback[currentSyncTarget];
+  const topbarStatus = currentFeedback || (
+    topbarState.busy && currentSyncTarget === "dashboard"
+      ? authChecking ? "ログイン状態を確認しています" : "授業・課題・連絡を確認しています"
+      : topbarState.status
+  );
+  const syncHasIssue = showUpdateError || showUpdatePartial || snapshotError || snapshotPartial || showGradesError || showGradesPartial;
+  const koanLoaded = Boolean(
+    data.lightUpdatedAt ||
+    data.snapshotUpdatedAt ||
+    data.surveysUpdatedAt ||
+    data.noticesUpdatedAt,
+  );
+  const cleLoaded = Boolean(
+    cleData.updatedAt ||
+    cleData.messagesUpdatedAt ||
+    cleData.tasksUpdatedAt ||
+    cleData.taskStatusesUpdatedAt,
+  );
 
   return (
     <div className="app-shell">
+      <a
+        className="skip-link"
+        href="#main-content"
+        onClick={() => document.getElementById("main-content")?.focus()}
+      >
+        本文へ移動
+      </a>
       <Sidebar
         onViewChange={setView}
         view={view}
       />
 
-      <header className="app-topbar">
-        <h1>{viewTitle}</h1>
+      <header className={`app-topbar${activeSync ? " is-syncing" : ""}`}>
+        <h1 ref={pageTitleRef} tabIndex={-1}>{viewTitle}</h1>
         <div className="topbar-actions">
           <div className="update-group">
-            <small>{topbarState.status}</small>
+            <details ref={syncDetailsRef} key={view} className="sync-details" onBlur={(event) => {
+              if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+            }} onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.currentTarget.open = false;
+                event.currentTarget.querySelector("summary")?.focus();
+              }
+            }}>
+              <summary className={syncHasIssue ? "has-issue" : ""}>
+                <span className={`sync-indicator${activeSync ? " is-active" : ""}`} aria-hidden="true" />
+                <span role="status" aria-live="polite">{isOffline ? "オフライン · 保存済みを表示" : activeSync
+                  ? `${({ dashboard: "ホーム", reference: "掲示", grades: "成績" })[activeSync]}を同期中`
+                  : currentFeedback || (syncHasIssue ? "一部の情報を更新できませんでした" : topbarStatus)}</span>
+                <span className="sr-only">同期の詳細</span>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="lucide-icon sync-chevron"
+                  aria-hidden="true"
+                >
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </summary>
+              <div className="sync-popover" aria-label="同期の詳細">
+                <div className="sync-popover-heading"><strong>同期の状態</strong><span>保存済みの情報は引き続き閲覧できます</span></div>
+                {isOffline && <p className="sync-offline-note">{autoLoginActive || requestedSyncs.current.size > 0 ? "接続後に自動同期を再開します。" : "接続後に更新できます。"}</p>}
+                <SourceStatus source="KOAN" loaded={koanLoaded} loading={loading || authChecking} error={hasKoanError} status={status} updatedAt={latestTimestamp(data.lightUpdatedAt, data.surveysUpdatedAt, data.noticesUpdatedAt)} onRetry={() => void requestSync("dashboard", true)} />
+                <SourceStatus source="CLE" loaded={cleLoaded} loading={cleLoading} error={hasCleError} status={cleStatus} updatedAt={latestTimestamp(cleData.updatedAt, cleData.messagesUpdatedAt, cleData.tasksUpdatedAt)} onRetry={() => void requestSync("dashboard", true)} />
+                <SourceStatus source="掲示" loaded={Boolean(data.snapshotUpdatedAt)} loading={snapshotLoading} error={snapshotError} status={snapshotStatus} updatedAt={data.snapshotUpdatedAt} stale={snapshotExpired} onRetry={() => void requestSync("reference", true)} />
+                <SourceStatus source="成績" loaded={Boolean(gradesData)} loading={gradesLoading} error={showGradesError} status={gradesStatus} updatedAt={gradesData?.updatedAt ?? null} onRetry={() => void requestSync("grades", true)} />
+              </div>
+            </details>
             <button
               className={topbarState.busy ? "is-loading" : ""}
               type="button"
-              disabled={topbarState.disabled}
+              disabled={topbarState.busy}
               onClick={topbarState.action}
             >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={`lucide-icon refresh-icon${topbarState.busy ? " spinner" : ""}`}
+                aria-hidden="true"
+              >
+                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+                <path d="M21 3v5h-5" />
+                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+                <path d="M8 16H3v5" />
+              </svg>
               {topbarState.label}
             </button>
           </div>
@@ -651,13 +1254,21 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
         </div>
       </header>
 
-      <main className={view === "dashboard" ? "dashboard-layout" : "page-layout"}>
+      <main
+        className={view === "dashboard" ? "dashboard-layout" : "page-layout"}
+        id="main-content"
+        tabIndex={-1}
+      >
         {view === "dashboard" ? (
           <Dashboard
             cleData={cleData}
             cleLoading={cleLoading}
-            cleStatus={cleStatus}
+            koanIssue={hasKoanError || hasKoanPartial ? status : ""}
+            cleIssue={hasCleError || hasClePartial ? cleStatus : ""}
+            onRetry={update}
+            onShowNotices={() => setView("reference")}
             data={data}
+            loading={loading || authChecking}
             onOpenNotice={markNoticeRead}
             onSelectCourse={(code) => {
               setSelectedCourseCode(code);
@@ -669,202 +1280,100 @@ function App({ initialView = "dashboard" }: { initialView?: AppView }) {
           <CoursesPage
             cleData={cleData}
             data={data}
+            loading={loading || cleLoading || authChecking}
+            status={courseStatus}
+            error={showUpdateError}
+            loaded={koanLoaded || cleLoaded}
             onOpenNotice={markNoticeRead}
             selectedCode={selectedCourseCode}
             onSelectCode={setSelectedCourseCode}
             onOpenAnnouncement={setSelectedAnnouncement}
             onOpenMaterials={openMaterials}
+            materialsBusy={materialsBusy}
+            materialsPanel={materialCourse?.code === selectedCourseCode ? <CourseMaterialsContent
+              list={materialList} loading={materialLoading} error={materialError}
+              downloadingId={materialDownloadingId} batchProgress={materialBatchProgress}
+              onDownload={downloadMaterial} onDownloadAll={downloadAllMaterials}
+              onRefresh={() => void openMaterials(materialCourse, true)}
+            /> : null}
           />
         ) : view === "reference" ? (
           <ReferenceDesk
             genre={genre}
             allNotices={data.notices}
             notices={notices}
+            loading={snapshotLoading}
+            error={snapshotError ? snapshotStatus : ""}
+            partial={snapshotPartial ? snapshotStatus : ""}
+            loaded={Boolean(data.snapshotUpdatedAt || data.noticesUpdatedAt)}
             onGenreChange={setGenre}
             onOpen={markNoticeRead}
             onQueryChange={setQuery}
             onScopeChange={setScope}
             query={query}
             scope={scope}
-            snapshotUpdatedAt={data.snapshotUpdatedAt}
           />
         ) : view === "grades" ? (
-          <Grades data={gradesData} />
+          <Grades
+            data={gradesData}
+            loading={gradesLoading || authChecking}
+            status={gradesStatus}
+          />
         ) : <Settings onAuthSettingsChange={setAuthSettings} />}
       </main>
 
       {showManualLoginModal && (
-        <div className="settings-modal-overlay">
-          <div className="settings-modal" role="dialog" aria-modal="true">
-            <h3 className="modal-title">手動でログインを行いますか</h3>
-            <p className="modal-text">
-              自動ログインが無効、またはログイン情報が設定されていないため、大阪大学の公式ログイン画面（新しいタブ）を開いて手動でログインする必要があります。
-            </p>
-            <p className="modal-text" style={{ fontSize: "0.85em", color: "var(--text-muted, #6c757d)", marginTop: "8px" }}>
-              ※ログインが完了すると、自動的にこのダッシュボードに戻り、データが取得されます。（IDやパスワードは保存されません）
-            </p>
-            <div className="modal-actions">
-              <button className="modal-btn cancel" onClick={() => {
-                setShowManualLoginModal(false);
-                if (pendingAction === "grades") {
-                  setGradesStatus("取得をキャンセルしました");
-                } else {
-                  setStatus("更新をキャンセルしました");
-                  setCleStatus("更新をキャンセルしました");
-                }
-                setPendingAction(null);
-              }} type="button">
-                キャンセル
-              </button>
-              <button className="modal-btn confirm" onClick={() => {
-                setShowManualLoginModal(false);
-                const action = pendingAction;
-                setPendingAction(null);
-                if (action === "grades") {
-                  void executeGradesUpdate();
-                } else {
-                  void executeUpdate(false, true);
-                }
-              }} type="button">
-                ログイン画面を開く
-              </button>
-            </div>
+        <Modal labelledBy="manual-login-title" onDismiss={cancelManualLogin}>
+          <h3 className="modal-title" id="manual-login-title">手動でログインを行いますか</h3>
+          <p className="modal-text">
+            自動ログインが無効、またはログイン情報が設定されていないため、大阪大学の公式ログイン画面（新しいタブ）を開いて手動でログインする必要があります。
+          </p>
+          <p className="modal-note">
+            ※ログインが完了すると、自動的にこのダッシュボードに戻り、データが取得されます。（IDやパスワードは保存されません）
+          </p>
+          <div className="modal-actions">
+            <button className="modal-btn cancel" onClick={cancelManualLogin} type="button">
+              キャンセル
+            </button>
+            <button className="modal-btn confirm" onClick={() => {
+              setShowManualLoginModal(false);
+              const action = pendingAction;
+              setPendingAction(null);
+              if (action === "grades") {
+                void requestSync("grades", true, true);
+              } else {
+                void requestSync("dashboard", true, true);
+              }
+            }} type="button">
+              ログイン画面を開く
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {selectedAnnouncement && (
-        <div className="settings-modal-overlay" onClick={() => setSelectedAnnouncement(null)}>
-          <div className="settings-modal announcement-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "640px", width: "90%" }}>
-            <h3 className="modal-title" style={{ fontSize: "17px", fontWeight: "bold", marginBottom: "4px", lineHeight: "1.4", overflowWrap: "break-word" }}>{selectedAnnouncement.title}</h3>
-            <div style={{ fontSize: "12px", color: "var(--text-muted, #6c757d)", marginBottom: "16px" }}>
-              {courseDisplayName(selectedAnnouncement.courseName)} / {fmtDue(selectedAnnouncement.created)}
-            </div>
-            <div
-              className="announcement-modal-body markdown-body"
-              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(selectedAnnouncement.body) }}
-              style={{
-                maxHeight: "50vh",
-                overflowY: "auto",
-                padding: "16px",
-                background: "var(--bg-subtle, #f8f9fa)",
-                borderRadius: "6px",
-                border: "1px solid var(--border-primary, #dee2e6)",
-                fontSize: "14px",
-                lineHeight: "1.6",
-                textAlign: "left",
-                overflowWrap: "break-word",
-              }}
-            />
-            <div className="modal-actions" style={{ marginTop: "20px" }}>
-              <button className="modal-btn cancel" onClick={() => setSelectedAnnouncement(null)} type="button">
-                閉じる
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {materialCourse && (
-        <div className="settings-modal-overlay" onClick={closeMaterials}>
+        <Modal
+          className="announcement-modal"
+          labelledBy="announcement-modal-title"
+          onDismiss={() => setSelectedAnnouncement(null)}
+        >
+          <h3 className="modal-title" id="announcement-modal-title">{selectedAnnouncement.title}</h3>
+          <p className="modal-meta">
+            {courseDisplayName(selectedAnnouncement.courseName)} / {fmtDue(selectedAnnouncement.created)}
+          </p>
           <div
-            className="settings-modal materials-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="materials-modal-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <header className="materials-modal-header">
-              <div>
-                <h3 className="modal-title" id="materials-modal-title">資料</h3>
-                <p>{materialCourse.koan.title}</p>
-              </div>
-              <button
-                aria-label="資料一覧を閉じる"
-                className="materials-close"
-                disabled={Boolean(materialDownloadingId || materialBatchProgress)}
-                onClick={closeMaterials}
-                type="button"
-              >
-                閉じる
-              </button>
-            </header>
-
-            <div className="materials-modal-body">
-              {materialLoading ? (
-                <EmptyState
-                  icon="spinner"
-                  title="CLEから資料を読み込んでいます"
-                  description="この授業の資料だけを取得しています。"
-                  variant="normal"
-                />
-              ) : materialError && !materialList ? (
-                <EmptyState
-                  icon="info"
-                  title="資料を読み込めませんでした"
-                  description={materialError}
-                  variant="normal"
-                />
-              ) : materialList?.materials.length ? (
-                <div className="materials-list">
-                  {materialList.materials.map((material) => (
-                    <div className="material-row" key={material.id}>
-                      <div className="material-info">
-                        <strong>{material.title}</strong>
-                        <span>{material.fileName}</span>
-                        <small>
-                          {[
-                            material.folderPath.join(" / "),
-                            material.addedAt ? `追加 ${fmtTime(material.addedAt)}` : "",
-                            formatFileSize(material.size),
-                          ].filter(Boolean).join(" / ")}
-                        </small>
-                      </div>
-                      <button
-                        disabled={Boolean(materialDownloadingId || materialBatchProgress)}
-                        onClick={() => void downloadMaterial(material)}
-                        type="button"
-                      >
-                        {materialDownloadingId === material.id ? "取得中..." : "ダウンロード"}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState
-                  icon="book-open"
-                  title="ダウンロードできる資料はありません"
-                  description="CLE上にファイル形式の資料が追加されると、ここに表示されます。"
-                  variant="normal"
-                />
-              )}
-            </div>
-
-            {materialError && materialList && (
-              <p className="materials-error" role="alert">{materialError}</p>
-            )}
-            <footer className="materials-modal-footer">
-              <small>
-                {materialList
-                  ? `${materialList.materials.length}件 / 取得 ${fmtTime(materialList.updatedAt)}`
-                  : "授業を開いた時だけCLEへアクセスします"}
-              </small>
-              <button
-                className="modal-btn primary"
-                disabled={
-                  materialLoading ||
-                  !materialList?.materials.length ||
-                  Boolean(materialDownloadingId || materialBatchProgress)
-                }
-                onClick={() => void downloadAllMaterials()}
-                type="button"
-              >
-                {materialBatchProgress ? `一括取得中 ${materialBatchProgress}` : "すべてダウンロード"}
-              </button>
-            </footer>
+            className="announcement-modal-body markdown-body"
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(selectedAnnouncement.body) }}
+          />
+          <div className="modal-actions">
+            <button className="modal-btn cancel" onClick={() => setSelectedAnnouncement(null)} type="button">
+              閉じる
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
+
+
     </div>
   );
 }
@@ -874,7 +1383,7 @@ function getContactUrl(includeUserAgent = true) {
   const chromeObj = typeof window !== "undefined" ? (window as any).chrome : undefined;
   const version = chromeObj && chromeObj.runtime?.getManifest
     ? chromeObj.runtime.getManifest().version
-    : "0.2.0";
+    : packageJson.version;
 
   const params = new URLSearchParams();
   params.append("entry.206461699", version);
@@ -927,18 +1436,50 @@ function Sidebar({
       </div>
       <nav className="side-nav" aria-label="画面切替">
         {items.map(([key, label]) => (
-          <button className={view === key ? "active" : ""} key={key} onClick={() => onViewChange(key)} type="button">
+          <button
+            aria-current={view === key ? "page" : undefined}
+            className={view === key ? "active" : ""}
+            key={key}
+            onClick={() => onViewChange(key)}
+            type="button"
+          >
             {label}
           </button>
         ))}
       </nav>
       <div className="sidebar-footer">
         <small>外部リンク</small>
-        <a href={PORTAL_URL} target="_blank" rel="noopener noreferrer">KOAN</a>
-        <a href={CLE_MESSAGES_URL} target="_blank" rel="noopener noreferrer">CLE</a>
-        <a href={contactUrl} onClick={firefox ? handleContactClick : undefined} target="_blank" rel="noopener noreferrer">お問い合わせ</a>
+        <AuthenticatedLink href={PORTAL_URL} target="_blank">KOAN</AuthenticatedLink>
+        <AuthenticatedLink href={CLE_MESSAGES_URL} target="_blank">CLE</AuthenticatedLink>
+        <ExternalLink href={contactUrl} onClick={firefox ? handleContactClick : undefined}>お問い合わせ</ExternalLink>
       </div>
     </aside>
+  );
+}
+
+// Normal navigation starts immediately. If the session expired, the official
+// page redirects to login and auth-content.js applies the user's saved settings.
+function AuthenticatedLink(props: Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> & { href: string }) {
+  const href = academicLinkUrl(props.href);
+  if (!href) return <span className={props.className}>{props.children}<span className="inline-error" role="alert">リンク先を確認できませんでした。</span></span>;
+  return <ExternalLink {...props} href={href} />;
+}
+
+function NewTabNotice() {
+  return <span className="sr-only">（新しいタブで開きます）</span>;
+}
+
+function ExternalLink({
+  children,
+  rel = "noopener noreferrer",
+  target = "_blank",
+  ...props
+}: AnchorHTMLAttributes<HTMLAnchorElement>) {
+  return (
+    <a {...props} rel={rel} target={target}>
+      {children}
+      {target === "_blank" && <NewTabNotice />}
+    </a>
   );
 }
 
@@ -975,10 +1516,19 @@ function Settings({
   } | null>(null);
   const [showCancelCode, setShowCancelCode] = useState(false);
   const [showMfaSecret, setShowMfaSecret] = useState(false);
+  const [mfaCopyStatus, setMfaCopyStatus] = useState("");
   const [showMfaWizardModal, setShowMfaWizardModal] = useState(false);
   const [mfaWizardStep, setMfaWizardStep] = useState<"consent" | "registering" | "qr">("consent");
   const [mfaConsentChecked1, setMfaConsentChecked1] = useState(false);
   const [mfaConsentChecked2, setMfaConsentChecked2] = useState(false);
+  const [mfaRegistrationTimedOut, setMfaRegistrationTimedOut] = useState(false);
+  const mfaRegistrationTimeoutRef = useRef<number | null>(null);
+  const mfaRegistrationTabIdRef = useRef<number | null>(null);
+  const mfaRegistrationCleanupRef = useRef<(() => void) | null>(null);
+  const settingsMountedRef = useRef(true);
+  const [storageUsage, setStorageUsage] = useState(() => getStorageUsage());
+  const [showCacheDeleteModal, setShowCacheDeleteModal] = useState(false);
+  const [cacheClearing, setCacheClearing] = useState(false);
 
   const reloadSettings = async () => {
     try {
@@ -1020,6 +1570,31 @@ function Settings({
     return () => window.removeEventListener("focus", handleFocus);
   }, []);
 
+  useEffect(() => {
+    setStorageUsage(getStorageUsage());
+  }, []);
+
+  useEffect(() => {
+    if (!showMfaWizardModal) return;
+    const titleId = `mfa-wizard-title-${mfaWizardStep}`;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(titleId)?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [mfaWizardStep, showMfaWizardModal]);
+
+  useEffect(() => {
+    settingsMountedRef.current = true;
+    return () => {
+      settingsMountedRef.current = false;
+      mfaRegistrationCleanupRef.current?.();
+      if (mfaRegistrationTimeoutRef.current !== null) {
+        window.clearTimeout(mfaRegistrationTimeoutRef.current);
+        mfaRegistrationTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   const hasSavedMfa = Boolean(savedSecrets?.totpSecret);
   const maskedTotpSecret = savedSecrets?.totpSecret ? "••••••••" : "";
   const maskedCancelCode = savedSecrets?.temporaryCancelCode ? "••••••••" : "";
@@ -1027,6 +1602,46 @@ function Settings({
   const canSaveCredentials = !saving && Boolean(id.trim() && password);
   const canFinishSetup = !saving && Boolean(id.trim() && password) && (!mfaEnabled || (mfaConsent && Boolean(hasSavedMfa || totpSecret.trim())));
   const canSaveManualTotp = !saving && settings.mfaEnabled && Boolean(totpSecret.trim());
+
+  const refreshStorageUsage = () => setStorageUsage(getStorageUsage());
+  const managedStorageBytes = storageUsage.entries
+    .filter((entry) => entry.managed)
+    .reduce((total, entry) => total + entry.utf8Bytes, 0);
+
+  const exportCache = () => {
+    const result = exportCacheJson();
+    if (!result.ok) {
+      setStatus(`キャッシュを書き出せませんでした: ${result.error.message}`);
+      return;
+    }
+    try {
+      const blob = new Blob([result.json], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `koan-plus-cache-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setStatus(`キャッシュを書き出しました（${formatStorageBytes(result.bytes)}）。認証情報は含まれていません。`);
+    } catch (error) {
+      setStatus(`キャッシュを書き出せませんでした: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const clearCache = () => {
+    setCacheClearing(true);
+    const result = clearCacheStorage();
+    refreshStorageUsage();
+    setShowCacheDeleteModal(false);
+    setCacheClearing(false);
+    if (!result.ok) {
+      setStatus(`キャッシュの削除に一部失敗しました（${result.failed.length}件）。表示中のデータは保持されています。`);
+      return;
+    }
+    setStatus(`キャッシュを${result.removed.length}件削除しました。認証情報・テーマ・同意は保持されます。`);
+    window.setTimeout(() => window.location.reload(), 150);
+  };
 
   const startAutoCollect = async () => {
     const chromeObj = typeof window !== "undefined" ? (window as any).chrome : undefined;
@@ -1057,20 +1672,44 @@ function Settings({
           setShowMfaWizardModal(false);
           return;
         }
+        if (!settingsMountedRef.current) {
+          void Promise.resolve(chromeObj.tabs.remove(tab.id)).catch(() => {});
+          return;
+        }
 
+        mfaRegistrationTabIdRef.current = tab.id;
+        setMfaRegistrationTimedOut(false);
         // 12秒のセーフティタイマー（ログイン要求やエラー等で進まない場合に前面に出す）
-        const timeoutId = setTimeout(() => {
+        const timeoutId = window.setTimeout(() => {
+          setMfaRegistrationTimedOut(true);
           if (chromeObj.tabs?.update) {
             chromeObj.tabs.update(tab.id, { active: true });
-            setStatus("自動ログインが完了しなかったため、タブを前面に表示しました。ログインを完了させてください。");
+            setStatus("自動ログインが長引いているため、タブを前面に表示しました。完了しない場合は登録を閉じて再試行できます。");
           }
         }, 12000);
+        mfaRegistrationTimeoutRef.current = timeoutId;
+
+        let listener: (tabId: number) => void = () => {};
+        const cleanupRegistration = () => {
+          if (chromeObj.tabs?.onRemoved?.removeListener) {
+            chromeObj.tabs.onRemoved.removeListener(listener);
+          }
+          if (mfaRegistrationTimeoutRef.current === timeoutId) {
+            window.clearTimeout(timeoutId);
+            mfaRegistrationTimeoutRef.current = null;
+          }
+          if (mfaRegistrationTabIdRef.current === tab.id) {
+            mfaRegistrationTabIdRef.current = null;
+          }
+          if (mfaRegistrationCleanupRef.current === cleanupRegistration) {
+            mfaRegistrationCleanupRef.current = null;
+          }
+        };
 
         // タブが閉じられたことを検知してリロード
-        const listener = (tabId: number) => {
+        listener = (tabId: number) => {
           if (tabId === tab.id) {
-            chromeObj.tabs.onRemoved.removeListener(listener);
-            clearTimeout(timeoutId);
+            cleanupRegistration();
             
             void chromeObj.runtime.sendMessage({
               type: "auth-mfa-registration-result",
@@ -1095,6 +1734,7 @@ function Settings({
           }
         };
         chromeObj.tabs.onRemoved.addListener(listener);
+        mfaRegistrationCleanupRef.current = cleanupRegistration;
 
         // バックグラウンドに自動取得対象タブとして登録
         chromeObj.runtime.sendMessage({
@@ -1102,9 +1742,8 @@ function Settings({
           tabId: tab.id
         }, (response: any) => {
           if (!response?.ok) {
-            chromeObj.tabs.onRemoved.removeListener(listener);
-            clearTimeout(timeoutId);
-            chromeObj.tabs.remove(tab.id).catch(() => {});
+            cleanupRegistration();
+            void Promise.resolve(chromeObj.tabs.remove(tab.id)).catch(() => {});
             setSaving(false);
             setMfaWizardStep("consent");
             setStatus(response?.error || "自動取得タブの登録に失敗しました。");
@@ -1122,14 +1761,47 @@ function Settings({
     }
   };
 
+  const cancelMfaRegistration = () => {
+    const tabId = mfaRegistrationTabIdRef.current;
+    const chromeObj = typeof window !== "undefined" ? (window as any).chrome : undefined;
+    mfaRegistrationCleanupRef.current?.();
+    if (tabId === null || !chromeObj) return;
+    try {
+      // Newer background workers can clear their registration bookkeeping
+      // before the tab is removed. Older workers simply ignore this message.
+      void Promise.resolve(
+        chromeObj.runtime?.sendMessage?.({ type: "auth-mfa-cancel-auto-tab", tabId }),
+      ).catch(() => {});
+    } catch {
+      // The tab removal below is still enough to release the UI-side state.
+    }
+    try {
+      void Promise.resolve(chromeObj.tabs?.remove?.(tabId)).catch(() => {});
+    } catch {
+      // The tab may already have been closed by the user.
+    }
+  };
+
   const handleStartRegister = async () => {
     if (!await requestAuthenticationInfoPermission()) {
       setStatus("MFA自動登録を使用するには認証情報の利用許可が必要です。Firefoxの許可を確認してください。");
       setShowMfaWizardModal(false);
       return;
     }
+    setMfaRegistrationTimedOut(false);
     setMfaWizardStep("registering");
     await startAutoCollect();
+  };
+
+  const closeMfaWizard = () => {
+    cancelMfaRegistration();
+    setSaving(false);
+    setMfaRegistrationTimedOut(false);
+    setShowMfaWizardModal(false);
+    setShowMfaSecret(false);
+    setShowCancelCode(false);
+    setMfaCopyStatus("");
+    setMfaWizardStep("consent");
   };
 
   const qrCanvasRef = (node: HTMLCanvasElement | null) => {
@@ -1263,10 +1935,13 @@ function Settings({
     setStatus("");
   };
 
-  const copyValue = (value: string, message: string) => {
-    void navigator.clipboard.writeText(value);
-    setStatus(message);
-    window.setTimeout(() => setStatus(""), 3000);
+  const copyValue = async (value: string, message: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setMfaCopyStatus(message);
+    } catch {
+      setMfaCopyStatus("コピーできませんでした。キーを表示して手動でコピーしてください。");
+    }
   };
 
   const confirmDelete = () => {
@@ -1327,14 +2002,24 @@ function Settings({
                 <>
                   <div className="wizard-steps" aria-label="初回設定の進行状況">
                     {["ログイン情報", "二段階認証", "確認"].map((label, index) => (
-                      <span className={setupStep === index + 1 ? "active" : ""} key={label}>
+                      <span
+                        aria-current={setupStep === index + 1 ? "step" : undefined}
+                        className={setupStep === index + 1 ? "active" : ""}
+                        key={label}
+                      >
                         {index + 1}. {label}
                       </span>
                     ))}
                   </div>
 
                   {setupStep === 1 && (
-                    <div className="settings-form-block">
+                    <form
+                      className="settings-form-block"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        if (setupCanGoNext) setSetupStep(2);
+                      }}
+                    >
                       <div className="section-heading compact">
                         <div>
                           <h2>ログイン情報</h2>
@@ -1352,14 +2037,14 @@ function Settings({
                         </label>
                       </div>
                       <div className="settings-actions">
-                        <button className="primary-action" disabled={!setupCanGoNext} onClick={() => setSetupStep(2)} type="button">
+                        <button className="primary-action" disabled={!setupCanGoNext} type="submit">
                           次へ
                         </button>
                         <button className="secondary-action" onClick={() => setSetupStarted(false)} type="button">
                           キャンセル
                         </button>
                       </div>
-                    </div>
+                    </form>
                   )}
 
                   {setupStep === 2 && (
@@ -1455,11 +2140,12 @@ function Settings({
               <section className="section settings-card">
                 <label className="section-heading toggle-heading">
                   <div>
-                    <h2>自動ログイン</h2>
-                    <p>阪大認証画面で保存済みのID・パスワードを入力します。</p>
+                    <div className="setting-title"><h2>自動ログイン</h2><span className="setting-state">{settings.enabled ? "有効" : "無効"}</span></div>
+                    <p>保存したログイン情報を使い、画面を開いている間に自動同期します。</p>
                   </div>
                   <div className="switch">
                     <input
+                      aria-label="自動ログインを有効にする"
                       checked={settings.enabled}
                       disabled={saving}
                       onChange={(event) => toggleAutoLogin(event.target.checked)}
@@ -1473,12 +2159,19 @@ function Settings({
                   <hr className="settings-divider" />
                   {!editingCredentials ? (
                     <div className="saved-id-row">
+                      <span className="setting-state">ログイン情報：保存済み</span>
                       <button className="secondary-action" onClick={() => setEditingCredentials(true)} type="button">
                         ログイン情報を変更
                       </button>
                     </div>
                   ) : (
-                    <div className="settings-form-block">
+                    <form
+                      className="settings-form-block"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        if (canSaveCredentials) void save();
+                      }}
+                    >
                       <div className="settings-grid">
                         <label>
                           <span>大阪大学個人ID</span>
@@ -1502,7 +2195,7 @@ function Settings({
                       </div>
                       <div className="settings-actions-row">
                         <div className="settings-actions">
-                          <button className="primary-action" disabled={!canSaveCredentials} onClick={save} type="button">
+                          <button className="primary-action" disabled={!canSaveCredentials} type="submit">
                             {saving ? "保存中..." : "保存"}
                           </button>
                           <button className="secondary-action" onClick={cancelCredentialEdit} type="button">
@@ -1513,7 +2206,7 @@ function Settings({
                           認証情報を削除
                         </button>
                       </div>
-                    </div>
+                    </form>
                   )}
                 </div>
               </section>
@@ -1522,11 +2215,12 @@ function Settings({
               <section className="section settings-card">
                 <label className="section-heading toggle-heading">
                   <div>
-                    <h2>二段階認証</h2>
-                    <p>ログイン時に必要な6桁コードをこの端末で生成します。</p>
+                    <div className="setting-title"><h2>二段階認証</h2><span className="setting-state">{settings.mfaEnabled ? (hasSavedMfa ? "有効・登録済み" : "未登録") : (hasSavedMfa ? "無効・登録済み" : "無効・未登録")}</span></div>
+                    <p>ログインに使う6桁コードをこの端末で生成します。</p>
                   </div>
                   <div className="switch">
                     <input
+                      aria-label="二段階認証を有効にする"
                       checked={settings.mfaEnabled}
                       disabled={saving}
                       onChange={(event) => toggleMfa(event.target.checked)}
@@ -1594,45 +2288,59 @@ function Settings({
               </section>
             </>
           )}
+          <details className="section settings-card storage-management-card">
+            <summary className="storage-management-summary"><h2>データ管理</h2><span>キャッシュ・バックアップ</span></summary>
+            <div className="storage-management-body">
+              <dl className="storage-usage-summary">
+                <div>
+                  <dt>管理対象の使用量</dt>
+                  <dd>{formatStorageBytes(managedStorageBytes)}</dd>
+                </div>
+                <div>
+                  <dt>全体の使用量</dt>
+                  <dd>{storageUsage.ok ? formatStorageBytes(storageUsage.totalUtf8Bytes) : "確認できません"}</dd>
+                </div>
+              </dl>
+              {!storageUsage.ok && (
+                <p className="storage-management-error" role="alert">
+                  保存領域を確認できません。{storageUsage.error?.message || "ブラウザの設定を確認してください。"}
+                </p>
+              )}
+              <p className="storage-management-note">
+                書き出しにはKOAN/CLEのキャッシュだけが含まれ、認証情報・テーマ・同意情報は含まれません。キャッシュ削除後もそれらは保持されます。
+              </p>
+              <div className="storage-management-actions">
+                <button className="secondary-action" disabled={!storageUsage.ok} onClick={exportCache} type="button">
+                  キャッシュを書き出す
+                </button>
+                <button className="danger-text-action" disabled={cacheClearing} onClick={() => setShowCacheDeleteModal(true)} type="button">
+                  キャッシュを削除
+                </button>
+              </div>
+              <button className="subtle-action storage-refresh-action" onClick={refreshStorageUsage} type="button">
+                使用量を再確認
+              </button>
+            </div>
+          </details>
+          {status && (
+            <p className="settings-status" aria-live="polite" role="status">
+              {status}
+            </p>
+          )}
         </div>
 
-        {/* 右カラム：ステータス・認証情報の扱い */}
+        {/* 右カラム：必要なときに確認する補足 */}
         <div className="settings-sidebar">
-          <section className="section settings-card summary-card">
-            <div className="section-heading">
-              <div>
-                <h2>現在の状態</h2>
-              </div>
-            </div>
-            <ul className="settings-status-list">
-              <li>
-                <span className="status-label">自動ログイン</span>
-                <span className={`status-value ${settings.enabled ? "ready" : "disabled"}`}>
-                  {settings.enabled ? "有効" : "無効"}
-                </span>
-              </li>
-              <li>
-                <span className="status-label">ログイン情報</span>
-                <span className={`status-value ${settings.configured ? "ready" : "disabled"}`}>
-                  {settings.configured ? "保存済み" : "未保存"}
-                </span>
-              </li>
-              <li>
-                <span className="status-label">二段階認証</span>
-                <span className={`status-value ${hasSavedMfa ? "ready" : "disabled"}`}>
-                  {hasSavedMfa ? "登録済み" : "未登録"}
-                </span>
-              </li>
-            </ul>
-          </section>
-
           <section className="section settings-card how-it-works-card">
             <div className="section-heading">
               <div>
                 <h2>認証情報の扱い</h2>
               </div>
             </div>
-            <div className="credential-safety-body">
+            <p className="settings-privacy-summary">認証情報はこの端末内に保存します。</p>
+            <details className="settings-details-accordion credential-details">
+              <summary>保存と利用について</summary>
+              <div className="credential-safety-body">
               <dl className="credential-safety-list">
                 <div>
                   <dt>保存場所</dt>
@@ -1650,65 +2358,82 @@ function Settings({
               <p className="credential-safety-note">
                 端末を譲渡・廃棄するときは、先に登録情報を削除してください。
               </p>
-            </div>
+              </div>
+            </details>
           </section>
         </div>
       </div>
 
       {/* Delete Confirmation Modal */}
       {showDeleteModal && (
-        <div className="settings-modal-overlay">
-          <div className="settings-modal" role="dialog" aria-modal="true">
-            <h3 className="modal-title">認証情報を削除しますか</h3>
-            <p className="modal-text">次の情報をこの端末から削除します。この操作は取り消せません。</p>
-            <ul className="modal-delete-list">
-              <li>大阪大学個人ID</li>
-              <li>パスワード</li>
-            </ul>
-            <p className="modal-text" style={{ fontSize: "0.85em", color: "var(--text-muted, #6c757d)", marginTop: "8px" }}>
-              ※登録済みの二段階認証情報は維持されます。
-            </p>
-            <div className="modal-actions">
-              <button className="modal-btn cancel" onClick={() => setShowDeleteModal(false)} type="button">
-                キャンセル
-              </button>
-              <button className="modal-btn confirm" onClick={removeSavedCredentials} type="button">
-                削除する
-              </button>
-            </div>
+        <Modal labelledBy="delete-credentials-title" onDismiss={() => setShowDeleteModal(false)}>
+          <h3 className="modal-title" id="delete-credentials-title">認証情報を削除しますか</h3>
+          <p className="modal-text">次の情報をこの端末から削除します。この操作は取り消せません。</p>
+          <ul className="modal-delete-list">
+            <li>大阪大学個人ID</li>
+            <li>パスワード</li>
+          </ul>
+          <p className="modal-note">※登録済みの二段階認証情報は維持されます。</p>
+          <div className="modal-actions">
+            <button className="modal-btn cancel" onClick={() => setShowDeleteModal(false)} type="button">
+              キャンセル
+            </button>
+            <button className="modal-btn confirm" onClick={removeSavedCredentials} type="button">
+              削除する
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* MFA Delete Confirmation Modal */}
       {showMfaDeleteModal && (
-        <div className="settings-modal-overlay">
-          <div className="settings-modal" role="dialog" aria-modal="true">
-            <h3 className="modal-title">二段階認証情報を削除しますか</h3>
-            <p className="modal-text">登録されている二段階認証情報（手動入力キー、一時解除コード）をこの端末から削除します。この操作は取り消せません。</p>
-            <div className="modal-actions">
-              <button className="modal-btn cancel" onClick={() => setShowMfaDeleteModal(false)} type="button">
-                キャンセル
-              </button>
-              <button className="modal-btn confirm" onClick={removeSavedMfa} type="button">
-                削除する
-              </button>
-            </div>
+        <Modal labelledBy="delete-mfa-title" onDismiss={() => setShowMfaDeleteModal(false)}>
+          <h3 className="modal-title" id="delete-mfa-title">二段階認証情報を削除しますか</h3>
+          <p className="modal-text">登録されている二段階認証情報（手動入力キー、一時解除コード）をこの端末から削除します。この操作は取り消せません。</p>
+          <div className="modal-actions">
+            <button className="modal-btn cancel" onClick={() => setShowMfaDeleteModal(false)} type="button">
+              キャンセル
+            </button>
+            <button className="modal-btn confirm" onClick={removeSavedMfa} type="button">
+              削除する
+            </button>
           </div>
-        </div>
+        </Modal>
+      )}
+
+      {showCacheDeleteModal && (
+        <Modal labelledBy="delete-cache-title" onDismiss={() => setShowCacheDeleteModal(false)}>
+          <h3 className="modal-title" id="delete-cache-title">キャッシュを削除して再読み込みしますか</h3>
+          <p className="modal-text">
+            KOAN/CLEの取得データ、成績、資料一覧、更新履歴をこの端末から削除し、画面を再読み込みします。必要なデータは次回更新時に再取得できます。
+          </p>
+          <p className="modal-note">認証情報・二段階認証情報・テーマ・利用規約への同意は削除されません。</p>
+          <div className="modal-actions">
+            <button className="modal-btn cancel" onClick={() => setShowCacheDeleteModal(false)} type="button">
+              キャンセル
+            </button>
+            <button className="modal-btn confirm" disabled={cacheClearing} onClick={clearCache} type="button">
+              {cacheClearing ? "削除中…" : "削除して再読み込み"}
+            </button>
+          </div>
+        </Modal>
       )}
 
       {/* MFA Wizard Modal */}
       {showMfaWizardModal && (mfaWizardStep !== "qr" || Boolean(savedSecrets?.totpSecret)) && (
-        <div className="settings-modal-overlay mfa-wizard-overlay">
-          <div className="settings-modal mfa-wizard-modal" role="dialog" aria-modal="true">
+        <Modal
+          className="mfa-wizard-modal"
+          labelledBy={`mfa-wizard-title-${mfaWizardStep}`}
+          onDismiss={mfaWizardStep === "registering" && !mfaRegistrationTimedOut ? undefined : closeMfaWizard}
+          overlayClassName="mfa-wizard-overlay"
+        >
             <div className="mfa-wizard-viewport">
               <div className={`mfa-wizard-track step-${mfaWizardStep}`}>
                 
                 {/* Step 1: Consent */}
                 <div className="mfa-wizard-slide mfa-consent-slide">
                   <header className="mfa-consent-header">
-                    <h3 className="modal-title">二段階認証を自動登録します</h3>
+                    <h3 className="modal-title" id="mfa-wizard-title-consent" tabIndex={-1}>二段階認証を自動登録します</h3>
                     <p>始める前に、認証アプリの再設定と端末内保存について確認してください。</p>
                   </header>
 
@@ -1752,7 +2477,7 @@ function Settings({
                   </div>
 
                   <footer className="modal-actions mfa-consent-footer">
-                    <button className="modal-btn cancel" onClick={() => setShowMfaWizardModal(false)} type="button">
+                    <button className="modal-btn cancel" onClick={closeMfaWizard} type="button">
                       キャンセル
                     </button>
                     <button
@@ -1768,30 +2493,41 @@ function Settings({
 
                 {/* Step 2: Registering (Loading) */}
                 <div className="mfa-wizard-slide">
-                  <div className="mfa-wizard-loading-content">
+                  <div className="mfa-wizard-loading-content" role="status" aria-live="polite">
                     <div className="spinner-wrapper">
                       <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide-icon spinner">
                         <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
                       </svg>
                     </div>
-                    <h3 className="modal-title loading-title">二段階認証情報を自動登録中</h3>
+                    <h3 className="modal-title loading-title" id="mfa-wizard-title-registering" tabIndex={-1}>二段階認証情報を自動登録中</h3>
                     <p className="modal-text loading-text">
                       ブラウザのバックグラウンドタブで設定を実行しています。<br />
-                      MFA登録情報の取得を完了するまで、このまま数秒お待ちください。
+                      {mfaRegistrationTimedOut
+                        ? "処理が長引いています。前面のタブを確認するか、閉じて後で再試行してください。"
+                        : "MFA登録情報の取得を完了するまで、このまま数秒お待ちください。"}
                     </p>
+                    {mfaRegistrationTimedOut && (
+                      <button className="modal-btn cancel" onClick={closeMfaWizard} type="button">
+                        閉じて再試行
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 {/* Step 3: QR Code & Secrets */}
                 <div className="mfa-wizard-slide step-qr-slide">
-                  <h3 className="modal-title">登録情報・QRコード</h3>
+                  <h3 className="modal-title" id="mfa-wizard-title-qr" tabIndex={-1}>登録情報・QRコード</h3>
                   <p className="modal-text qr-instruction-text">
-                    Google Authenticator等の認証アプリでQRコードを読み込んでください。
+                    認証アプリでQRコードを読み込めます。手動登録には右のキーを使ってください。
                   </p>
                   <div className="mfa-qr-layout-container">
                     <div className="mfa-qr-left-col">
                       <div className="qr-box">
-                        <canvas ref={qrCanvasRef} />
+                        <canvas
+                          aria-label="二段階認証登録用QRコード。読み取れない場合は手動入力用キーを使用してください。"
+                          role="img"
+                          ref={qrCanvasRef}
+                        />
                       </div>
                     </div>
                     <div className="mfa-qr-right-col">
@@ -1822,7 +2558,7 @@ function Settings({
                                 </svg>
                               )}
                             </button>
-                            <button className="subtle-action" disabled={!savedSecrets?.totpSecret} onClick={() => savedSecrets?.totpSecret && copyValue(savedSecrets.totpSecret, "手動入力用キーをコピーしました。")} type="button">
+                            <button aria-label="手動入力用キーをコピー" className="subtle-action" disabled={!savedSecrets?.totpSecret} onClick={() => savedSecrets?.totpSecret && void copyValue(savedSecrets.totpSecret, "手動入力用キーをコピーしました。")} type="button">
                               コピー
                             </button>
                           </div>
@@ -1855,7 +2591,7 @@ function Settings({
                                   </svg>
                                 )}
                               </button>
-                              <button className="subtle-action" onClick={() => copyValue(savedSecrets.temporaryCancelCode, "一時解除コードをコピーしました。")} type="button">
+                              <button aria-label="一時解除コードをコピー" className="subtle-action" onClick={() => void copyValue(savedSecrets.temporaryCancelCode, "一時解除コードをコピーしました。")} type="button">
                                 コピー
                               </button>
                             </div>
@@ -1865,9 +2601,10 @@ function Settings({
                     </div>
                   </div>
                   <div className="modal-actions qr-actions">
+                    <p className="mfa-copy-status" role="status" aria-live="polite">{mfaCopyStatus}</p>
                     <button
                       className="modal-btn cancel"
-                      onClick={() => setShowMfaWizardModal(false)}
+                      onClick={closeMfaWizard}
                       type="button"
                     >
                       閉じる
@@ -1877,15 +2614,15 @@ function Settings({
 
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
 
   );
 }
 
-function fmtDue(value: string) {
+function fmtDue(value: string | null) {
+  if (!value) return "期限なし";
   return new Intl.DateTimeFormat("ja-JP", {
     month: "numeric",
     day: "numeric",
@@ -1895,7 +2632,8 @@ function fmtDue(value: string) {
   }).format(new Date(value));
 }
 
-function dueLabel(value: string) {
+function dueLabel(value: string | null) {
+  if (!value) return "期限なし";
   const milliseconds = new Date(value).getTime() - Date.now();
   const hours = Math.ceil(milliseconds / (60 * 60 * 1000));
   if (hours < 0) return "期限超過";
@@ -1904,15 +2642,41 @@ function dueLabel(value: string) {
 }
 
 function taskLabel(task: CleTask) {
-  if (["提出済み", "採点済み", "期限切れ"].includes(task.status)) {
-    return task.status;
+  const status = taskDisplayStatus(task);
+  if (status === "採点済み" && task.score !== undefined) {
+    return task.possibleScore !== undefined
+      ? `${task.score}/${task.possibleScore}`
+      : `${task.score}点`;
+  }
+  if (["提出済み", "採点済み", "期限切れ"].includes(status)) {
+    return status;
   }
   return dueLabel(task.dueAt);
 }
 
+function taskDisplayStatus(task: CleTask): CleTask["status"] {
+  if (["提出済み", "採点済み"].includes(task.status)) return task.status;
+  if (task.status === "期限切れ" || (task.dueAt && new Date(task.dueAt).getTime() < Date.now())) {
+    return "期限切れ";
+  }
+  return task.status;
+}
+
+function taskDueDescription(task: CleTask) {
+  return task.dueAt ? `${fmtDue(task.dueAt)}まで` : "期限なし";
+}
+
+function compareTaskDueAt(left: CleTask, right: CleTask) {
+  if (!left.dueAt && !right.dueAt) return left.title.localeCompare(right.title, "ja");
+  if (!left.dueAt) return 1;
+  if (!right.dueAt) return -1;
+  return left.dueAt.localeCompare(right.dueAt);
+}
+
 function taskTone(task: CleTask) {
-  if (["提出済み", "採点済み"].includes(task.status)) return "done";
-  if (task.status === "期限切れ" || dueLabel(task.dueAt) === "期限超過") return "attention";
+  const status = taskDisplayStatus(task);
+  if (["提出済み", "採点済み"].includes(status)) return "done";
+  if (status === "期限切れ") return "attention";
   return "neutral";
 }
 
@@ -1998,17 +2762,17 @@ function buildCourseSummaries(data: KoanData, cleData: CleData): CourseSummary[]
     const changes = data.changes.filter((item) => courseMatchesText(course, item.course));
     const notices = data.notices
       .filter((notice) => courseMatchesText(course, notice.title))
-      .sort((left, right) => attentionScore(right) - attentionScore(left))
-      .slice(0, 5);
+      .sort((left, right) => attentionScore(right) - attentionScore(left));
     return {
       code: course.code,
       koan: course,
       cleCourse,
       tasks: tasks.sort((left, right) => {
         const getTaskPriority = (task: CleTask) => {
-          const isDone = ["提出済み", "採点済み"].includes(task.status);
+          const status = taskDisplayStatus(task);
+          const isDone = ["提出済み", "採点済み"].includes(status);
           if (isDone) return 3;
-          const isOverdue = task.status === "期限切れ" || new Date(task.dueAt).getTime() < Date.now();
+          const isOverdue = status === "期限切れ";
           if (isOverdue) return 2;
           return 1;
         };
@@ -2017,7 +2781,7 @@ function buildCourseSummaries(data: KoanData, cleData: CleData): CourseSummary[]
         if (leftPriority !== rightPriority) {
           return leftPriority - rightPriority;
         }
-        return left.dueAt.localeCompare(right.dueAt);
+        return compareTaskDueAt(left, right);
       }),
       messages,
       announcements: announcements.sort((left, right) => right.created.localeCompare(left.created)),
@@ -2067,7 +2831,7 @@ function courseTeacherRoom(value: string) {
 function courseTermHeading(courses: CourseSummary[]) {
   const year = courses.find((course) => course.koan.year)?.koan.year || String(new Date().getFullYear());
   const month = new Date().getMonth() + 1;
-  const term = month >= 10 || month <= 3 ? "秋学期" : "春学期";
+  const term = month >= 10 || month <= 3 ? "秋・冬学期" : "春・夏学期";
   return `${year}年 ${term}`;
 }
 
@@ -2201,20 +2965,92 @@ function EmptyState({
   description,
   variant = "normal",
   className = "",
+  action,
+  headingLevel = 3,
 }: {
   icon: EmptyStateIconName;
   title: string;
   description?: string;
   variant?: "normal" | "subtle" | "rail" | "dashboard";
   className?: string;
+  action?: ReactNode;
+  headingLevel?: 2 | 3 | 4;
 }) {
+  const TitleTag = headingLevel === 2 ? "h2" : headingLevel === 4 ? "h4" : "h3";
+  if (icon === "spinner") return (
+    <div className={`loading-placeholder ${variant} ${className}`} role="status" aria-live="polite">
+      <TitleTag className="empty-state-title">{title}</TitleTag>
+      <p className="empty-state-desc">{description || "画面を切り替えても取得は続きます。"}</p>
+      <div className="skeleton-list" aria-hidden="true">
+        {[0, 1, 2].map((row) => <div className="skeleton-row" key={row}><i /><div><i /><i /></div></div>)}
+      </div>
+    </div>
+  );
   return (
     <div className={`empty-state ${variant} ${className}`}>
       <div className="empty-state-icon" aria-hidden="true">
         <EmptyStateIcon name={icon} />
       </div>
-      <strong className="empty-state-title">{title}</strong>
-      {description && <p className="empty-state-desc">{description}</p>}
+      <div className="empty-state-content">
+        <TitleTag className="empty-state-title">{title}</TitleTag>
+        {description && <p className="empty-state-desc">{description}</p>}
+        {action && <div className="empty-state-action">{action}</div>}
+      </div>
+    </div>
+  );
+}
+
+function SourceStatus({
+  source,
+  status,
+  updatedAt,
+  loaded,
+  loading,
+  error,
+  stale = false,
+  onRetry,
+}: {
+  source: string;
+  status: string;
+  updatedAt: string | null;
+  loaded: boolean;
+  loading: boolean;
+  error: boolean;
+  stale?: boolean;
+  onRetry?: () => void;
+}) {
+  const partial = isPartialStatus(status);
+  const state = loading
+    ? "loading"
+    : error
+      ? "error"
+      : partial
+        ? "partial"
+        : !loaded
+          ? "idle"
+          : stale
+            ? "stale"
+            : "fresh";
+  const message = loading
+    ? loaded ? "保存済みを表示中 · 最新情報を確認しています" : "初回のデータを取得しています"
+    : error
+      ? status || "取得に失敗しました"
+      : partial
+        ? status
+        : !loaded
+          ? "未取得"
+          : stale
+            ? `保存済み / 最終成功 ${fmtTime(updatedAt)}`
+            : `最終成功 ${fmtTime(updatedAt)}`;
+  return (
+    <div className={`source-status source-status-${state}`}>
+      <span className="source-status-name">{source}</span>
+      <span className="source-status-message" role={error ? "alert" : "status"}>{message}</span>
+      {(error || partial || !loaded) && onRetry && (
+        <button type="button" onClick={onRetry} disabled={loading}>
+          {error || partial ? "再試行" : "取得"}
+        </button>
+      )}
     </div>
   );
 }
@@ -2222,20 +3058,33 @@ function EmptyState({
 function CoursesPage({
   cleData,
   data,
+  loading,
+  status,
+  loaded,
+  error,
   onOpenNotice,
   selectedCode,
   onSelectCode,
   onOpenAnnouncement,
   onOpenMaterials,
+  materialsPanel,
+  materialsBusy,
 }: {
   cleData: CleData;
   data: KoanData;
+  loading: boolean;
+  status: string;
+  loaded: boolean;
+  error?: boolean;
   onOpenNotice: (notice: Notice) => void;
   selectedCode: string;
   onSelectCode: (code: string) => void;
   onOpenAnnouncement: (ann: CleAnnouncement) => void;
   onOpenMaterials: (course: CourseSummary) => void;
+  materialsPanel: ReactNode;
+  materialsBusy: boolean;
 }) {
+  const partial = !error && isPartialStatus(status);
   const courses = useMemo(() => buildCourseSummaries(data, cleData), [cleData, data]);
   useEffect(() => {
     if (selectedCode && !courses.some((course) => course.code === selectedCode)) {
@@ -2243,7 +3092,7 @@ function CoursesPage({
     }
   }, [courses, selectedCode, onSelectCode]);
   const selected = courses.find((course) => course.code === selectedCode);
-  const regularCourses = courses.filter((course) => courseSlots(course.koan).some((slot) =>
+  const regularCourses = courses.filter((course) => !course.koan.isIntensive && courseSlots(course.koan).some((slot) =>
     timetableDays.includes(slot.day as typeof timetableDays[number]) &&
     timetablePeriods.includes(slot.period),
   ));
@@ -2281,7 +3130,6 @@ function CoursesPage({
                 <EmptyState
                   icon="book-open"
                   title="該当する授業はありません"
-                  description="集中講義や曜日指定のない授業がある場合、ここに表示されます。"
                   variant="subtle"
                 />
               )}
@@ -2289,9 +3137,10 @@ function CoursesPage({
           </>
         ) : (
           <EmptyState
-            icon="calendar"
-            title="授業情報がありません"
-            description="右上の更新ボタンを押すと、KOANとCLEから時間割を読み込みます。"
+            icon={loading ? "spinner" : error || partial ? "info" : "calendar"}
+            title={loading ? "授業情報を取得しています" : error ? "授業情報を読み込めませんでした" : partial ? "授業情報を一部取得できませんでした" : loaded ? "授業情報がありません" : "まだ取得していません"}
+            description={loading ? "画面を切り替えても取得は続きます。" : error || partial ? "ヘッダーの同期の詳細を確認してください。" : loaded ? "現在の期間に表示できる授業はありません。" : "右上の更新ボタンを押すと、KOANとCLEから時間割を読み込みます。"}
+            headingLevel={2}
             variant="normal"
           />
         )}
@@ -2300,14 +3149,21 @@ function CoursesPage({
       <div className="course-detail-pane">
         {selected ? (
           <CourseDetail
+            key={selected.code}
+            uncertain={loading || !!error || partial}
+            allNotices={data.notices}
+            cleData={cleData}
+            data={data}
+            materialsPanel={materialsPanel}
+            materialsBusy={materialsBusy}
             course={selected}
             onOpenNotice={onOpenNotice}
             onOpenAnnouncement={onOpenAnnouncement}
             onOpenMaterials={onOpenMaterials}
           />
-        ) : (
+        ) : courses.length ? (
           <CourseDefaultDetail />
-        )}
+        ) : null}
       </div>
     </div>
   );
@@ -2323,20 +3179,26 @@ function CourseTimetable({
   selectedCode: string;
 }) {
   return (
-    <div className="course-timetable" role="grid" aria-label="授業時間割">
-      <div className="timetable-corner" aria-hidden="true"></div>
-      {timetableDays.map((day) => <div className="timetable-day" key={day}>{day}</div>)}
+    <div className="course-timetable" role="table" aria-label="授業時間割">
+      <div className="timetable-header" role="row">
+        <div className="timetable-corner" role="columnheader" aria-hidden="true"></div>
+        {timetableDays.map((day) => <div className="timetable-day" role="columnheader" key={day}>{day}</div>)}
+      </div>
       {timetablePeriods.map((period) => (
-        <div className="timetable-row" key={period}>
-          <div className="timetable-period">{period}</div>
+        <div className="timetable-row" role="row" key={period}>
+          <div className="timetable-period" role="rowheader">{period}</div>
           {timetableDays.map((day) => {
             const slotCourses = courses.filter((course) =>
               courseSlots(course.koan).some((slot) => slot.day === day && slot.period === period),
             );
             return (
-              <div className="timetable-cell" key={`${day}-${period}`}>
+              <div className="timetable-cell" role="cell" key={`${day}-${period}`}>
                 {slotCourses.map((course) => {
-                  const activeTasks = course.tasks.filter((task) => !["提出済み", "採点済み"].includes(task.status));
+                  const activeTasks = course.tasks.filter((task) => {
+                    if (["提出済み", "採点済み"].includes(task.status)) return false;
+                    if (!task.dueAt) return true;
+                    return new Date(task.dueAt).getTime() >= Date.now() - EXPIRED_TASK_VISIBLE_MS;
+                  });
                   return (
                     <button
                       className={course.code === selectedCode ? "timetable-course selected" : "timetable-course"}
@@ -2378,134 +3240,167 @@ function CourseDefaultDetail() {
 }
 
 function CourseDetail({
-  course,
-  onOpenNotice,
-  onOpenAnnouncement,
-  onOpenMaterials,
+  allNotices, course, cleData, data, onOpenNotice, onOpenAnnouncement, onOpenMaterials,
+  materialsPanel, materialsBusy, uncertain,
 }: {
+  allNotices: Notice[];
   course: CourseSummary;
+  cleData: CleData;
+  data: KoanData;
   onOpenNotice: (notice: Notice) => void;
   onOpenAnnouncement: (ann: CleAnnouncement) => void;
   onOpenMaterials: (course: CourseSummary) => void;
+  materialsPanel: ReactNode;
+  materialsBusy: boolean;
+  uncertain: boolean;
 }) {
   const teacherRoom = courseTeacherRoom(course.koan.teacherAndRoom);
+  const [tab, setTab] = useState<"tasks" | "communications" | "materials">("tasks");
+  const panels = useRef<HTMLDivElement>(null);
+  const currentChanges = upcomingChanges(course.changes);
+  const otherChanges = course.changes.filter((change) => !currentChanges.includes(change));
+  const activeTasks = course.tasks.filter((task) => !["提出済み", "採点済み"].includes(task.status));
+  const completedTasks = course.tasks.filter((task) => ["提出済み", "採点済み"].includes(task.status));
+  const now = Date.now();
+  const expired = activeTasks.filter((task) => task.dueAt && Date.parse(task.dueAt) < now);
+  const actionable = activeTasks.filter((task) => !expired.includes(task)).sort(compareTaskDueAt);
+  const todayTasks = activeTasks.filter((task) => task.dueAt && dateKey(new Date(task.dueAt)) === dateKey(new Date()));
+  const items = communicationItems(course.notices, course.announcements, course.messages);
+  const unread = items.reduce((sum, item) => sum + item.unreadCount, 0);
+  const recent = course.announcements.filter((ann) => isRecentActivity(ann.created)).length;
+  const tasksKnown = !!course.cleCourse && !uncertain && !!cleData.tasksUpdatedAt && !cleData.taskStatusPendingCount;
+  const communicationsKnown = !!course.cleCourse && !!cleData.announcementsUpdatedAt && !uncertain && !!(data.noticesUpdatedAt || data.snapshotUpdatedAt) && !!cleData.messagesUpdatedAt && cleData.messagesComplete !== false && !cleData.announcementsPendingCount;
+  const tabs = [
+    { id: "tasks" as const, label: "課題", attention: todayTasks.length ? `今日 ${todayTasks.length}` : "" },
+    { id: "communications" as const, label: "連絡・掲示", attention: unread ? `未読 ${unread}` : recent ? `新着 ${recent}` : "" },
+    { id: "materials" as const, label: "資料", attention: "" },
+  ];
+  const selectTab = (next: typeof tab) => {
+    setTab(next);
+    if (panels.current) panels.current.scrollTop = 0;
+    if (next === "materials" && !materialsBusy) onOpenMaterials(course);
+  };
+  const taskRows = (tasks: CleTask[]) => tasks.map((task) => (
+    <AuthenticatedLink className="course-line-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
+      <b className={`course-status-label ${taskTone(task)}`}>{taskLabel(task)}</b>
+      <span>{task.title}<small>{taskDueDescription(task)} / {taskDisplayStatus(task)}</small></span>
+    </AuthenticatedLink>
+  ));
   return (
-    <div className="course-detail">
+    <div className="course-detail" ref={panels}>
       <div className="course-detail-header">
-        <div className="course-detail-title">
-          <h2>{course.koan.title}</h2>
-          <div className="course-detail-meta">
-            <div><span>曜日時限</span><b>{courseSlotLabel(course.koan) || "未定"}</b></div>
-            <div><span>教員</span><b>{teacherRoom.teacher}</b></div>
-            <div><span>教室</span><b>{teacherRoom.room}</b></div>
-          </div>
+        <h2>{course.koan.title}</h2>
+        <div className="course-detail-meta">
+          <div><span>曜日時限</span><b>{courseSlotLabel(course.koan) || "未定"}</b></div>
+          <div><span>教室</span><b>{teacherRoom.room}</b></div>
+          <div><span>教員</span><b>{teacherRoom.teacher}</b></div>
+        </div>
+        <div className="course-link-actions">
+          {course.cleCourse && <AuthenticatedLink href={cleCourseUrl(course.cleCourse.courseId)} target="_blank">CLEを開く</AuthenticatedLink>}
+          {course.koan.syllabusUrl && <AuthenticatedLink href={course.koan.syllabusUrl} target="_blank">シラバス</AuthenticatedLink>}
+        </div>
+        {!!currentChanges.length && <div className="course-current-changes" aria-label="直近の休講・変更">
+          {currentChanges.map((change, i) => <p key={`${change.date}-${change.period}-${i}`}><strong>{change.type}</strong><span>{change.date === "今週" ? "今週（日付未確定）" : change.date} {change.period && `${change.period.replace(/限$/, "")}限`}</span></p>)}
+        </div>}
+        {!!otherChanges.length && <details className="course-change-history">
+          <summary>その他の変更・履歴 {otherChanges.length}件</summary>
+          {otherChanges.map((change, i) => <p key={`${change.date}-${change.period}-${i}`}><strong>{change.type}</strong> {change.date || "日付未確認"} {change.period && `${change.period.replace(/限$/, "")}限`}</p>)}
+        </details>}
+      </div>
+      <div className="course-tabs" role="tablist" aria-label="授業情報">
+        {tabs.map((item, index) => <button
+          key={item.id} id={`course-tab-${item.id}`} role="tab" type="button"
+          aria-selected={tab === item.id} aria-controls={`course-panel-${item.id}`}
+          tabIndex={tab === item.id ? 0 : -1}
+          onClick={() => selectTab(item.id)}
+          onKeyDown={(event) => {
+            let next = index;
+            if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+            else if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
+            else if (event.key === "Home") next = 0;
+            else if (event.key === "End") next = tabs.length - 1;
+            else return;
+            event.preventDefault();
+            selectTab(tabs[next].id);
+            document.getElementById(`course-tab-${tabs[next].id}`)?.focus();
+          }}
+        >{item.label}{item.attention && <small>{item.attention}</small>}</button>)}
+      </div>
+      <div className="course-tab-content">
+        <div role="tabpanel" id="course-panel-tasks" aria-labelledby="course-tab-tasks" hidden={tab !== "tasks"} tabIndex={0}>
+        {tab === "tasks" && <>
+          {!!course.tasks.length && <p className="task-link-note">CLEの成績・課題一覧で開きます</p>}
+          {taskRows(actionable)}
+          {!activeTasks.length && <EmptyState icon={tasksKnown ? "check-circle" : "info"} title={tasksKnown ? "提出が必要な課題はありません" : "課題の取得状況は未確認です"} description={tasksKnown ? undefined : "ヘッダーの同期の詳細を確認してください。"} variant="subtle" />}
+          {!!expired.length && <details className="expired-tasks"><summary>期限切れ {expired.length}件</summary>{taskRows(expired)}</details>}
+          {!!completedTasks.length && <details className="expired-tasks"><summary>提出済み・採点済み {completedTasks.length}件</summary>{taskRows(completedTasks)}</details>}
+        </>}
+        </div>
+        <div role="tabpanel" id="course-panel-communications" aria-labelledby="course-tab-communications" hidden={tab !== "communications"} tabIndex={0}>
+        {tab === "communications" && <>
+          <CommunicationList items={items} snapshotNotices={allNotices} onOpenNotice={onOpenNotice} onOpenAnnouncement={onOpenAnnouncement} />
+          {!items.length && <EmptyState icon={communicationsKnown ? "mail-open" : "info"} title={communicationsKnown ? "連絡・掲示はありません" : "連絡・掲示の取得状況は未確認です"} description={communicationsKnown ? undefined : "ヘッダーの同期の詳細を確認してください。"} variant="subtle" />}
+        </>}
+        </div>
+        <div role="tabpanel" id="course-panel-materials" aria-labelledby="course-tab-materials" hidden={tab !== "materials"} tabIndex={0}>
+        {tab === "materials" && (course.cleCourse ? materialsPanel || <div className="materials-idle"><p>{materialsBusy ? "別の授業の資料を保存中です。完了後に取得できます。" : "資料一覧を取得します。"}</p><button type="button" disabled={materialsBusy} onClick={() => onOpenMaterials(course)}>資料を取得</button></div> : <EmptyState icon="info" title="CLEの対応する授業が未確認です" variant="subtle" />)}
         </div>
       </div>
+    </div>
+  );
+}
 
-      <div className="course-detail-flow">
-        <section className="course-detail-block course-tasks-block">
-          <h3>課題</h3>
-          <div className="course-line-list">
-            {course.tasks.length ? course.tasks.map((task) => (
-              <a className="course-line-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
-                <b className={`course-status-label ${taskTone(task)}`}>{taskLabel(task)}</b>
-                <span>{task.title}<small>{fmtDue(task.dueAt)}まで / {task.status}</small></span>
-              </a>
-            )) : (
-              <EmptyState
-                icon="check-circle"
-                title="提出が必要な課題はありません"
-                variant="subtle"
-              />
-            )}
-          </div>
-        </section>
+function CourseMaterialsContent({ list, loading, error, downloadingId, batchProgress, onDownload, onDownloadAll, onRefresh }: {
+  list: CleMaterialList | null;
+  loading: boolean;
+  error: string;
+  downloadingId: string;
+  batchProgress: string;
+  onDownload: (material: CleMaterial) => void;
+  onDownloadAll: () => void;
+  onRefresh: () => void;
+}) {
+  const busy = !!(downloadingId || batchProgress);
+  return <div className="course-materials">
+    <div className="materials-toolbar">
+      <small>{list ? `${list.materials.length}件 / 取得 ${fmtTime(list.updatedAt)}` : "この授業の資料だけを取得します"}</small>
+      <button type="button" disabled={loading || busy} onClick={onRefresh}>再取得</button>
+    </div>
+    {loading && <p className="materials-refresh-status" role="status">{list ? "保存済みの一覧を表示しながら更新しています…" : "CLEから資料を読み込んでいます…"}</p>}
+    {error && <p className="materials-error" role="alert">{error}</p>}
+    {list?.materials.map((material) => <div className="material-row" key={material.id}>
+      <div className="material-info"><strong>{material.title}</strong><span>{material.fileName}</span><small>{[material.folderPath.join(" / "), material.addedAt ? `追加 ${fmtTime(material.addedAt)}` : "", formatFileSize(material.size)].filter(Boolean).join(" / ")}</small></div>
+      <button type="button" aria-label={materialDownloadLabel(material)} disabled={busy} onClick={() => onDownload(material)}>{downloadingId === material.id ? "取得中…" : "保存"}</button>
+    </div>)}
+    {!loading && !error && list && !list.materials.length && <EmptyState icon="book-open" title="ダウンロードできる資料はありません" variant="subtle" />}
+    {!!list?.materials.length && <div className="materials-batch-actions"><button type="button" aria-label={`${list.materials.length}件の資料をすべてダウンロード`} disabled={loading || busy} onClick={onDownloadAll}>{batchProgress ? `一括取得中 ${batchProgress}` : "すべてダウンロード"}</button></div>}
+  </div>;
+}
 
-        <section className="course-detail-block course-messages-block">
-          <h3>連絡</h3>
-          <div className="course-line-list">
-            {course.announcements.length || course.messages.length ? (
-              <>
-                {course.announcements.map((ann) => (
-                  <button
-                    className="course-line-row announcement-row-btn"
-                    key={ann.id}
-                    onClick={() => onOpenAnnouncement(ann)}
-                    type="button"
-                    style={{ background: "transparent", border: "none", cursor: "pointer", width: "100%", textAlign: "left", padding: "7px 0" }}
-                  >
-                    <b className="course-status-label neutral">連絡事項</b>
-                    <span>
-                      {ann.title}
-                      <small>{fmtDue(ann.created)}</small>
-                    </span>
-                  </button>
-                ))}
-                {course.messages.map((message) => (
-                  <a className="course-line-row" href={cleMessageUrl(message.courseId)} key={message.courseId} target="_blank">
-                    <b>{message.unreadCount ? "未読" : "連絡"}</b>
-                    <span>{message.courseName}<small>{message.unreadCount ? `${message.unreadCount}件の未読` : "既読"}</small></span>
-                  </a>
-                ))}
-              </>
-            ) : (
-              <EmptyState
-                icon="message-square"
-                title="連絡はありません"
-                variant="subtle"
-              />
-            )}
-          </div>
-        </section>
+type CollectionState = { name: string; loaded: boolean; loading: boolean; issue: string };
 
-        <section className="course-detail-block course-updates-block">
-          <h3>変更・掲示</h3>
-          <div className="course-line-list">
-            {course.changes.map((change, index) => (
-              <div className="course-line-row" key={`${change.date}-${change.period}-${index}`}>
-                <b>{change.type}</b>
-                <span>{change.date} {change.period}</span>
-              </div>
-            ))}
-            {course.notices.map((notice) => (
-              <button
-                className="course-line-row course-notice-row"
-                key={noticeKey(notice)}
-                onClick={() => onOpenNotice(notice)}
-                type="button"
-              >
-                <b>掲示</b>
-                <span>{notice.title}<small>{[notice.period, notice.genre].filter(Boolean).join(" / ") || notice.author}</small></span>
-              </button>
-            ))}
-            {!course.changes.length && !course.notices.length && (
-              <EmptyState
-                icon="info"
-                title="変更や掲示はありません"
-                variant="subtle"
-              />
-            )}
-          </div>
-        </section>
+function collectionReady(state: CollectionState) {
+  return state.loaded && !state.loading && !state.issue;
+}
+
+function CollectionFeedback({ states, onRetry, hasContent = false }: { states: CollectionState[]; onRetry: () => void; hasContent?: boolean }) {
+  // The header owns refresh status when cached content is already visible.
+  if (hasContent && states.every((state) => state.loaded)) return null;
+  const pending = states.filter((state) => !collectionReady(state));
+  if (!pending.length) return null;
+  const busy = pending.some((state) => state.loading);
+  const failed = pending.some((state) => state.issue && !state.loading);
+  return (
+    <div className="collection-feedback" role="status">
+      <div>
+        <strong>{pending.map((state) => state.name).join("・")}{busy ? "を確認しています" : failed ? "を確認できていません" : "はまだ取得していません"}</strong>
+        <p>{states.some((state) => state.loaded)
+          ? busy ? "取得済みの情報を表示しながら更新しています。" : "取得済みの情報を表示しています。最新の状態は確認できていません。"
+          : busy ? "完了すると、この場所に表示します。" : "情報を取得して、最新の状態を確認してください。"}</p>
       </div>
-
-      <div className="course-link-actions">
-        {course.koan.syllabusUrl ? (
-          <a href={course.koan.syllabusUrl} target="_blank">シラバス</a>
-        ) : (
-          <span className="disabled">シラバス</span>
-        )}
-        {course.cleCourse ? (
-          <a href={cleCourseUrl(course.cleCourse.courseId)} target="_blank">CLE</a>
-        ) : (
-          <span className="disabled">CLE</span>
-        )}
-        {course.cleCourse ? (
-          <button onClick={() => onOpenMaterials(course)} type="button">資料</button>
-        ) : (
-          <span className="disabled">資料</span>
-        )}
-      </div>
+      {!busy && <button type="button" onClick={onRetry} aria-label={`${pending.map((state) => state.name).join("・")}${failed ? "を再取得" : "を取得"}`}>
+        {failed ? "再試行" : "取得する"}
+      </button>}
     </div>
   );
 }
@@ -2513,30 +3408,74 @@ function CourseDetail({
 function Dashboard({
   cleData,
   cleLoading,
-  cleStatus,
+  koanIssue,
+  cleIssue,
+  onRetry,
+  onShowNotices,
   data,
+  loading,
   onOpenNotice,
   onSelectCourse,
   onOpenAnnouncement,
 }: {
   cleData: CleData;
   cleLoading: boolean;
-  cleStatus: string;
+  koanIssue: string;
+  cleIssue: string;
+  onRetry: () => void;
+  onShowNotices: () => void;
   data: KoanData;
+  loading: boolean;
   onOpenNotice: (notice: Notice) => void;
   onSelectCourse: (code: string) => void;
   onOpenAnnouncement: (ann: CleAnnouncement) => void;
 }) {
-  const today = dateKey(new Date());
+  const [today, setToday] = useState(() => dateKey(new Date()));
   const [selectedDate, setSelectedDate] = useState(today);
+  const previousToday = useRef(today);
+  useEffect(() => {
+    const updateToday = () => setToday(dateKey(new Date()));
+    updateToday();
+    const interval = window.setInterval(updateToday, 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, []);
+  useEffect(() => {
+    if (previousToday.current !== today) {
+      const wasToday = previousToday.current;
+      previousToday.current = today;
+      setSelectedDate((current) => current === wasToday ? today : current);
+    }
+  }, [today]);
   const selectedSchedule = data.schedule.filter((item) => (item.date || today) === selectedDate);
   const selectedChanges = changesForDate(data.changes, selectedDate, today);
+  const koanState = (name: string, timestamp: string | null): CollectionState => ({
+    name, loaded: Boolean(timestamp), loading, issue: koanIssue || data.warnings?.join(" / ") || "",
+  });
+  const cleState = (name: string, timestamp: string | null): CollectionState => ({
+    name, loaded: Boolean(timestamp), loading: cleLoading, issue: cleIssue || cleData.warnings?.join(" / ") || "",
+  });
+  const tasksState = { ...cleState("CLEの課題", cleData.tasksUpdatedAt), issue: cleCollectionIssue(cleData, "tasks", cleIssue) };
+  const surveysState = koanState("KOANのアンケート", data.surveysUpdatedAt);
+  const scheduleState = koanState("時間割", data.scheduleUpdatedAt);
+  const messagesState = { ...cleState("CLEの連絡", cleData.messagesUpdatedAt), issue: cleCollectionIssue(cleData, "messages", cleIssue) };
+  const noticesState = koanState("KOANの掲示", data.noticesUpdatedAt || data.snapshotUpdatedAt);
   return (
     <>
       <section className="dashboard-main">
-        <NextActions data={cleData} loading={cleLoading} status={cleStatus} />
+        <NextActions
+          tasksState={tasksState}
+          surveysState={surveysState}
+          onRetry={onRetry}
+          data={cleData}
+          surveys={data.surveys}
+        />
+        <UpcomingChanges changes={data.changes} courses={data.courses} onSelectCourse={onSelectCourse} />
         <NewActivity
-          loading={cleLoading}
+          messagesState={messagesState}
+          announcementsState={cleState("CLEの授業連絡", cleData.announcementsUpdatedAt || null)}
+          noticesState={noticesState}
+          onRetry={onRetry}
+          onShowNotices={onShowNotices}
           messages={cleData.messages}
           announcements={cleData.announcements}
           notices={data.notices}
@@ -2545,10 +3484,13 @@ function Dashboard({
         />
       </section>
       <DashboardRightRail
+        scheduleState={scheduleState}
+        onRetry={onRetry}
         changes={selectedChanges}
         onSelectDate={setSelectedDate}
         schedule={selectedSchedule}
         selectedDate={selectedDate}
+        surveys={data.surveys}
         tasks={cleData.tasks}
         allScheduleEmpty={data.schedule.length === 0}
         courses={data.courses || []}
@@ -2558,39 +3500,100 @@ function Dashboard({
   );
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const SURVEY_ACTION_WINDOW_MS = 90 * DAY_MS;
+const EXPIRED_TASK_VISIBLE_MS = 30 * DAY_MS;
+
+function actionableSurveys(surveys: KoanSurvey[], now = Date.now()) {
+  return surveys
+    .filter((survey) => {
+      if (survey.completed || !survey.endAt) return false;
+      if (survey.status && !/受付|回答|実施/.test(survey.status)) return false;
+      const endAt = new Date(survey.endAt).getTime();
+      return Number.isFinite(endAt) &&
+        endAt >= now &&
+        endAt - now <= SURVEY_ACTION_WINDOW_MS;
+    })
+    .sort((left, right) =>
+      new Date(left.endAt!).getTime() - new Date(right.endAt!).getTime(),
+    );
+}
+
 function NextActions({
+  tasksState,
+  surveysState,
+  onRetry,
   data,
-  loading,
-  status,
+  surveys,
 }: {
+  tasksState: CollectionState;
+  surveysState: CollectionState;
+  onRetry: () => void;
   data: CleData;
-  loading: boolean;
-  status: string;
+  surveys: KoanSurvey[];
 }) {
+  const now = Date.now();
+  const pendingSurveys = actionableSurveys(surveys, now);
   const tasks = data.tasks.filter(
     (task) => !["提出済み", "採点済み"].includes(task.status),
   );
   const upcomingTasks = tasks
-    .filter((task) => new Date(task.dueAt).getTime() >= Date.now())
-    .sort((left, right) => left.dueAt.localeCompare(right.dueAt));
+    .filter((task) => task.dueAt && new Date(task.dueAt).getTime() >= now)
+    .sort(compareTaskDueAt);
+  const noDueTasks = tasks
+    .filter((task) => !task.dueAt)
+    .sort(compareTaskDueAt);
   const expiredTasks = tasks
-    .filter((task) => new Date(task.dueAt).getTime() < Date.now())
-    .sort((left, right) => right.dueAt.localeCompare(left.dueAt));
+    .filter((task) => {
+      if (!task.dueAt) return false;
+      const dueAt = new Date(task.dueAt).getTime();
+      return dueAt < now && dueAt >= now - EXPIRED_TASK_VISIBLE_MS;
+    })
+    .sort((left, right) => compareTaskDueAt(right, left));
+  const archivedExpiredCount = tasks.filter((task) =>
+    task.dueAt && new Date(task.dueAt).getTime() < now - EXPIRED_TASK_VISIBLE_MS,
+  ).length;
+  const states = [tasksState, surveysState];
+  const ready = states.every(collectionReady);
+  const actionGroups = groupDeadlineActions([...upcomingTasks, ...noDueTasks], pendingSurveys, now);
   return (
     <section className="section next-actions">
       <div className="section-heading">
         <div>
-          <h2>直近の課題</h2>
-          <p>CLE取得 {fmtTime(data.updatedAt)}{status ? ` / ${status}` : ""}</p>
+          <h2>課題・締切</h2>
+          <p>KOANアンケート / CLE課題</p>
         </div>
-        <a className="detail-link" href={CLE_CALENDAR_URL} target="_blank">CLEカレンダー</a>
       </div>
       <div className="task-list">
-        {upcomingTasks.length ? upcomingTasks.map((task) => <CleTaskRow task={task} key={task.id} />) : (
+        <CollectionFeedback states={states} onRetry={onRetry} hasContent={!!actionGroups.length || !!expiredTasks.length} />
+        {actionGroups.map((group) => {
+          const deferred = group.label === "それ以降" || group.label === "期限未設定";
+          const Group = deferred ? "details" : "section";
+          return <Group className={`deadline-group${deferred ? " deferred" : ""}`} aria-label={group.label} key={group.label}>
+            {deferred ? <summary>{group.label} {group.actions.length}件<small>{group.actions[0].dueAt ? `最短 ${fmtDue(group.actions[0].dueAt)}` : ""}</small></summary> : <h3>{group.label}</h3>}
+            {group.actions.map((action) => action.kind === "task" ? (
+              <CleTaskRow task={action.task} key={`task-${action.task.id}`} />
+            ) : (
+              <AuthenticatedLink
+                className="cle-task-row koan-survey-row"
+                href={SURVEYS_URL}
+                key={`survey-${action.survey.title}-${action.survey.courseName}-${action.dueAt}`}
+                target="_blank"
+              >
+                <time>{dueLabel(action.dueAt)}</time>
+                <span>
+                  {action.survey.title}
+                  <small>KOANアンケート / {action.survey.courseName || "全学"} / {fmtDue(action.dueAt)}まで</small>
+                </span>
+              </AuthenticatedLink>
+            ))}
+          </Group>;
+        })}
+        {!actionGroups.length && ready && (
           <EmptyState
-            icon={loading ? "spinner" : "sparkles"}
-            title={loading ? "取得中です" : "直近の課題はありません"}
-            description={loading ? "CLEから課題を取得しています..." : "期限の近い未完了の課題はありません。"}
+            icon="check-circle"
+            title={expiredTasks.length ? "これから締切を迎える課題はありません" : "対応が必要な課題・締切はありません"}
+            description={expiredTasks.length ? "期限を過ぎた課題は、下の一覧で確認できます。" : "期限の近いアンケートや未完了課題はありません。"}
             variant="dashboard"
           />
         )}
@@ -2600,21 +3603,26 @@ function NextActions({
             {expiredTasks.map((task) => <CleTaskRow task={task} key={task.id} />)}
           </details>
         )}
+        {!!tasks.length && <p className="task-link-note">CLE課題は、各授業の成績・課題一覧で開きます。</p>}
+        {!!archivedExpiredCount && (
+          <p className="archived-task-note">
+            30日より前の期限切れ {archivedExpiredCount}件は授業詳細で確認できます。
+          </p>
+        )}
       </div>
     </section>
   );
 }
 
 function CleTaskRow({ task }: { task: CleTask }) {
-  const overdue = new Date(task.dueAt).getTime() < Date.now();
   return (
-    <a className="cle-task-row" href={cleTaskUrl(task)} target="_blank">
-      <time className={overdue ? "overdue" : ""}>{dueLabel(task.dueAt)}</time>
+    <AuthenticatedLink className="cle-task-row" href={cleTaskUrl(task)} target="_blank" title="CLEの成績・課題一覧で確認">
+      <time>{dueLabel(task.dueAt)}</time>
       <span>
         {task.title}
-        <small>{courseDisplayName(task.courseName)} / {fmtDue(task.dueAt)}まで / {task.status}</small>
+        <small>{courseDisplayName(task.courseName)} / {taskDueDescription(task)} / {taskDisplayStatus(task)}</small>
       </span>
-    </a>
+    </AuthenticatedLink>
   );
 }
 
@@ -2628,20 +3636,42 @@ function noticeRecencyTime(notice: Notice) {
   return new Date(year, month - 1, day).getTime();
 }
 
+function scopeNoticeReason(notice: Notice) {
+  return attentionScore(notice) >= 120
+    ? <p className="notice-candidate-reason">候補の理由：{noticeAttentionReason(notice)}</p>
+    : null;
+}
+
 function isImportantNotice(notice: Notice) {
-  return notice.priority === "○" || /重要|要確認|締切|期限|停止|休講|変更|試験/.test(notice.title);
+  return isUniversityImportant(notice);
 }
 
 
-function Grades({ data }: { data: GradeData | null }) {
+function Grades({
+  data,
+  loading,
+  status,
+}: {
+  data: GradeData | null;
+  loading: boolean;
+  status: string;
+}) {
+  const error = Boolean(
+    status &&
+    !loading &&
+    !status.includes("更新しました") &&
+    !status.includes("キャッシュ表示中") &&
+    !isPartialStatus(status),
+  );
   return (
     <div className="grades-page">
       {!data ? (
         <section className="section">
           <EmptyState
-            icon="graduation-cap"
-            title="成績データがありません"
-            description="右上の「成績を取得」ボタンからKOANの履修成績を読み込めます。"
+            icon={loading ? "spinner" : error ? "info" : "graduation-cap"}
+            title={loading ? "成績を取得しています" : error ? "成績を読み込めませんでした" : "成績はまだ取得していません"}
+            description={loading ? "画面を切り替えても取得は続きます。" : error ? "ヘッダーの同期の詳細を確認してください。" : "右上の更新ボタンからKOANの履修成績を読み込めます。"}
+            headingLevel={2}
             variant="normal"
           />
         </section>
@@ -2661,10 +3691,11 @@ function Grades({ data }: { data: GradeData | null }) {
               </div>
             </div>
             <div className="credit-groups">
+              {!data.groups.length && <EmptyState icon="graduation-cap" title="表示できる科目区分はありません" variant="subtle" />}
               {data.groups.map((group) => (
                 <details key={group.name}>
                   <summary>
-                    <span>{group.name}</span>
+                    <span>{group.name}<small className="credit-course-count">{group.courses.length}科目</small></span>
                     <b>{group.credits} 単位</b>
                   </summary>
                   <GradeTable courses={group.courses} />
@@ -2678,7 +3709,8 @@ function Grades({ data }: { data: GradeData | null }) {
               <div className="section grade-section compact-section">
                 <div className="section-heading"><h2>学期 GPA</h2></div>
                 <table className="record-table">
-                  <thead><tr><th>年度</th><th>学期</th><th>GPA</th></tr></thead>
+                  <caption className="sr-only">学期ごとの GPA</caption>
+                  <thead><tr><th scope="col">年度</th><th scope="col">学期</th><th scope="col">GPA</th></tr></thead>
                   <tbody>
                     {data.termGpas.map((item, index) => (
                       <tr key={`${item.year}-${item.term}-${index}`}>
@@ -2688,7 +3720,7 @@ function Grades({ data }: { data: GradeData | null }) {
                   </tbody>
                 </table>
               </div>
-              <GpaTrend courses={data.courses} termGpas={data.termGpas} />
+              <GpaTrend termGpas={data.termGpas} />
             </section>
           )}
 
@@ -2698,9 +3730,10 @@ function Grades({ data }: { data: GradeData | null }) {
                 <h2>履修成績</h2>
               </div>
             </div>
-            <div className="table-scroll">
+            {!data.history.length ? <EmptyState icon="graduation-cap" title="履修成績はありません" variant="subtle" /> : <div className="table-scroll">
               <table className="record-table">
-                <thead><tr><th>科目名</th><th>教員</th><th>年度</th><th>評語</th><th>合否</th></tr></thead>
+                <caption className="sr-only">履修成績</caption>
+                <thead><tr><th scope="col">科目名</th><th scope="col">教員</th><th scope="col">年度</th><th scope="col">評語</th><th scope="col">合否</th></tr></thead>
                 <tbody>
                   {data.history.map((item, index) => (
                     <tr key={`${item.code}-${index}`}>
@@ -2709,7 +3742,7 @@ function Grades({ data }: { data: GradeData | null }) {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </div>}
           </section>
         </>
       )}
@@ -2717,81 +3750,74 @@ function Grades({ data }: { data: GradeData | null }) {
   );
 }
 
-function halfTerm(value: string) {
-  return /春|夏/.test(value) ? "前期" : /秋|冬/.test(value) ? "後期" : "";
-}
-
 function GpaTrend({
-  courses,
   termGpas,
 }: {
-  courses: GradeData["courses"];
   termGpas: GradeData["termGpas"];
 }) {
-  const termCredits = new Map<string, number>();
-  for (const course of courses) {
-    const key = `${course.year}-${course.term}`;
-    termCredits.set(key, (termCredits.get(key) || 0) + course.credits);
-  }
-  const grouped = new Map<string, { credits: number; qualityPoints: number }>();
-  for (const item of termGpas) {
-    const half = halfTerm(item.term);
-    const gpa = Number.parseFloat(item.gpa);
-    const credits = termCredits.get(`${item.year}-${item.term}`) || 0;
-    if (!half || !Number.isFinite(gpa) || credits <= 0) continue;
-    const key = `${item.year}-${half}`;
-    const current = grouped.get(key) || { credits: 0, qualityPoints: 0 };
-    grouped.set(key, {
-      credits: current.credits + credits,
-      qualityPoints: current.qualityPoints + gpa * credits,
-    });
-  }
-  let cumulativeCredits = 0;
-  let cumulativeQualityPoints = 0;
-  const points = [...grouped.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, values]) => {
-      const [year, half] = key.split("-");
-      cumulativeCredits += values.credits;
-      cumulativeQualityPoints += values.qualityPoints;
-      return {
-        cumulative: cumulativeQualityPoints / cumulativeCredits,
-        key,
-        label: `${year} ${half}`,
-      };
-    });
-  const width = 590;
-  const height = 285;
-  const margin = { top: 35, right: 20, bottom: 50, left: 42 };
-  const plotWidth = width - margin.left - margin.right;
-  const plotHeight = height - margin.top - margin.bottom;
+  const points = buildGpaTrendPoints(termGpas);
+  const chartRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 590, height: 285 });
+
+  useEffect(() => {
+    const el = chartRef.current;
+    if (!el) return;
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        const nextWidth = Math.round(entry.contentRect.width);
+        const nextHeight = Math.round(entry.contentRect.height);
+        if (nextWidth > 0 && nextHeight > 0) {
+          setSize((prev) => {
+            if (prev.width === nextWidth && prev.height === nextHeight) {
+              return prev;
+            }
+            return { width: nextWidth, height: nextHeight };
+          });
+        }
+      });
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+  }, []);
+
+  const width = Math.max(300, size.width);
+  const height = Math.max(260, size.height);
+  const margin = { top: 35, right: 25, bottom: 50, left: 42 };
+  const plotWidth = Math.max(10, width - margin.left - margin.right);
+  const plotHeight = Math.max(10, height - margin.top - margin.bottom);
   const x = (index: number) =>
     margin.left + (points.length <= 1 ? plotWidth / 2 : (plotWidth * index) / (points.length - 1));
   const y = (value: number) => margin.top + plotHeight - (plotHeight * value) / 4;
-  const cumulativePolyline = points.map((point, index) => `${x(index)},${y(point.cumulative)}`).join(" ");
+  const gpaPolyline = points.map((point, index) => `${x(index)},${y(point.gpa)}`).join(" ");
 
   return (
     <section className="section grade-section gpa-trend">
       <div className="section-heading">
         <div>
           <h2>GPA 推移</h2>
-          <p>前期・後期ごとの時点累積 GPA</p>
+          <p>KOANに記録された学期ごとの公式 GPA</p>
         </div>
       </div>
-      <div className="gpa-chart">
-        <svg aria-label="前期・後期ごとの時点累積 GPA の推移" role="img" viewBox={`0 0 ${width} ${height}`}>
+      <div className="gpa-chart" ref={chartRef}>
+        <svg aria-label="学期ごとの公式 GPA の推移" role="img" viewBox={`0 0 ${width} ${height}`}>
           {[0, 1, 2, 3, 4].map((tick) => (
             <g className="gpa-grid-line" key={tick}>
               <line x1={margin.left} x2={width - margin.right} y1={y(tick)} y2={y(tick)} />
               <text x={margin.left - 11} y={y(tick) + 4}>{tick.toFixed(1)}</text>
             </g>
           ))}
-          {!!points.length && <polyline className="gpa-line cumulative" points={cumulativePolyline} />}
+          {!!points.length && <polyline className="gpa-line cumulative" points={gpaPolyline} />}
           {points.map((point, index) => (
-            <g className="gpa-point cumulative" key={`${point.key}-cumulative`}>
-              <circle cx={x(index)} cy={y(point.cumulative)} r="4" />
-              <text className="gpa-value" x={x(index)} y={y(point.cumulative) - 12}>{point.cumulative.toFixed(2)}</text>
-              <text className="gpa-label" x={x(index)} y={height - 20}>{point.label}</text>
+            <g className="gpa-point cumulative" key={point.key}>
+              <circle cx={x(index)} cy={y(point.gpa)} r="4" />
+              <text className="gpa-value" x={x(index)} y={y(point.gpa) - 12}>{point.gpa.toFixed(2)}</text>
+              <text className="gpa-label" x={x(index)} y={height - 24}>
+                <tspan x={x(index)} dy="0">{point.year}</tspan>
+                <tspan x={x(index)} dy="13">{point.term}</tspan>
+              </text>
             </g>
           ))}
         </svg>
@@ -2801,18 +3827,25 @@ function GpaTrend({
 }
 
 function GradeTable({ courses }: { courses: GradeData["courses"] }) {
+  const categories = [...new Set(courses.map(course => course.majorCategory))];
+  const commonCategory = categories.length === 1 ? categories[0] : "";
   return (
-    <div className="table-scroll">
-      <table className="record-table">
-        <thead><tr><th>科目名</th><th>詳細区分</th><th>年度・学期</th><th>単位</th><th>評語</th></tr></thead>
+    <div className="grade-group-content">
+      {commonCategory && <p className="grade-common-category">詳細区分：{commonCategory}</p>}
+      <div className="table-scroll">
+      <table className="record-table grade-course-table">
+        <colgroup><col className="grade-course-col" />{!commonCategory && <col className="grade-category-col" />}<col className="grade-term-col" /><col className="grade-number-col" /><col className="grade-number-col" /></colgroup>
+        <caption className="sr-only">科目小区分の成績一覧</caption>
+        <thead><tr><th scope="col">科目名</th>{!commonCategory && <th scope="col">詳細区分</th>}<th scope="col">年度・学期</th><th scope="col">単位</th><th scope="col">評語</th></tr></thead>
         <tbody>
           {courses.map((course, index) => (
             <tr key={`${course.course}-${course.year}-${index}`}>
-              <td>{course.course}</td><td>{course.majorCategory}</td><td>{course.year} {course.term}</td><td>{course.credits}</td><td>{course.grade || course.pass}</td>
+              <td>{course.course}</td>{!commonCategory && <td>{course.majorCategory}</td>}<td>{course.year} {course.term}</td><td>{course.credits}</td><td>{course.grade || course.pass}</td>
             </tr>
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -2855,7 +3888,7 @@ function monthGrid(monthDate: Date) {
 }
 
 function monthLabel(date: Date) {
-  return new Intl.DateTimeFormat("en-US", { month: "short", year: "numeric" }).format(date);
+  return new Intl.DateTimeFormat("ja-JP", { month: "long", year: "numeric" }).format(date);
 }
 
 function selectedDateLabel(value: string) {
@@ -2879,19 +3912,25 @@ function periodNumber(value: string) {
 
 
 function DashboardRightRail({
+  scheduleState,
+  onRetry,
   changes,
   onSelectDate,
   schedule,
   selectedDate,
+  surveys,
   tasks,
   allScheduleEmpty,
   courses,
   onSelectCourse,
 }: {
+  scheduleState: CollectionState;
+  onRetry: () => void;
   changes: ChangeItem[];
   onSelectDate: (date: string) => void;
   schedule: ScheduleItem[];
   selectedDate: string;
+  surveys: KoanSurvey[];
   tasks: CleTask[];
   allScheduleEmpty: boolean;
   courses: CourseRegistration[];
@@ -2900,18 +3939,30 @@ function DashboardRightRail({
   const today = dateKey(new Date());
   const [visibleMonth, setVisibleMonth] = useState(() => new Date());
   const moveMonth = (months: number) => setVisibleMonth((current) => addMonths(current, months));
+  const selectCalendarDate = (date: string) => {
+    onSelectDate(date);
+    const nextDate = dateFromKey(date);
+    setVisibleMonth((current) => (
+      current.getFullYear() === nextDate.getFullYear() && current.getMonth() === nextDate.getMonth()
+        ? current
+        : new Date(nextDate.getFullYear(), nextDate.getMonth(), 1)
+    ));
+  };
   const periods = ["1", "2", "3", "4", "5", "6"];
   const activeTasks = useMemo(
     () => tasks.filter((task) => !["提出済み", "採点済み"].includes(task.status)),
     [tasks],
   );
+  const activeSurveys = useMemo(() => actionableSurveys(surveys), [surveys]);
   const deadlineDates = useMemo(
-    () => new Set(activeTasks.map((task) => dateKey(new Date(task.dueAt)))),
-    [activeTasks],
+    () => new Set([
+      ...activeTasks
+        .filter((task) => task.dueAt)
+        .map((task) => dateKey(new Date(task.dueAt!))),
+      ...activeSurveys.map((survey) => dateKey(new Date(survey.endAt!))),
+    ]),
+    [activeSurveys, activeTasks],
   );
-  const selectedTasks = activeTasks
-    .filter((task) => dateKey(new Date(task.dueAt)) === selectedDate)
-    .sort((left, right) => left.dueAt.localeCompare(right.dueAt));
   return (
     <aside className="dashboard-right-rail">
       <section className="rail-section calendar-panel">
@@ -2920,7 +3971,7 @@ function DashboardRightRail({
           month={visibleMonth}
           onNextMonth={() => moveMonth(1)}
           onPreviousMonth={() => moveMonth(-1)}
-          onSelectDate={onSelectDate}
+          onSelectDate={selectCalendarDate}
           selectedDate={selectedDate}
           today={today}
         />
@@ -2931,15 +3982,15 @@ function DashboardRightRail({
             <h2>{selectedClassHeading(selectedDate)}</h2>
           </div>
         </div>
+        <CollectionFeedback states={[scheduleState]} onRetry={onRetry} hasContent={!!schedule.length} />
         <div className="rail-schedule-list">
-          {allScheduleEmpty ? (
+          {allScheduleEmpty ? (collectionReady(scheduleState) ? (
             <EmptyState
               icon="calendar"
-              title="時間割が取得されていません"
-              description="右上の更新ボタンを押すと、時間割を読み込みます。"
+              title="この期間の時間割はありません"
               variant="rail"
             />
-          ) : (
+          ) : null) : (
             <>
               {periods.map((period) => {
                 const item = schedule.find((scheduleItem) => periodNumber(scheduleItem.period) === period);
@@ -2984,6 +4035,20 @@ function DashboardRightRail({
                   </div>
                 );
               })}
+              {schedule
+                .filter((item) => !periodNumber(item.period))
+                .map((item, index) => (
+                  <div
+                    className="rail-change-row"
+                    key={`${item.date}-${item.title}-${index}`}
+                  >
+                    <b>{item.kind === "holiday" ? "休日" : "予定"}</b>
+                    <span>
+                      {item.title}
+                      {item.room && <small>{item.room}</small>}
+                    </span>
+                  </div>
+                ))}
               {changes
                 .filter((change) => !schedule.some((item) => changeFor(item, [change])))
                 .map((item, index) => (
@@ -2996,33 +4061,7 @@ function DashboardRightRail({
           )}
         </div>
       </section>
-      <section className="rail-section selected-deadline-panel">
-        <div className="rail-heading">
-          <h2>締切課題</h2>
-        </div>
-        <div className="rail-deadline-list">
-          {selectedTasks.length ? (
-            <>
-              {selectedTasks.slice(0, 2).map((task) => (
-                <a className="rail-deadline-row" href={cleTaskUrl(task)} key={task.id} target="_blank">
-                  <time>{new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(new Date(task.dueAt))}</time>
-                  <span>
-                    <b>{task.title}</b>
-                    <small>{courseDisplayName(task.courseName)}</small>
-                  </span>
-                </a>
-              ))}
-              {selectedTasks.length > 2 && <p className="rail-more">他 {selectedTasks.length - 2} 件</p>}
-            </>
-          ) : (
-            <EmptyState
-              icon="calendar-check"
-              title="この日の締切はありません"
-              variant="subtle"
-            />
-          )}
-        </div>
-      </section>
+
     </aside>
   );
 }
@@ -3060,14 +4099,16 @@ function MonthCalendar({
           </svg>
         </button>
       </div>
-      <div className="calendar-weekdays" aria-hidden="true">
+      <div className="calendar-weekdays">
         {["日", "月", "火", "水", "木", "金", "土"].map((day) => <span key={day}>{day}</span>)}
       </div>
       <div className="calendar-days">
         {days.map((day) => {
           return (
             <button
-              aria-label={`${selectedDateLabel(day.key)}を選択`}
+              aria-current={day.key === today ? "date" : undefined}
+              aria-label={`${selectedDateLabel(day.key)}を選択${deadlineDates.has(day.key) ? "、締切あり" : ""}`}
+              aria-pressed={day.key === selectedDate}
               className={[
                 day.inMonth ? "" : "outside",
                 day.key === selectedDate ? "selected" : "",
@@ -3088,6 +4129,9 @@ function MonthCalendar({
 }
 
 function changeMatchesDate(change: ChangeItem, date: string) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(change.date)) {
+    return change.date === date;
+  }
   const match = change.date.match(/(\d{1,2})[\/月](\d{1,2})/);
   if (!match) return false;
   const [, month, day] = date.split("-");
@@ -3113,214 +4157,197 @@ function changeFor(schedule: ScheduleItem, changes: ChangeItem[]) {
 
 
 function NewActivity({
-  loading,
-  messages,
-  announcements = [],
-  notices,
-  onOpen,
-  onOpenAnnouncement,
+  messagesState, announcementsState, noticesState, onRetry, onShowNotices, messages, announcements = [], notices,
+  onOpen, onOpenAnnouncement,
 }: {
-  loading: boolean;
+  messagesState: CollectionState;
+  announcementsState: CollectionState;
+  noticesState: CollectionState;
+  onRetry: () => void;
+  onShowNotices: () => void;
   messages: CleData["messages"];
   announcements?: CleAnnouncement[];
   notices: Notice[];
   onOpen: (notice: Notice) => void;
   onOpenAnnouncement: (ann: CleAnnouncement) => void;
 }) {
-  const latestNotices = notices
-    .filter((notice) => notice.unread || notice.isNew || attentionScore(notice) >= 20)
-    .sort((left, right) => {
-      const recency = noticeRecencyTime(right) - noticeRecencyTime(left);
-      return recency || attentionScore(right) - attentionScore(left);
-    })
-    .slice(0, 5);
-
-  const recentAnnouncements = announcements.filter((ann) => {
-    const createdTime = new Date(ann.created).getTime();
-    return Date.now() - createdTime < 7 * 24 * 60 * 60 * 1000;
-  });
-
-  return (
-    <>
-      <section className="section cle-messages-section">
-        <div className="section-heading">
-          <div>
-            <h2>CLEメッセージ</h2>
-          </div>
-          <a className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEで確認</a>
-        </div>
-        <div className="cle-messages-list">
-          {recentAnnouncements.length || messages.length ? (
-            <>
-              {recentAnnouncements.map((ann) => (
-                <button
-                  className="cle-message-row announcement-row-btn"
-                  key={ann.id}
-                  onClick={() => onOpenAnnouncement(ann)}
-                  type="button"
-                  style={{ background: "transparent", border: "none", cursor: "pointer", width: "100%", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                >
-                  <span style={{ flex: 1, marginRight: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    <span style={{ fontSize: "0.8em", color: "var(--text-muted, #6c757d)", fontWeight: "bold" }}>
-                      [連絡] {courseDisplayName(ann.courseName)}
-                    </span>
-                    <br />
-                    <span style={{ fontSize: "0.95em" }}>{ann.title}</span>
-                  </span>
-                  <b className="announcement-date-tag" style={{ fontSize: "0.85em", color: "var(--text-muted, #6c757d)", flexShrink: 0 }}>
-                    {dueLabel(ann.created)}
-                  </b>
-                </button>
-              ))}
-              {messages.map((message) => (
-                <a className="cle-message-row" href={cleMessageUrl(message.courseId)} target="_blank" key={message.courseId}>
-                  <span>{courseDisplayName(message.courseName)}</span>
-                  <b>未読 {message.unreadCount}</b>
-                </a>
-              ))}
-            </>
-          ) : (
-            <EmptyState
-              icon={loading ? "spinner" : "mail-open"}
-              title={loading ? "取得中です" : "未読メッセージはありません"}
-              description={loading ? "CLEからメッセージを取得しています..." : "すべてのCLEメッセージを確認済みです。"}
-              variant="dashboard"
-            />
-          )}
-        </div>
-      </section>
-
-      <section className="section koan-notices-section">
-        <div className="section-heading">
-          <div>
-            <h2>KOAN新着掲示</h2>
-          </div>
-        </div>
-        <div className="koan-notices-list">
-          {latestNotices.length ? latestNotices.map((notice) => (
-            <ActivityNotice
-              notice={notice}
-              snapshotNotices={notices}
-              onOpen={onOpen}
-              key={noticeKey(notice)}
-            />
-          )) : (
-            <EmptyState
-              icon="inbox"
-              title="要確認の掲示はありません"
-              description="新しいお知らせや確認が必要な掲示はありません。"
-              variant="dashboard"
-            />
-          )}
-        </div>
-      </section>
-    </>
-  );
+  const [importantOnly, setImportantOnly] = useState(true);
+  const [messageLimit, setMessageLimit] = useState(2);
+  const [cleLimit, setCleLimit] = useState(3);
+  const [koanLimit, setKoanLimit] = useState(3);
+  const groups = homeCommunicationGroups(notices, announcements, messages);
+  const important = groups.koan.filter((item) => item.kind === "notice" && isUniversityImportant(item.notice));
+  const koanItems = importantOnly ? important : groups.koan;
+  const cleStates = [messagesState, announcementsState];
+  const list = (items: CommunicationItem[]) => <CommunicationList items={items} snapshotNotices={notices} onOpenNotice={onOpen} onOpenAnnouncement={onOpenAnnouncement} showSource={false} />;
+  const more = (label: string, remaining: number, onClick: () => void) => remaining > 0 && <button className="detail-link communication-more" type="button" onClick={onClick}>{label}をさらに表示（残り {remaining}件）</button>;
+  return <>
+    <section className="communications-section" aria-label="CLEの連絡">
+      <div className="section-heading"><h2>CLEの連絡</h2><AuthenticatedLink className="detail-link" href={CLE_MESSAGES_URL} target="_blank">CLEを開く</AuthenticatedLink></div>
+      <CollectionFeedback states={cleStates} onRetry={onRetry} hasContent={!!(groups.messages.length || groups.cle.length)} />
+      {list(groups.messages.slice(0, messageLimit))}
+      {more("未読メッセージ", groups.messages.length - messageLimit, () => setMessageLimit((value) => value + 6))}
+      {list(groups.cle.slice(0, cleLimit))}
+      {more("CLEの連絡", groups.cle.length - cleLimit, () => setCleLimit((value) => value + 6))}
+      {!groups.messages.length && !groups.cle.length && <p className="communication-empty">{cleStates.every(collectionReady) ? "CLEの連絡はありません" : "取得済みの情報にCLEの連絡はありません"}</p>}
+    </section>
+    <section className="communications-section" aria-label="KOANのお知らせ">
+      <div className="section-heading">
+        <h2>KOANのお知らせ</h2>
+        <div className="communication-heading-actions"><div className="communication-filters" role="group" aria-label="KOANのお知らせの絞り込み">
+          <button type="button" aria-pressed={!importantOnly} onClick={() => { setImportantOnly(false); setKoanLimit(3); }}>最新</button>
+          <button className="communication-important-filter" type="button" title="大学の重要指定" aria-pressed={importantOnly} onClick={() => { setImportantOnly(true); setKoanLimit(3); }}>重要</button>
+        </div><button className="detail-link" type="button" onClick={onShowNotices}>掲示を検索</button></div>
+      </div>
+      <CollectionFeedback states={[noticesState]} onRetry={onRetry} hasContent={!!groups.koan.length} />
+      {list(koanItems.slice(0, koanLimit))}
+      {!koanItems.length && <p className="communication-empty">{importantOnly ? "取得済みの情報に重要なお知らせはありません" : collectionReady(noticesState) ? "KOANのお知らせはありません" : "取得済みの情報にKOANのお知らせはありません"}</p>}
+      {more("KOANのお知らせ", koanItems.length - koanLimit, () => setKoanLimit((value) => value + 6))}
+    </section>
+  </>;
 }
 
-function ActivityNotice({
-  notice,
-  snapshotNotices,
-  onOpen,
-}: {
-  notice: Notice;
+function CommunicationList({ items, snapshotNotices, onOpenNotice, onOpenAnnouncement, showSource = true }: {
+  showSource?: boolean;
+  items: CommunicationItem[];
   snapshotNotices: Notice[];
-  onOpen: (notice: Notice) => void;
+  onOpenNotice: (notice: Notice) => void;
+  onOpenAnnouncement: (ann: CleAnnouncement) => void;
+}) {
+  return <div className="communication-list">{items.map((item) => {
+    if (item.kind === "notice") return <ActivityNotice key={item.key} notice={item.notice} snapshotNotices={snapshotNotices} onOpen={onOpenNotice} showSource={showSource} />;
+    if (item.kind === "announcement") {
+      const ann = item.announcement;
+      return <button className="communication-row" key={item.key} type="button" onClick={() => onOpenAnnouncement(ann)}>
+        <span className="communication-attention" aria-hidden="true" />
+        <span className="communication-content"><strong>{ann.title}</strong><small>{courseDisplayName(ann.courseName)}{showSource && <span className="communication-source">CLE</span>}</small></span>
+        <span className="communication-state"><time dateTime={ann.created}>{activityDateLabel(ann.created)}</time></span>
+      </button>;
+    }
+    const message = item.message;
+    return <AuthenticatedLink className="communication-row communication-message" key={item.key} href={cleMessageUrl(message.courseId)} target="_blank">
+      <span className="communication-attention">未読</span>
+      <span className="communication-content"><strong>{courseDisplayName(message.courseName)}</strong><small>本文を確認{showSource && <span className="communication-source">CLE</span>}</small></span>
+      <span className="communication-state unread">{message.unreadCount}件</span>
+    </AuthenticatedLink>;
+  })}</div>;
+}
+
+async function openNoticePage(notice: Notice, notices: Notice[], onOpen: (notice: Notice) => void) {
+  const knownUrl = getKnownNoticeUrl(notice, notices);
+  // Use the click's activation, including when lookup will need a network call.
+  const detailWindow = window.open(knownUrl || "", "_blank");
+  if (!detailWindow) throw new Error("新しいタブを開けませんでした。ブラウザのポップアップ設定を確認してください。");
+  detailWindow.opener = null;
+  if (knownUrl) {
+    onOpen(notice);
+    return;
+  }
+  detailWindow.document.title = "掲示を開いています";
+  detailWindow.document.body.textContent = "掲示のリンクを確認しています…";
+  try {
+    await ensureKoanLogin();
+    if (detailWindow.closed) return;
+    const url = await resolveNoticeUrl(notice, notices);
+    if (detailWindow.closed) return;
+    detailWindow.location.replace(url || BOARD_URL);
+    if (url) onOpen(notice);
+  } catch (error) {
+    if (!detailWindow.closed) detailWindow.location.replace(BOARD_URL);
+    throw error;
+  }
+}
+
+function ActivityNotice({ notice, snapshotNotices, onOpen, showSource }: {
+  showSource: boolean;
+  notice: Notice; snapshotNotices: Notice[]; onOpen: (notice: Notice) => void;
 }) {
   const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState("");
   const openNotice = async () => {
-    const detailWindow = window.open("", "_blank");
-    onOpen(notice);
     setOpening(true);
-    try {
-      const url = await resolveNoticeUrl(notice, snapshotNotices);
-      if (detailWindow) detailWindow.location.href = url || BOARD_URL;
-    } catch {
-      if (detailWindow) detailWindow.location.href = BOARD_URL;
-    } finally {
-      setOpening(false);
-    }
+    setOpenError("");
+    try { await openNoticePage(notice, snapshotNotices, onOpen); }
+    catch (error) { setOpenError(error instanceof Error ? error.message : String(error)); }
+    finally { setOpening(false); }
   };
-  return (
-    <button className="activity-notice" type="button" disabled={opening} onClick={openNotice}>
-      <div className="notice-chip-row">
-        <span className="notice-chip genre-chip">{notice.genre}</span>
-        {notice.unread && <span className="notice-chip state-chip">未読</span>}
-        {isImportantNotice(notice) && <span className="notice-chip state-chip important-chip">重要</span>}
-        {opening && <span className="notice-chip state-chip">取得中</span>}
-      </div>
-      <h3 className="notice-title">{notice.title}</h3>
-      <p className="notice-meta">{[notice.department, notice.period].filter(Boolean).join(" / ")}</p>
-    </button>
-  );
+  const important = isUniversityImportant(notice);
+  return <><button className={`communication-row${important ? " communication-important" : ""}`} type="button" disabled={opening} onClick={openNotice}>
+    <span className="communication-attention" title={important ? "大学の重要指定" : undefined}>{important && <>重要<span className="sr-only">（大学の指定）</span></>}</span>
+    <span className="communication-content"><strong>{notice.title}</strong><small>{[notice.genre, notice.department, notice.period].filter(Boolean).join(" / ")}{showSource && <span className="communication-source">KOAN</span>}</small></span>
+    <span className="communication-state">{opening ? "取得中" : notice.unread && <span className="unread">未読</span>}</span>
+  </button>{openError && <p className="inline-error" role="alert">{openError}</p>}</>;
+}
+
+function UpcomingChanges({ changes, courses, onSelectCourse }: {
+  changes: ChangeItem[]; courses: CourseRegistration[]; onSelectCourse: (code: string) => void;
+}) {
+  const upcoming = upcomingChanges(changes);
+  if (!upcoming.length) return null;
+  return <section className="upcoming-changes" aria-label="直近の休講・変更">
+    <div className="section-heading"><h2>直近の休講・変更</h2><span className="changes-period">今後7日間</span></div>
+    {upcoming.map((change, i) => {
+      const course = courses.find((item) => courseMatchesText(item, change.course));
+      const content = <><strong>{change.type}</strong><span>{change.course}<small>{change.date === "今週" ? "今週（日付未確定）" : change.date} {change.period && `${change.period.replace(/限$/, "")}限`}</small></span></>;
+      return course ? <button type="button" className="upcoming-change-row" key={i} onClick={() => onSelectCourse(course.code)}>{content}</button> : <div className="upcoming-change-row" key={i}>{content}</div>;
+    })}
+  </section>;
 }
 
 function ReferenceDesk({
   allNotices,
   genre,
   notices,
+  loading,
+  error,
+  partial,
+  loaded,
   onGenreChange,
   onOpen,
   onQueryChange,
   onScopeChange,
   query,
   scope,
-  snapshotUpdatedAt,
 }: {
   allNotices: Notice[];
   genre: string;
   notices: Notice[];
+  loading: boolean;
+  error: string;
+  partial: string;
+  loaded: boolean;
   onGenreChange: (value: string) => void;
   onOpen: (notice: Notice) => void;
   onQueryChange: (value: string) => void;
   onScopeChange: (value: string) => void;
   query: string;
   scope: string;
-  snapshotUpdatedAt: string | null;
 }) {
   const summary = {
     all: allNotices.length,
     unread: allNotices.filter((notice) => notice.unread).length,
     attention: allNotices.filter((notice) => attentionScore(notice) >= 120).length,
     important: allNotices.filter(isImportantNotice).length,
+    benefits: allNotices.filter((notice) => noticeBenefit(notice)).length,
   };
   const tabs = [
+    ["important", "重要", summary.important],
     ["attention", "要確認", summary.attention],
     ["unread", "未読", summary.unread],
-    ["important", "重要", summary.important],
+    ["benefits", "特典・謝礼", summary.benefits],
     ["all", "すべて", summary.all],
   ] as const;
 
   return (
     <div className="reference-page">
-      <section className="notice-summary" aria-label="掲示サマリー">
-        <div>
-          <span>全</span>
-          <strong>{summary.all}</strong>
-          <small>件</small>
-        </div>
-        <div className="needs-action">
-          <span>未読</span>
-          <strong>{summary.unread}</strong>
-          <small>件</small>
-        </div>
-        <div className="needs-action">
-          <span>要確認</span>
-          <strong>{summary.attention}</strong>
-          <small>件</small>
-        </div>
-        <p>同期 {fmtTime(snapshotUpdatedAt)}</p>
-      </section>
-
       <section className="notice-operations" aria-label="掲示の絞り込み">
-        <div className="notice-scope-tabs" role="tablist" aria-label="状態">
+        <div className="notice-scope-tabs" role="group" aria-label="状態で絞り込む">
           {tabs.map(([value, label, count]) => (
             <button
-              aria-selected={scope === value}
+              aria-pressed={scope === value}
               className={scope === value ? "active" : ""}
               key={value}
               onClick={() => onScopeChange(value)}
-              role="tab"
               type="button"
             >
               <span>{label}</span>
@@ -3329,8 +4356,8 @@ function ReferenceDesk({
           ))}
         </div>
         <div className="notice-tools">
-          <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="掲示を検索" />
-          <select value={genre} onChange={(event) => onGenreChange(event.target.value)}>
+          <input aria-label="掲示を検索" value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="掲示を検索" />
+          <select aria-label="ジャンルで絞り込む" value={genre} onChange={(event) => onGenreChange(event.target.value)}>
             <option value="">全ジャンル</option>
             {GENRES.map((item) => <option key={item}>{item}</option>)}
           </select>
@@ -3338,53 +4365,110 @@ function ReferenceDesk({
       </section>
 
       <section className="notice-list-section" aria-label="掲示一覧">
-        <NoticeList allNotices={allNotices} notices={notices} onOpen={onOpen} />
+        <NoticeList
+          allNotices={allNotices}
+          error={error}
+          partial={partial}
+          loaded={loaded}
+          loading={loading}
+          showReasons={scope === "attention"}
+          showBenefits={scope === "benefits"}
+          notices={notices}
+          onOpen={onOpen}
+        />
       </section>
     </div>
   );
 }
 
 function NoticeList({
+  showBenefits,
+  showReasons,
   allNotices,
+  error,
+  partial,
+  loaded,
+  loading,
   notices,
   onOpen,
 }: {
+  showReasons: boolean;
+  showBenefits: boolean;
   allNotices: Notice[];
+  error: string;
+  partial: string;
+  loaded: boolean;
+  loading: boolean;
   notices: Notice[];
   onOpen: (notice: Notice) => void;
 }) {
   const [opening, setOpening] = useState("");
-
+  const [openError, setOpenError] = useState("");
   const openNotice = async (notice: Notice) => {
-    const key = `${notice.title}-${notice.period}`;
-    const detailWindow = window.open("", "_blank");
-    onOpen(notice);
-    setOpening(key);
-    try {
-      const url = await resolveNoticeUrl(notice, allNotices);
-      if (detailWindow) detailWindow.location.href = url || BOARD_URL;
-    } catch {
-      if (detailWindow) detailWindow.location.href = BOARD_URL;
-    } finally {
-      setOpening("");
-    }
+    setOpening(noticeKey(notice));
+    setOpenError("");
+    try { await openNoticePage(notice, allNotices, onOpen); }
+    catch (error) { setOpenError(error instanceof Error ? error.message : String(error)); }
+    finally { setOpening(""); }
   };
 
-  if (!notices.length) {
-    return (
+  const state = loading && !notices.length
+    ? (
       <EmptyState
-        icon="search"
-        title="一致する掲示はありません"
-        description="検索キーワードやカテゴリの条件に合う掲示が見つかりませんでした。"
+        icon="spinner"
+        title="掲示を取得しています"
+        description="画面を切り替えても取得は続きます。"
+        headingLevel={2}
         variant="normal"
       />
-    );
-  }
+    )
+      : error && !notices.length
+      ? (
+        <EmptyState
+          icon="info"
+          title="掲示を読み込めませんでした"
+          description="ヘッダーの同期の詳細を確認してください。"
+          headingLevel={2}
+          variant="normal"
+        />
+      )
+      : partial && !notices.length
+        ? (
+          <EmptyState
+            icon="info"
+            title="掲示を一部取得できませんでした"
+            description="ヘッダーの同期の詳細を確認してください。"
+            headingLevel={2}
+            variant="normal"
+          />
+        )
+      : !loaded && !notices.length
+        ? (
+          <EmptyState
+            icon="inbox"
+            title="まだ取得していません"
+            description="右上の更新ボタンからKOANの掲示を読み込めます。"
+            headingLevel={2}
+            variant="normal"
+          />
+        )
+        : !notices.length
+          ? (
+            <EmptyState
+              icon={allNotices.length ? "search" : "inbox"}
+              title={allNotices.length ? "条件に一致する掲示はありません" : "掲示はありません"}
+              description={allNotices.length ? "検索キーワードや絞り込み条件を変更してください。" : undefined}
+              headingLevel={2}
+              variant="normal"
+            />
+          )
+          : null;
+  if (state) return state;
   const importantNotices = notices.filter(isImportantNotice);
   const otherNotices = notices.filter((notice) => !isImportantNotice(notice));
   const showGroups = Boolean(importantNotices.length && otherNotices.length);
-  const renderRows = (items: Notice[]) => items.slice(0, 300).map((notice) => {
-    const key = `${notice.title}-${notice.period}`;
+  const renderRows = (items: Notice[]) => items.map((notice) => {
+    const key = noticeKey(notice);
     const openingThis = opening === key;
     return (
       <button
@@ -3401,12 +4485,16 @@ function NoticeList({
         <div className="notice-content">
           <div className="notice-row-meta">
             <span className="notice-chip genre-chip">{notice.genre}</span>
-            {attentionScore(notice) >= 120 && <span className="notice-chip state-chip important-chip">要確認</span>}
+            {notice.unread && <span className="notice-chip state-chip">未読</span>}
+            {isImportantNotice(notice) && <span className="notice-chip state-chip important-chip" title="大学の重要指定">重要</span>}
+            {!showReasons && !isImportantNotice(notice) && attentionScore(notice) >= 120 && <span className="notice-chip candidate-chip" title={noticeAttentionReason(notice)}>要確認</span>}
             {notice.isNew && <span className="notice-chip state-chip">新着</span>}
             {openingThis && <span className="notice-chip state-chip">取得中</span>}
           </div>
           <h3 title={notice.title}>{notice.title}</h3>
           <p>{[notice.department, notice.author].filter(Boolean).join(" / ") || "発信元未取得"}</p>
+          {showReasons && scopeNoticeReason(notice)}
+          {showBenefits && noticeBenefit(notice) && <p className="notice-benefit-reason">{noticeBenefit(notice)!.label}</p>}
         </div>
         <time>{notice.period || "期間未取得"}</time>
       </button>
@@ -3415,10 +4503,11 @@ function NoticeList({
 
   return (
     <div className="notice-list">
+      {openError && <p className="inline-error" role="alert">{openError}</p>}
       {showGroups ? (
         <>
           <div className="notice-group-heading">
-            <h2>重要掲示</h2>
+            <h2>重要</h2>
             <span>{importantNotices.length}件</span>
           </div>
           {renderRows(importantNotices)}
