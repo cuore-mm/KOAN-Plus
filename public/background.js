@@ -36,6 +36,8 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 let koanLoginTask;
 let cleLoginTask;
+const loginTabs = new Map();
+const LOGIN_TAB_KEY_PREFIX = "authLoginTab:";
 const manualFlows = new Map();
 let pendingMfa = null;
 const PENDING_MFA_KEY = "authPendingMfa";
@@ -805,13 +807,55 @@ async function returnToDashboard(flowTabId) {
   await chrome.tabs.remove(flowTabId).catch(() => {});
 }
 
-async function openLoginTab(url, record, sender, activeWhenManual = true) {
+async function rememberLoginTab(service, tabId) {
+  // Keep an explicit cleared value so a failed session.remove cannot revive
+  // an old tab on the next attempt in this worker.
+  loginTabs.set(service, Number.isInteger(tabId) ? tabId : null);
+  if (!chrome.storage?.session) return;
+  const key = `${LOGIN_TAB_KEY_PREFIX}${service}`;
+  try {
+    if (Number.isInteger(tabId)) await chrome.storage.session.set({ [key]: tabId });
+    else await chrome.storage.session.remove(key);
+  } catch {
+    // Keep the in-memory fallback if session storage is unavailable.
+  }
+}
+
+async function findLoginTab(service) {
+  let tabId = loginTabs.get(service);
+  if (!loginTabs.has(service) && chrome.storage?.session) {
+    const key = `${LOGIN_TAB_KEY_PREFIX}${service}`;
+    const stored = await chrome.storage.session.get(key).catch(() => ({}));
+    tabId = stored[key];
+  }
+  if (!Number.isInteger(tabId)) return null;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  try {
+    const url = new URL(tab?.pendingUrl || tab?.url);
+    const serviceOrigin = service === "koan" ? new URL(KOAN_PORTAL_URL).origin : CLE_ORIGIN;
+    if ([serviceOrigin, AUTH_ORIGIN, MFA_ORIGIN].includes(url.origin)) {
+      loginTabs.set(service, tabId);
+      return tab;
+    }
+  } catch { /* A closed tab or an unrelated navigation is no longer our login flow. */ }
+  await rememberLoginTab(service, null);
+  return null;
+}
+
+async function openLoginTab(url, record, sender, activeWhenManual = true, existingTab = null) {
   const manual = !record?.enabled || !record.payload;
   const guideMfa = Boolean(record?.enabled && record.payload && !record.mfaEnabled);
-  const tab = await chrome.tabs.create({
-    url,
-    active: manual ? activeWhenManual : false,
-  });
+  const service = url === KOAN_PORTAL_URL ? "koan" : "cle";
+  let tab = await findLoginTab(service);
+  // A polling timeout does not mean the user has finished entering their OTP.
+  // Reuse only a tab we own, without navigating away from its current form.
+  if (!tab) {
+    const options = { url, active: manual ? activeWhenManual : false };
+    tab = existingTab?.id
+      ? await chrome.tabs.update(existingTab.id, options)
+      : await chrome.tabs.create(options);
+    await rememberLoginTab(service, tab.id);
+  }
   if ((manual || guideMfa) && tab.id) {
     await writeManualFlow(tab.id, { returnTabId: sender?.tab?.id });
   }
@@ -823,6 +867,7 @@ const KOAN_LOGIN_POLL_INTERVAL_MS = 5 * 1000;
 async function ensureKoanLogin(record, sender, requireTab = false) {
   const initialProbe = await probeKoanLogin();
   if (initialProbe.ok) {
+    if (!koanLoginTask) await rememberLoginTab("koan", null);
     const tab = requireTab ? await ensureKoanTab(false) : null;
     return {
       ok: true,
@@ -841,8 +886,11 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
   }
 
   koanLoginTask = (async () => {
-    const { manual, tab } = await openLoginTab(KOAN_PORTAL_URL, record, sender);
+    let tab;
     try {
+      const opened = await openLoginTab(KOAN_PORTAL_URL, record, sender);
+      const manual = opened.manual;
+      tab = opened.tab;
       const deadline = Date.now() + 90 * 1000;
       let nextProbeAt = Date.now() + KOAN_LOGIN_POLL_INTERVAL_MS;
       while (Date.now() < deadline) {
@@ -856,6 +904,7 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
         const probe = await probeKoanLogin();
         nextProbeAt = Date.now() + KOAN_LOGIN_POLL_INTERVAL_MS;
         if (probe.ok) {
+          await rememberLoginTab("koan", null);
           if (tab.id) {
             const flow = await readManualFlow(tab.id);
             const shouldReturn = Boolean(flow);
@@ -884,7 +933,7 @@ async function ensureKoanLogin(record, sender, requireTab = false) {
         ? "認証が完了していません。開いた認証画面でログインしてください。"
         : "KOANの自動ログインが完了しませんでした。開いた認証画面を確認してから、もう一度更新してください。");
     } finally {
-      if (tab.id) await clearManualFlow(tab.id);
+      if (tab?.id) await clearManualFlow(tab.id);
       koanLoginTask = undefined;
     }
   })();
@@ -993,6 +1042,7 @@ async function focusPendingMfaTab() {
 async function ensureCleLogin(record, sender, force = false) {
   let tab = !force ? await findReadyCleTab() : await findCleTab();
   if (!force && tab?.id) {
+    if (!cleLoginTask) await rememberLoginTab("cle", null);
     return { ok: true, loginStarted: false, tabId: tab.id };
   }
   if (!tab?.id) tab = await findCleTab();
@@ -1001,16 +1051,8 @@ async function ensureCleLogin(record, sender, force = false) {
 
   cleLoginTask = (async () => {
     const manual = !record?.enabled || !record.payload;
-    const guideMfa = Boolean(record?.enabled && record.payload && !record.mfaEnabled);
-    if (!tab?.id) {
-      ({ tab } = await openLoginTab(CLE_HOME_URL, record, sender));
-    } else {
-      if (manual || guideMfa) {
-        await writeManualFlow(tab.id, { returnTabId: sender?.tab?.id });
-      }
-      await chrome.tabs.update(tab.id, { url: CLE_HOME_URL, active: manual });
-    }
     try {
+      ({ tab } = await openLoginTab(CLE_HOME_URL, record, sender, true, tab));
       const deadline = Date.now() + 45 * 1000;
       while (Date.now() < deadline) {
         await wait(1000);
@@ -1018,6 +1060,7 @@ async function ensureCleLogin(record, sender, force = false) {
           throw new Error("CLE認証画面が閉じられたため、更新を中止しました。");
         }
         if (tab.id && await cleApiReady(tab.id)) {
+          await rememberLoginTab("cle", null);
           const flow = await readManualFlow(tab.id);
           if (flow) {
             await clearManualFlow(tab.id);
